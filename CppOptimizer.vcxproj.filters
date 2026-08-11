@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="资源文件">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="include\common\error.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="include\common\unique_resource.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="include\memory\memory_tuner.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="include\metrics\memory_metrics.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="include\platform\native_api.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\common\error.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\main.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\memory\memory_tuner.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\metrics\memory_metrics.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\platform\native_api.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="CppOptimizer.slnx" />
+    <None Include="README.md" />
+    <None Include="SECURITY.md" />
+    <None Include="CONTRIBUTING.md" />
+    <None Include="CHANGELOG.md" />
+    <None Include=".editorconfig" />
+    <None Include=".gitignore" />
+    <None Include="config\config.example.toml" />
+    <None Include="CMakeLists.txt" />
+    <None Include="CMakePresets.json" />
+    <None Include="tests\common_tests.cpp" />
+    <None Include="tests\memory_metrics_tests.cpp" />
+    <None Include="tests\memory_tests.cpp" />
+    <None Include="docs\00-project-ai-learning-harness.md" />
+    <None Include="docs\01-help-documentation-guide.md" />
+    <None Include="docs\02-overall-architecture.md" />
+    <None Include="docs\03-module-config-manager.md" />
+    <None Include="docs\04-module-metrics-collector.md" />
+    <None Include="docs\05-module-process-watcher.md" />
+    <None Include="docs\06-module-policy-engine.md" />
+    <None Include="docs\07-module-memory-tuner.md" />
+    <None Include="docs\08-module-power-locker.md" />
+    <None Include="docs\09-module-gpu-heartbeat.md" />
+    <None Include="docs\10-module-service-host.md" />
+    <None Include="docs\11-learning-roadmap.md" />
+    <None Include="docs\12-namespace-module-layout.md" />
+    <None Include="docs\13-documentation-review-and-corrections.md" />
+    <None Include="docs\14-implementation-document-index.md" />
+    <None Include="docs\15-module-logger.md" />
+    <None Include="docs\16-module-user-activity-detector.md" />
+    <None Include="docs\17-module-priority-booster.md" />
+    <None Include="docs\18-module-scheduler-tuner.md" />
+    <None Include="docs\19-module-disk-cache-maintainer.md" />
+    <None Include="docs\20-user-native-kernel-boundary-learning-guide.md" />
+    <None Include="docs\21-formal-engineering-handbook.md" />
+    <None Include="docs\22-error-resource-concurrency-guide.md" />
+    <None Include="docs\23-dangerous-operation-policy-and-threat-model.md" />
+    <None Include="docs\24-test-debug-release-playbook.md" />
+    <None Include="docs\25-module-document-template.md" />
+    <None Include="docs\26-ai-session-task-record-template.md" />
+    <None Include="docs\sessions\2026-08-10-memory-read-only-baseline.md" />
+    <None Include="works\README.md" />
+    <None Include="work.md" />
+    <None Include="works\2026-08-10-MEM-001-read-only-memory-status.md" />
+    <None Include="works\2026-08-11-MEM-003-format-bytes-and-snapshot-freshness.md" />
+  </ItemGroup>
+</Project>

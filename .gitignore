@@ -1,0 +1,54 @@
+# Visual Studio / MSBuild
+.vs/
+.vscode/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+Debug/
+Release/
+x64/
+x86/
+out/
+docs/
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Build products
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.idb
+*.ipdb
+*.iobj
+*.exe
+*.dll
+*.lib
+*.exp
+*.sys
+
+# Runtime artifacts
+logs/
+*.log
+*.etl
+*.dmp
+*.csv
+recovery-state.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# Local dependencies/config
+vcpkg_installed/
+config.local.toml
+
+# Local learning workspace (never commit)
+/work.md
+/works/
+

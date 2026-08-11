@@ -1,0 +1,50 @@
+version = 1
+
+[application]
+mode = "observe"              # observe / balanced / experimental
+safe_mode_on_recovery_error = true
+
+[logging]
+level = "info"
+directory = ""                # 空表示使用 LocalAppData 下的默认目录
+max_file_mb = 10
+max_files = 5
+console = true
+
+[layers]
+monitoring = true
+maintenance = false
+emergency = false
+
+[power]
+execution_required = true
+display_required = false
+switch_power_scheme = false    # R2：默认关闭
+
+[priority]
+enabled = false
+max_level = "above_normal"     # none / above_normal / high；无 realtime
+
+[memory]
+query_enabled = true
+scheduled_clean_enabled = false
+allow_native_write = false     # R3：默认关闭
+max_clean_level = "light"
+
+[gpu_heartbeat]
+enabled = false                # R3 Experimental
+max_measured_load_percent = 1.0
+
+[scheduler]
+enabled = false                # Experimental
+
+[disk_cache]
+enabled = false                # Planned
+
+# 每个游戏规则必须有稳定 id。实际生产配置建议同时限制完整安装路径。
+[[games]]
+id = "example-game"
+display_name = "Example Game"
+process_names = ["ExampleGame.exe"]
+window_title_contains = ""
+pause_when_background = true

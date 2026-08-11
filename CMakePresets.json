@@ -1,0 +1,57 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-x64-debug",
+      "displayName": "Windows x64 Debug (safe baseline)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "OPTIMIZER_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "windows-x64-release",
+      "displayName": "Windows x64 Release (safe baseline)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "OPTIMIZER_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-debug",
+      "configurePreset": "windows-x64-debug"
+    },
+    {
+      "name": "build-release",
+      "configurePreset": "windows-x64-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-debug",
+      "configurePreset": "windows-x64-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
