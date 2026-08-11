@@ -2,11 +2,11 @@
 
 ## 开发前必读
 
-1. `docs/20-user-native-kernel-boundary-learning-guide.md`；
-2. `docs/21-formal-engineering-handbook.md`；
-3. `docs/22-error-resource-concurrency-guide.md`；
-4. `docs/23-dangerous-operation-policy-and-threat-model.md`；
-5. 对应模块的设计和 include/source 学习文档。
+1. `docs/design/engineering/20-user-native-kernel-boundary-learning-guide.md`；
+2. `docs/design/engineering/21-formal-engineering-handbook.md`；
+3. `docs/design/engineering/22-error-resource-concurrency-guide.md`；
+4. `docs/design/engineering/23-dangerous-operation-policy-and-threat-model.md`；
+5. 对应模块的设计文档（`docs/design/modules/`）。
 
 ## 工作流
 

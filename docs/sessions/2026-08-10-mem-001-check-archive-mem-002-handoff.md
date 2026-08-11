@@ -1,6 +1,6 @@
 # 会话交接记录：MEM-001 检查与归档、MEM-002 推进
 
-> 依据 [26-ai-session-task-record-template.md](../26-ai-session-task-record-template.md) 的“会话结束交接”节；真实状态以仓库为准。
+> 依据 [26-ai-session-task-record-template.md](../design/guides/26-ai-session-task-record-template.md) 的“会话结束交接”节；真实状态以仓库为准。
 
 ## 1. 会话元信息
 
