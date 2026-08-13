@@ -95,6 +95,106 @@ bool TestAggregateTenThousandFullLoadSamplesNoOverflow() {
            result.Value().avgLoadPercent == 100;
 }
 
+bool TestShareRejectsEmptyWindow() {
+    std::vector<optimizer::metrics::MemorySample> samples;
+    auto result = optimizer::metrics::ShareOfLoadBelow(samples, 50);
+    return !result.HasValue() &&
+           result.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
+}
+
+bool TestShareRejectsThresholdAboveOneHundred() {
+    std::vector<optimizer::metrics::MemorySample> samples = {
+        optimizer::metrics::MemorySample{10, 0}};
+    auto result = optimizer::metrics::ShareOfLoadBelow(samples, 101);
+    return !result.HasValue() &&
+           result.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
+}
+
+bool TestShareAllBelowThreshold() {
+    std::vector<optimizer::metrics::MemorySample> samples = {
+        optimizer::metrics::MemorySample{10, 0},
+        optimizer::metrics::MemorySample{20, 0},
+        optimizer::metrics::MemorySample{30, 0}};
+    auto result = optimizer::metrics::ShareOfLoadBelow(samples, 50);
+    return result.HasValue() && result.Value() == 100;
+}
+
+bool TestShareEqualThresholdIsNotCounted() {
+    // Strictly below: load == threshold is excluded, so {40, 50, 60} below 50
+    // is only one sample (40), and below 60 is two samples (40, 50).
+    std::vector<optimizer::metrics::MemorySample> samples = {
+        optimizer::metrics::MemorySample{40, 0},
+        optimizer::metrics::MemorySample{50, 0},
+        optimizer::metrics::MemorySample{60, 0}};
+    auto below50 = optimizer::metrics::ShareOfLoadBelow(samples, 50);
+    auto below60 = optimizer::metrics::ShareOfLoadBelow(samples, 60);
+    return below50.HasValue() && below60.HasValue() &&
+           below50.Value() == 33 && below60.Value() == 67;
+}
+
+bool TestShareMixedWindow() {
+    // {10, 30, 70, 90} below 50: two samples of four => 50%.
+    std::vector<optimizer::metrics::MemorySample> samples = {
+        optimizer::metrics::MemorySample{10, 0},
+        optimizer::metrics::MemorySample{30, 0},
+        optimizer::metrics::MemorySample{70, 0},
+        optimizer::metrics::MemorySample{90, 0}};
+    auto result = optimizer::metrics::ShareOfLoadBelow(samples, 50);
+    return result.HasValue() && result.Value() == 50;
+}
+
+bool TestShareRoundsHalfUp() {
+    // 1 of 3 below 50 => 33 (33.3 rounds down), 2 of 3 below 50 => 67 (66.6 rounds up).
+    std::vector<optimizer::metrics::MemorySample> oneOfThree = {
+        optimizer::metrics::MemorySample{10, 0},
+        optimizer::metrics::MemorySample{60, 0},
+        optimizer::metrics::MemorySample{70, 0}};
+    std::vector<optimizer::metrics::MemorySample> twoOfThree = {
+        optimizer::metrics::MemorySample{10, 0},
+        optimizer::metrics::MemorySample{20, 0},
+        optimizer::metrics::MemorySample{70, 0}};
+    auto a = optimizer::metrics::ShareOfLoadBelow(oneOfThree, 50);
+    auto b = optimizer::metrics::ShareOfLoadBelow(twoOfThree, 50);
+    return a.HasValue() && b.HasValue() && a.Value() == 33 && b.Value() == 67;
+}
+
+bool TestShareIsOrderIndependent() {
+    std::vector<optimizer::metrics::MemorySample> a = {
+        optimizer::metrics::MemorySample{10, 0},
+        optimizer::metrics::MemorySample{70, 0},
+        optimizer::metrics::MemorySample{40, 0}};
+    std::vector<optimizer::metrics::MemorySample> b = {
+        optimizer::metrics::MemorySample{70, 0},
+        optimizer::metrics::MemorySample{40, 0},
+        optimizer::metrics::MemorySample{10, 0}};
+    auto ra = optimizer::metrics::ShareOfLoadBelow(a, 50);
+    auto rb = optimizer::metrics::ShareOfLoadBelow(b, 50);
+    return ra.HasValue() && rb.HasValue() && ra.Value() == rb.Value();
+}
+
+bool TestShareThresholdZeroAndFullLoadExclusion() {
+    // threshold 0 is legal: loadPercent >= 0, so strictly below 0 is never
+    // true => share is always 0.
+    std::vector<optimizer::metrics::MemorySample> samples = {
+        optimizer::metrics::MemorySample{0, 0},
+        optimizer::metrics::MemorySample{50, 0}};
+    auto atZero = optimizer::metrics::ShareOfLoadBelow(samples, 0);
+    // threshold 100 excludes only full-load samples: {0, 100} below 100 is 1/2.
+    std::vector<optimizer::metrics::MemorySample> fullLoad = {
+        optimizer::metrics::MemorySample{0, 0},
+        optimizer::metrics::MemorySample{100, 0}};
+    auto atOneHundred = optimizer::metrics::ShareOfLoadBelow(fullLoad, 100);
+    return atZero.HasValue() && atOneHundred.HasValue() &&
+           atZero.Value() == 0 && atOneHundred.Value() == 50;
+}
+
+bool TestShareTenThousandSamplesNoOverflow() {
+    std::vector<optimizer::metrics::MemorySample> samples(
+        10'000, optimizer::metrics::MemorySample{40, 0});
+    auto result = optimizer::metrics::ShareOfLoadBelow(samples, 50);
+    return result.HasValue() && result.Value() == 100;
+}
+
 } // namespace
 
 int wmain() {
@@ -114,5 +214,14 @@ int wmain() {
     run(L"Window average rounds half up", &TestAggregateAverageRoundsHalfUp);
     run(L"Window aggregation is order independent", &TestAggregateIsOrderIndependent);
     run(L"Window 10000 full-load samples do not overflow", &TestAggregateTenThousandFullLoadSamplesNoOverflow);
+    run(L"Share rejects empty sample series", &TestShareRejectsEmptyWindow);
+    run(L"Share rejects threshold above 100", &TestShareRejectsThresholdAboveOneHundred);
+    run(L"Share all below threshold", &TestShareAllBelowThreshold);
+    run(L"Share equal threshold is not counted", &TestShareEqualThresholdIsNotCounted);
+    run(L"Share mixed window", &TestShareMixedWindow);
+    run(L"Share rounds half up", &TestShareRoundsHalfUp);
+    run(L"Share is order independent", &TestShareIsOrderIndependent);
+    run(L"Share threshold 0 and full-load exclusion", &TestShareThresholdZeroAndFullLoadExclusion);
+    run(L"Share 10000 samples do not overflow", &TestShareTenThousandSamplesNoOverflow);
     return failed == 0 ? 0 : 1;
 }

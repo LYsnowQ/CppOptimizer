@@ -1,4 +1,5 @@
 #include "common/error.hpp"
+#include "logger/logger.hpp"
 #include "memory/memory_tuner.hpp"
 #include "metrics/memory_metrics.hpp"
 #include "platform/native_api.hpp"
@@ -51,17 +52,32 @@ int RunStatus() {
     return 0;
 }
 
-int RunObserve(std::wstring_view secondsText) {
+int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
     // Foreground, bounded, user-invoked observation: no background thread, no
     // periodic task, no system writes. This is metrics sampling, not polling a
     // cleaner; the red zone rules for automatic memory cleaning do not apply.
     constexpr std::uint32_t kMaxSeconds = 60;
+    constexpr std::uint32_t kDefaultLowLoadThreshold = 50;
     const std::wstring secondsTextCopy(secondsText);
     const std::uint32_t seconds = static_cast<std::uint32_t>(
         std::wcstoul(secondsTextCopy.c_str(), nullptr, 10));
     if (seconds == 0 || seconds > kMaxSeconds) {
         std::wcerr << L"  --observe seconds must be in 1.." << kMaxSeconds << L"\n";
         return 2;
+    }
+
+    // Optional low-load threshold (0..100, default 50). Parsing lives in the
+    // command layer only; the pure function re-validates the domain.
+    std::uint32_t threshold = kDefaultLowLoadThreshold;
+    if (!thresholdText.empty()) {
+        const std::wstring thresholdTextCopy(thresholdText);
+        const std::uint32_t parsed = static_cast<std::uint32_t>(
+            std::wcstoul(thresholdTextCopy.c_str(), nullptr, 10));
+        if (parsed > 100) {
+            std::wcerr << L"  --observe threshold must be in 0..100\n";
+            return 2;
+        }
+        threshold = parsed;
     }
 
     const auto deadline = std::chrono::steady_clock::now() +
@@ -95,6 +111,15 @@ int RunObserve(std::wstring_view secondsText) {
         return 2;
     }
 
+    auto share = optimizer::metrics::ShareOfLoadBelow(samples, threshold);
+    if (!share) {
+        const auto& error = share.ErrorValue();
+        std::wcerr << L"  low-load share failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+
     const auto& r = report.Value();
     std::wcout << L"Memory observation window (read-only, foreground, " << seconds
                << L" s)\n";
@@ -104,6 +129,29 @@ int RunObserve(std::wstring_view secondsText) {
     std::wcout << L"  available    : min "
                << optimizer::memory::FormatBytes(r.minAvailableBytes) << L" / max "
                << optimizer::memory::FormatBytes(r.maxAvailableBytes) << L"\n";
+    std::wcout << L"  load < " << threshold << L"%   : " << share.Value()
+               << L"% of samples\n";
+    return 0;
+}
+
+int RunLogCommand(int argc, wchar_t* argv[]) {
+    // --log <module> <message...>: one synchronous Info record to stderr.
+    // Read-only, foreground, no background thread; message text is never
+    // treated as a command. At least one message token is required.
+    if (argc < 4) {
+        std::wcerr << L"  --log requires a module and a message\n";
+        return 2;
+    }
+    std::wstring message;
+    for (int i = 3; i < argc; ++i) {
+        if (i > 3) {
+            message.push_back(L' ');
+        }
+        message.append(argv[i]);
+    }
+    optimizer::logger::Logger logger;
+    logger.SetStderrSink();
+    logger.Write(optimizer::logger::LogLevel::Info, argv[2], message);
     return 0;
 }
 
@@ -146,7 +194,9 @@ void PrintUsage() {
         << L"Usage:\n"
         << L"  CppOptimizer.exe --diagnose   Show safe, read-only platform diagnostics\n"
         << L"  CppOptimizer.exe --status     Show one read-only memory snapshot\n"
-        << L"  CppOptimizer.exe --observe <s> Sample memory each second for 1..60 s\n"
+        << L"  CppOptimizer.exe --observe <s> [threshold] Sample each second for 1..60 s;\n"
+        << L"                             optional low-load threshold 0..100 (default 50)\n"
+        << L"  CppOptimizer.exe --log <module> <message...> Write one Info log line to stderr\n"
         << L"                             (read-only, foreground, bounded)\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
@@ -163,7 +213,13 @@ int wmain(int argc, wchar_t* argv[]) {
             return RunStatus();
         }
         if (argc == 3 && std::wstring_view(argv[1]) == L"--observe") {
-            return RunObserve(argv[2]);
+            return RunObserve(argv[2], L"");
+        }
+        if (argc == 4 && std::wstring_view(argv[1]) == L"--observe") {
+            return RunObserve(argv[2], argv[3]);
+        }
+        if (argc >= 3 && std::wstring_view(argv[1]) == L"--log") {
+            return RunLogCommand(argc, argv);
         }
         PrintUsage();
         return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;

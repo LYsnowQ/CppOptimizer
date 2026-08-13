@@ -36,4 +36,15 @@ struct MemoryWindowReport {
 [[nodiscard]] common::Result<MemoryWindowReport> AggregateMemoryWindow(
     std::span<const MemorySample> samples);
 
+// Percent (0..100) of samples whose loadPercent is strictly below
+// thresholdPercent, rounded half-up, integer-only, order-independent, no
+// allocation. thresholdPercent must be in [0, 100] (0 is legal: the share is
+// then always 0 because loadPercent >= 0; 100 excludes only full-load samples).
+// An empty window or a threshold above 100 is a Validation error: a zero-count
+// denominator or an out-of-domain threshold must not masquerade as a result.
+// Overflow-safe: count <= N makes count * 100 <= 100 * N, the same bound as the
+// window load sum in AggregateMemoryWindow.
+[[nodiscard]] common::Result<std::uint32_t> ShareOfLoadBelow(
+    std::span<const MemorySample> samples, std::uint32_t thresholdPercent);
+
 } // namespace optimizer::metrics

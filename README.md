@@ -53,7 +53,8 @@ ctest --preset test-debug
 ```text
 CppOptimizer.exe --diagnose     平台与 Native API 能力探测（只读）
 CppOptimizer.exe --status       单次只读内存快照
-CppOptimizer.exe --observe <s>  每秒采样内存并输出窗口报告（1–60 秒，前台有界，只读）
+CppOptimizer.exe --observe <s> [threshold]  每秒采样并输出窗口报告（1–60 秒，前台有界，只读；可选低负载阈值 0..100，默认 50）
+CppOptimizer.exe --log <module> <message...>  写一条 Info 日志到 stderr（同步，只读）
 CppOptimizer.exe --help         帮助信息
 ```
 
@@ -73,6 +74,17 @@ Memory observation window (read-only, foreground, 3 s)
   samples      : 3
   load %       : min 61 / avg 61 / max 61
   available    : min 12.2 GiB / max 12.2 GiB
+  load < 50%   : 100% of samples
+
+> CppOptimizer.exe --observe 5 80
+Memory observation window (read-only, foreground, 5 s)
+  samples      : 5
+  load %       : min 58 / avg 60 / max 63
+  available    : min 12.1 GiB / max 12.4 GiB
+  load < 80%   : 100% of samples
+
+> CppOptimizer.exe --log memory "hello"
+2026-08-13 20:21:04.746 [INFO] memory: hello
 ```
 
 ## 测试
@@ -81,13 +93,13 @@ Memory observation window (read-only, foreground, 3 s)
 ctest --preset test-debug
 ```
 
-当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）。
+当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）、低负载占比（严格小于语义、阈值 0/100 边界、round-half-up）、结构化日志（级别过滤、格式化纯函数、文件 sink 与 RAII 关闭、失败降级不递归、并发写）。
 
 ## 项目状态与路线图
 
 **当前阶段**：工程基线与只读观测。
 
-- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合；
+- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）；
 - 规划中：Logger → ConfigManager → 指标采集（PDH）→ ProcessWatcher → PolicyEngine 只读决策 → 低风险执行（PowerLocker / PriorityBooster）→ Agent/Service 形态；
 - 实验性：内存清理、GPU 心跳、调度调整等模块默认关闭，仅在门禁、测试与审计就绪后评估。
 

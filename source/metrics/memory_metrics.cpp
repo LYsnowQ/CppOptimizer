@@ -46,4 +46,33 @@ namespace optimizer::metrics {
         return common::Result<MemoryWindowReport>::Success(std::move(report));
     }
 
+    common::Result<std::uint32_t> ShareOfLoadBelow(
+        std::span<const MemorySample> samples, std::uint32_t thresholdPercent) {
+        if (samples.empty()) {
+            return common::Result<std::uint32_t>::Failure(
+                common::Error::Validation(
+                    "ShareOfLoadBelow.samples",
+                    L"An observation window must contain at least one sample"));
+        }
+        if (thresholdPercent > 100) {
+            return common::Result<std::uint32_t>::Failure(
+                common::Error::Validation(
+                    "ShareOfLoadBelow.thresholdPercent",
+                    L"Threshold must be in the range 0 to 100"));
+        }
+
+        // Strictly below: loadPercent == thresholdPercent is NOT counted.
+        // count <= N, so count * 100 <= 100 * N, the same overflow bound as the
+        // window load sum; (count * 100 + N / 2) / N is round-half-up.
+        const auto count = static_cast<std::size_t>(std::count_if(
+            samples.begin(), samples.end(),
+            [thresholdPercent](const MemorySample& sample) {
+                return sample.loadPercent < thresholdPercent;
+            }));
+        const auto percent =
+            (count * 100 + samples.size() / 2) / samples.size();
+        return common::Result<std::uint32_t>::Success(
+            static_cast<std::uint32_t>(percent));
+    }
+
 } // namespace optimizer::metrics

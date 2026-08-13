@@ -15,6 +15,7 @@ option(OPTIMIZER_BUILD_TESTS "Build unit tests" ON)
 add_executable(CppOptimizer
     source/main.cpp
     source/common/error.cpp
+    source/logger/logger.cpp
     source/memory/memory_tuner.cpp
     source/metrics/memory_metrics.cpp
     source/platform/native_api.cpp
@@ -97,4 +98,22 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerMetricsTests PRIVATE -municode)
     endif()
     add_test(NAME MetricsTests COMMAND CppOptimizerMetricsTests)
+
+    add_executable(CppOptimizerLoggerTests
+        tests/logger_tests.cpp
+        source/common/error.cpp
+        source/logger/logger.cpp
+    )
+    target_include_directories(CppOptimizerLoggerTests PRIVATE include)
+    target_compile_features(CppOptimizerLoggerTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerLoggerTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerLoggerTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerLoggerTests PRIVATE -municode)
+    endif()
+    add_test(NAME LoggerTests COMMAND CppOptimizerLoggerTests)
 endif()

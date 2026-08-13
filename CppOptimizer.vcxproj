@@ -84,12 +84,14 @@
   <ItemGroup>
     <ClInclude Include="include\common\error.hpp" />
     <ClInclude Include="include\common\unique_resource.hpp" />
+    <ClInclude Include="include\logger\logger.hpp" />
     <ClInclude Include="include\memory\memory_tuner.hpp" />
     <ClInclude Include="include\metrics\memory_metrics.hpp" />
     <ClInclude Include="include\platform\native_api.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp" />
+    <ClCompile Include="source\logger\logger.cpp" />
     <ClCompile Include="source\main.cpp" />
     <ClCompile Include="source\memory\memory_tuner.cpp" />
     <ClCompile Include="source\metrics\memory_metrics.cpp" />
@@ -100,13 +102,13 @@
     <None Include="README.md" />
     <None Include="SECURITY.md" />
     <None Include="CONTRIBUTING.md" />
-    <None Include="CHANGELOG.md" />
     <None Include=".editorconfig" />
     <None Include=".gitignore" />
     <None Include="config\config.example.toml" />
     <None Include="CMakeLists.txt" />
     <None Include="CMakePresets.json" />
     <None Include="tests\common_tests.cpp" />
+    <None Include="tests\logger_tests.cpp" />
     <None Include="tests\memory_metrics_tests.cpp" />
     <None Include="tests\memory_tests.cpp" />
     <None Include="docs\00-project-ai-learning-harness.md" />
@@ -137,10 +139,11 @@
     <None Include="docs\25-module-document-template.md" />
     <None Include="docs\26-ai-session-task-record-template.md" />
     <None Include="docs\sessions\2026-08-10-memory-read-only-baseline.md" />
-    <None Include="work.md" />
     <None Include="works\2026-08-10-MEM-001-read-only-memory-status.md" />
     <None Include="works\2026-08-11-MEM-003-format-bytes-and-snapshot-freshness.md" />
+    <None Include="works\2026-08-13-MET-001-observe-read-only-window.md" />
     <None Include="works\README.md" />
+    <None Include="works\work.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
