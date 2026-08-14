@@ -12,6 +12,21 @@ endif()
 
 option(OPTIMIZER_BUILD_TESTS "Build unit tests" ON)
 
+# Third-party libraries live under thirdParty/<lib-name>/. Convention: compiled
+# artifacts (static/dynamic libs) are stored back inside the library's own
+# folder (thirdParty/<lib-name>/lib/), headers under thirdParty/<lib-name>/include/,
+# and unneeded sources are removed after building. They are never mixed into the
+# project output tree. spdlog is linked as a prebuilt static lib.
+# Include lookup roots: "thirdParty" is the public root (code references the
+# full path like spdlog/include/spdlog/spdlog.h); the library's own include dir
+# is also on the path because spdlog headers reference each other via
+# <spdlog/...> which resolves relative to that root.
+set(SPDLOG_LIB_DIR ${CMAKE_SOURCE_DIR}/thirdParty/spdlog/lib)
+set(SPDLOG_LIB_DEBUG ${SPDLOG_LIB_DIR}/spdlogd.lib)
+set(SPDLOG_LIB_RELEASE ${SPDLOG_LIB_DIR}/spdlog.lib)
+set(SPDLOG_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/thirdParty/spdlog/include)
+set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/thirdParty)
+
 add_executable(CppOptimizer
     source/main.cpp
     source/common/error.cpp
@@ -21,17 +36,22 @@ add_executable(CppOptimizer
     source/platform/native_api.cpp
 )
 
-target_include_directories(CppOptimizer PRIVATE include)
+target_include_directories(CppOptimizer PRIVATE include ${THIRDPARTY_DIR} ${SPDLOG_INCLUDE_DIR})
+target_link_libraries(CppOptimizer PRIVATE
+    $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
+    $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
+)
 target_compile_features(CppOptimizer PRIVATE cxx_std_20)
 target_compile_definitions(CppOptimizer PRIVATE
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
+    SPDLOG_COMPILED_LIB
 )
 
 target_compile_options(CppOptimizer PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
 )
 
 if(MINGW)
@@ -104,13 +124,17 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         source/common/error.cpp
         source/logger/logger.cpp
     )
-    target_include_directories(CppOptimizerLoggerTests PRIVATE include)
+    target_include_directories(CppOptimizerLoggerTests PRIVATE include ${THIRDPARTY_DIR} ${SPDLOG_INCLUDE_DIR})
+    target_link_libraries(CppOptimizerLoggerTests PRIVATE
+        $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
+        $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
+    )
     target_compile_features(CppOptimizerLoggerTests PRIVATE cxx_std_20)
     target_compile_definitions(CppOptimizerLoggerTests PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX SPDLOG_COMPILED_LIB
     )
     target_compile_options(CppOptimizerLoggerTests PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
     )
     if(MINGW)
         target_link_options(CppOptimizerLoggerTests PRIVATE -municode)

@@ -48,6 +48,29 @@ cmake --build --preset build-debug
 ctest --preset test-debug
 ```
 
+### 输出目录约定（out/）
+
+`out/` 为共同父目录，两种构建方式分开存储，互不干扰：
+
+```text
+out/
+├── cmake/                  # CMake/Ninja 构建（CMakePresets binaryDir）
+│   └── windows-x64-debug|release/
+└── msvc/                   # Visual Studio (MSBuild) 构建（vcxproj OutDir）
+    └── x64/Debug|Release/
+```
+
+- MSVC 构建后，PostBuildEvent 会把 `thirdParty/<库>/lib/` 中存在的动态库（DLL）复制到输出目录（与 CMake 行为一致）；当前 spdlog 为静态库，无 DLL 可复制，规则为空操作；
+- 根目录不存放任何构建输出（`x64/`、`error.obj` 等残留已移除）。
+
+### 第三方库（thirdParty）
+
+- 所有三方库统一放在 `thirdParty/<库名>/` 目录下（如 `thirdParty/spdlog/`）；该目录已被 `.gitignore` 忽略，不提交 Git；
+- **目录约定**：每个库自含 `include/`（头文件）、`lib/`（编译产物：静态/动态库 + PDB）、`src/` + `CMakeLists.txt`（保留源码，便于重新编译）三个部分；第三方库文件与项目输出（`out/`）不混放；
+- **源码处理**：下载源码后先编译，编译产物（`.lib`/`.dll`/`.pdb`）复制回该库自己的 `lib/` 目录；源码与构建脚本（`src/`、`cmake/`、`CMakeLists.txt`）**保留**以便未来重编或升级；
+- **引用方式**：包含路径配置为 `include` 与 `thirdParty` 两个根（另含 `thirdParty/<库>/include` 供库内部互引解析，如 spdlog 头文件间 `<spdlog/...>`）；代码中**写完整路径**便于知晓库的具体位置，例如 `#include <spdlog/include/spdlog/spdlog.h>`；
+- spdlog 为 compiled 模式静态库：CMake 按配置链接 `lib/spdlogd.lib`（Debug）/ `lib/spdlog.lib`（Release），vcxproj 的 Link 同样按配置链接；两套构建均定义 `SPDLOG_COMPILED_LIB` 并加 `/utf-8`（spdlog bundled fmt 要求）。
+
 ## 使用
 
 ```text
@@ -106,10 +129,13 @@ ctest --preset test-debug
 ## 目录结构
 
 ```text
-include/   公共头文件（模块契约与不变量）
-source/    实现
-tests/     单元测试
-config/    示例配置
+include/       公共头文件（模块契约与不变量）
+source/        实现
+thirdParty/    三方库（include + lib + 源码，本地依赖，不提交 Git）
+tests/         单元测试
+config/        示例配置
+logs/          运行时日志收容目录（不提交 Git）
+out/           构建输出（cmake/ 与 msvc/ 分开，不提交 Git）
 ```
 
 ## 贡献与安全

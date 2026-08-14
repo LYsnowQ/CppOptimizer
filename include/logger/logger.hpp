@@ -1,10 +1,9 @@
 #pragma once
 
 #include "common/error.hpp"
-#include "common/unique_resource.hpp"
 
 #include <cstdint>
-#include <mutex>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -42,12 +41,14 @@ struct LogRecord {
 // allocation policy beyond the returned string. May allocate.
 [[nodiscard]] std::wstring FormatLogRecord(const LogRecord& record);
 
-// Thread-safe synchronous logger. Owns exactly one optional file handle (RAII:
-// closed on destruction). Sink failures degrade to the debug output and never
-// recurse into another log write; the logger never throws.
+// Thread-safe logger backed by spdlog (compiled mode). This is a thin adapter:
+// it keeps the project's public contract (LogLevel / Result / UTF-8 wide text)
+// and maps failures onto common::Error instead of spdlog exceptions, so logging
+// can never take the caller down. Sink failures degrade to the debug output.
 class Logger {
 public:
     explicit Logger(LogLevel level = LogLevel::Info) noexcept;
+    ~Logger() noexcept;
 
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
@@ -56,35 +57,23 @@ public:
     [[nodiscard]] LogLevel Level() const noexcept;
 
     // Opens (or creates) a log file in append mode and switches the sink to it.
-    // On failure the logger stays on the debug sink and returns a Win32 error;
-    // it never throws and never leaves a half-open sink behind.
+    // On failure the logger stays on the debug sink and returns a Win32-style
+    // error; it never throws and never leaves a half-open sink behind.
     [[nodiscard]] common::Result<void> SetFileSink(const std::wstring& path) noexcept;
 
-    // Switches the sink to stderr (borrowed handle; never closed by the logger)
-    // or to the debug output (OutputDebugStringW). Both are synchronous.
+    // Switches the sink to stderr or to the debug output (OutputDebugStringW).
     void SetStderrSink() noexcept;
     void SetDebugSink() noexcept;
 
-    // Writes one record when record.level >= Level(). Never throws: all
-    // failures (formatting, sink write, degradation) are swallowed after the
-    // degradation path has run, so logging can never take the caller down.
+    // Writes one record when record.level >= Level(). Never throws: spdlog
+    // exceptions are caught and degraded, so logging cannot take the caller
+    // down (log failure must not recurse into another log write).
     void Write(LogLevel level, std::wstring_view module,
                std::wstring_view message) noexcept;
 
 private:
-    enum class Sink {
-        Debug,
-        File,
-        Stderr
-    };
-
     LogLevel level_;
-    std::mutex mutex_;
-    Sink sink_ = Sink::Debug;
-    common::UniqueHandle file_;
-    void* stderrHandle_ = nullptr; // borrowed; never closed
-
-    void WriteLine(std::wstring_view line) noexcept;
+    std::shared_ptr<void> impl_; // opaque spdlog logger (owns sinks + thread safety)
 };
 
 } // namespace optimizer::logger

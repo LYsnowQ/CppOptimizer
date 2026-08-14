@@ -128,10 +128,13 @@ bool TestLoggerFileSinkWritesAndCloses() {
 
 bool TestLoggerFileSinkFailureStaysUsable() {
     optimizer::logger::Logger logger;
-    // Path is a directory, so CreateFileW must fail: the logger stays on the
-    // debug sink, returns a failure, and never throws.
-    const std::wstring badPath = MakeTempLogPath() + L"\\subdir\\file.log";
+    // A path that names an existing directory must fail to open as a file
+    // (spdlog auto-creates missing parent directories, so a missing subdir no
+    // longer fails): the logger stays usable and never throws.
+    const std::wstring badPath = MakeTempLogPath() + L"_dir";
+    std::filesystem::create_directory(std::filesystem::path(badPath));
     const auto opened = logger.SetFileSink(badPath);
+    std::filesystem::remove(std::filesystem::path(badPath));
     if (opened.HasValue()) {
         return false;
     }

@@ -48,6 +48,9 @@ Thumbs.db
 vcpkg_installed/
 config.local.toml
 
+# Third-party sources (vendored locally, not committed)
+thirdParty/
+
 # Local learning workspace (never commit)
 /work.md
 /works/

@@ -1,10 +1,15 @@
 #include "logger/logger.hpp"
 
-#include "common/unique_resource.hpp"
-
 #include <windows.h>
 
+#include <spdlog/include/spdlog/logger.h>
+#include <spdlog/include/spdlog/sinks/basic_file_sink.h>
+#include <spdlog/include/spdlog/sinks/msvc_sink.h>
+#include <spdlog/include/spdlog/sinks/stdout_sinks.h>
+#include <spdlog/include/spdlog/spdlog.h>
+
 #include <format>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -12,29 +17,45 @@ namespace optimizer::logger {
 
 namespace {
 
-// Encodes a wide line as UTF-8 and writes it to a handle. Returns false on any
-// failure. Used for file and stderr sinks; the debug sink writes wide text
-// directly via OutputDebugStringW.
-bool WriteUtf8ToHandle(HANDLE handle, std::wstring_view line) noexcept {
-    if (line.empty()) {
-        return true;
+// spdlog works on narrow UTF-8 text; the project contract is wide text, so the
+// adapter converts at the boundary. The formatted line is ASCII-safe (level
+// names and module tags) plus the message, so UTF-8 conversion is lossless.
+std::string ToUtf8(std::wstring_view text) noexcept {
+    if (text.empty()) {
+        return {};
     }
     const int needed = ::WideCharToMultiByte(
-        CP_UTF8, 0, line.data(), static_cast<int>(line.size()),
+        CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
         nullptr, 0, nullptr, nullptr);
     if (needed <= 0) {
-        return false;
+        return {};
     }
     std::string utf8(static_cast<std::size_t>(needed), '\0');
-    if (::WideCharToMultiByte(
-            CP_UTF8, 0, line.data(), static_cast<int>(line.size()),
-            utf8.data(), needed, nullptr, nullptr) <= 0) {
-        return false;
+    ::WideCharToMultiByte(
+        CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+        utf8.data(), needed, nullptr, nullptr);
+    return utf8;
+}
+
+// Maps the project LogLevel onto the spdlog level enum. The numeric order
+// matches (Trace=0 ... Critical=5), but we keep an explicit mapping so the
+// adapter does not rely on enum value coincidence.
+spdlog::level::level_enum ToSpdlogLevel(LogLevel level) noexcept {
+    switch (level) {
+    case LogLevel::Trace:
+        return spdlog::level::trace;
+    case LogLevel::Debug:
+        return spdlog::level::debug;
+    case LogLevel::Info:
+        return spdlog::level::info;
+    case LogLevel::Warn:
+        return spdlog::level::warn;
+    case LogLevel::Error:
+        return spdlog::level::err;
+    case LogLevel::Critical:
+        return spdlog::level::critical;
     }
-    DWORD written = 0;
-    return ::WriteFile(handle, utf8.data(), static_cast<DWORD>(utf8.size()),
-                       &written, nullptr) != FALSE &&
-           written == static_cast<DWORD>(utf8.size());
+    return spdlog::level::info;
 }
 
 std::wstring NowLocalTime() noexcept {
@@ -95,10 +116,28 @@ std::wstring FormatLogRecord(const LogRecord& record) {
                        record.message);
 }
 
-Logger::Logger(LogLevel level) noexcept : level_(level) {}
+Logger::Logger(LogLevel level) noexcept : level_(level) {
+    // Default sink: debug output (OutputDebugStringW). The spdlog logger is
+    // created lazily safe: an exception here would leave the object unusable,
+    // so any failure keeps the adapter on a null implementation that no-ops.
+    try {
+        auto sink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
+        auto logger = std::make_shared<spdlog::logger>("optimizer", sink);
+        logger->set_level(ToSpdlogLevel(level_));
+        logger->set_pattern("%v"); // raw message; adapter pre-formats the line
+        impl_ = std::move(logger);
+    } catch (...) {
+        impl_ = nullptr;
+    }
+}
+
+Logger::~Logger() noexcept = default;
 
 void Logger::SetLevel(LogLevel level) noexcept {
     level_ = level;
+    if (auto* logger = static_cast<spdlog::logger*>(impl_.get())) {
+        logger->set_level(ToSpdlogLevel(level_));
+    }
 }
 
 LogLevel Logger::Level() const noexcept {
@@ -106,32 +145,50 @@ LogLevel Logger::Level() const noexcept {
 }
 
 common::Result<void> Logger::SetFileSink(const std::wstring& path) noexcept {
-    // Open outside the lock: CreateFileW may block on slow media; the lock is
-    // only held for the handle swap so concurrent Write calls never see a
-    // half-configured sink. On failure the logger stays on the debug sink.
-    common::UniqueHandle file{::CreateFileW(
-        path.c_str(), FILE_APPEND_DATA,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL, nullptr)};
-    if (!file.IsValid()) {
-        return common::Result<void>::Failure(
-            common::Error::FromWin32(::GetLastError(), "Logger::SetFileSink"));
+    try {
+        auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+            ToUtf8(path), false /* truncate=false -> append */);
+        auto logger = std::make_shared<spdlog::logger>("optimizer", sink);
+        logger->set_level(ToSpdlogLevel(level_));
+        logger->set_pattern("%v");
+        impl_ = std::move(logger);
+        return common::Result<void>::Success();
+    } catch (const spdlog::spdlog_ex& exception) {
+        // File open failure (bad path, permissions). The adapter stays on the
+        // previous sink; failure must not masquerade as success. spdlog does
+        // not carry a Win32 code for open failures, so we read GetLastError
+        // (best effort) and keep the message from the exception.
+        const std::uint32_t code = static_cast<std::uint32_t>(::GetLastError());
+        return common::Result<void>::Failure(common::Error::FromWin32(
+            code, std::string("Logger::SetFileSink: ") + exception.what()));
+    } catch (...) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "Logger::SetFileSink", L"Unexpected exception while opening the log file"));
     }
-    std::lock_guard lock(mutex_);
-    file_ = std::move(file);
-    sink_ = Sink::File;
-    return common::Result<void>::Success();
 }
 
 void Logger::SetStderrSink() noexcept {
-    std::lock_guard lock(mutex_);
-    stderrHandle_ = ::GetStdHandle(STD_ERROR_HANDLE);
-    sink_ = Sink::Stderr;
+    try {
+        auto sink = std::make_shared<spdlog::sinks::stderr_sink_mt>();
+        auto logger = std::make_shared<spdlog::logger>("optimizer", sink);
+        logger->set_level(ToSpdlogLevel(level_));
+        logger->set_pattern("%v");
+        impl_ = std::move(logger);
+    } catch (...) {
+        // Degrade silently: keep whatever sink is active.
+    }
 }
 
 void Logger::SetDebugSink() noexcept {
-    std::lock_guard lock(mutex_);
-    sink_ = Sink::Debug;
+    try {
+        auto sink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
+        auto logger = std::make_shared<spdlog::logger>("optimizer", sink);
+        logger->set_level(ToSpdlogLevel(level_));
+        logger->set_pattern("%v");
+        impl_ = std::move(logger);
+    } catch (...) {
+        // Degrade silently.
+    }
 }
 
 void Logger::Write(LogLevel level, std::wstring_view module,
@@ -139,40 +196,25 @@ void Logger::Write(LogLevel level, std::wstring_view module,
     if (level < level_) {
         return;
     }
-    // Formatting outside the lock: FormatLogRecord may allocate; the lock only
-    // guards the sink state and the actual write.
-    const std::wstring line =
-        FormatLogRecord(LogRecord{level, NowLocalTime(),
-                                  std::wstring(module), std::wstring(message)});
-    std::lock_guard lock(mutex_);
-    WriteLine(line);
-}
-
-void Logger::WriteLine(std::wstring_view line) noexcept {
-    // Sink failure degrades to the debug output and never recurses into
-    // another log write: OutputDebugStringW is called directly, so a failing
-    // file/stderr sink cannot trigger an unbounded log loop.
-    switch (sink_) {
-    case Sink::Debug:
-        ::OutputDebugStringW(std::wstring(line).c_str());
-        break;
-    case Sink::File:
-        if (file_.IsValid() &&
-            WriteUtf8ToHandle(file_.Get(), line) &&
-            WriteUtf8ToHandle(file_.Get(), L"\r\n")) {
-            break;
-        }
-        ::OutputDebugStringW(std::wstring(line).c_str());
-        break;
-    case Sink::Stderr:
-        if (stderrHandle_ != nullptr &&
-            stderrHandle_ != INVALID_HANDLE_VALUE &&
-            WriteUtf8ToHandle(stderrHandle_, line) &&
-            WriteUtf8ToHandle(stderrHandle_, L"\r\n")) {
-            break;
-        }
-        ::OutputDebugStringW(std::wstring(line).c_str());
-        break;
+    auto* logger = static_cast<spdlog::logger*>(impl_.get());
+    if (logger == nullptr) {
+        return; // construction failed; nothing to write to
+    }
+    try {
+        // Pre-format the whole line as one pure function result, then hand the
+        // narrow UTF-8 text to spdlog. spdlog adds its own eol ("\r\n" on
+        // Windows) and pattern is "%v" so no double formatting happens.
+        const std::wstring line =
+            FormatLogRecord(LogRecord{level, NowLocalTime(),
+                                      std::wstring(module), std::wstring(message)});
+        logger->log(ToSpdlogLevel(level), ToUtf8(line));
+        // Keep the write visible immediately: the hand-written logger wrote
+        // unbuffered, so the adapter flushes after each record to preserve that
+        // contract (readers observe records as soon as Write returns).
+        logger->flush();
+    } catch (...) {
+        // A failing sink must never take the caller down nor recurse into
+        // another log write; swallow after degradation.
     }
 }
 
