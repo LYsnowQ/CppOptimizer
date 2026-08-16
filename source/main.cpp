@@ -1,4 +1,5 @@
-#include "common/error.hpp"
+﻿#include "common/error.hpp"
+#include "config/config_manager.hpp"
 #include "logger/logger.hpp"
 #include "memory/memory_tuner.hpp"
 #include "metrics/memory_metrics.hpp"
@@ -8,12 +9,29 @@
 #include <cwchar>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 namespace {
+
+// 严格无符号十进制解析：拒绝空输入、前缀垃圾与尾随非数字（"5x" 非法而非静默取 5）。
+// 仅在完全解析成功时写入 out，保持 CLI 解析严格。
+bool ParseUint32(std::wstring_view text, std::uint32_t& out) noexcept {
+    const std::wstring copy(text);
+    wchar_t* end = nullptr;
+    const unsigned long value = std::wcstoul(copy.c_str(), &end, 10);
+    if (end == copy.c_str() || *end != L'\0') {
+        return false; // 非数字或含尾随字符
+    }
+    if (value > std::numeric_limits<std::uint32_t>::max()) {
+        return false; // 数值超出 uint32_t 范围
+    }
+    out = static_cast<std::uint32_t>(value);
+    return true;
+}
 
 int RunStatus() {
     const auto result = optimizer::memory::QueryMemoryStatus();
@@ -53,27 +71,22 @@ int RunStatus() {
 }
 
 int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
-    // Foreground, bounded, user-invoked observation: no background thread, no
-    // periodic task, no system writes. This is metrics sampling, not polling a
-    // cleaner; the red zone rules for automatic memory cleaning do not apply.
+    // 前台、有界、用户主动发起的观测：无后台线程、无周期任务、无系统写入。
+    // 属指标采样而非清理轮询；自动内存清理的红区规则不适用。
     constexpr std::uint32_t kMaxSeconds = 60;
     constexpr std::uint32_t kDefaultLowLoadThreshold = 50;
-    const std::wstring secondsTextCopy(secondsText);
-    const std::uint32_t seconds = static_cast<std::uint32_t>(
-        std::wcstoul(secondsTextCopy.c_str(), nullptr, 10));
-    if (seconds == 0 || seconds > kMaxSeconds) {
+    std::uint32_t seconds = 0;
+    if (!ParseUint32(secondsText, seconds) || seconds == 0 ||
+        seconds > kMaxSeconds) {
         std::wcerr << L"  --observe seconds must be in 1.." << kMaxSeconds << L"\n";
         return 2;
     }
 
-    // Optional low-load threshold (0..100, default 50). Parsing lives in the
-    // command layer only; the pure function re-validates the domain.
+    // 可选低负载阈值（0..100，默认 50）。参数解析仅在命令层；纯函数将再次校验范围。
     std::uint32_t threshold = kDefaultLowLoadThreshold;
     if (!thresholdText.empty()) {
-        const std::wstring thresholdTextCopy(thresholdText);
-        const std::uint32_t parsed = static_cast<std::uint32_t>(
-            std::wcstoul(thresholdTextCopy.c_str(), nullptr, 10));
-        if (parsed > 100) {
+        std::uint32_t parsed = 0;
+        if (!ParseUint32(thresholdText, parsed) || parsed > 100) {
             std::wcerr << L"  --observe threshold must be in 0..100\n";
             return 2;
         }
@@ -134,10 +147,48 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
     return 0;
 }
 
+int RunConfigCommand(std::wstring_view path) {
+    // --config <path>: 解析并校验 TOML 配置，输出关键项（只读，不修改任何状态）。
+    auto result = optimizer::config::LoadConfig(path);
+    if (!result) {
+        const auto& error = result.ErrorValue();
+        std::wcerr << L"  config load failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+    const auto& c = result.Value();
+    const wchar_t* mode = L"observe";
+    if (c.application.mode == optimizer::config::RunMode::Balanced) {
+        mode = L"balanced";
+    } else if (c.application.mode == optimizer::config::RunMode::Experimental) {
+        mode = L"experimental";
+    }
+    std::wcout << L"Config snapshot (read-only)\n";
+    std::wcout << L"  version    : " << c.version << L"\n";
+    std::wcout << L"  mode       : " << mode << L"\n";
+    std::wcout << L"  logging    : level " << std::wstring(c.logging.level.begin(),
+                                                        c.logging.level.end())
+               << L", max " << c.logging.maxFileMb << L" MB x "
+               << c.logging.maxFiles << L" files\n";
+    std::wcout << L"  memory     : query " << (c.memory.queryEnabled ? L"on" : L"off")
+               << L", clean " << (c.memory.scheduledCleanEnabled ? L"on" : L"off")
+               << L", native-write " << (c.memory.allowNativeWrite ? L"on" : L"off")
+               << L"\n";
+    std::wcout << L"  layers     : monitor " << (c.layers.monitoring ? L"on" : L"off")
+               << L", maintenance " << (c.layers.maintenance ? L"on" : L"off")
+               << L", emergency " << (c.layers.emergency ? L"on" : L"off") << L"\n";
+    std::wcout << L"  power      : switch-scheme "
+               << (c.power.switchPowerScheme ? L"on" : L"off") << L"\n";
+    std::wcout << L"  priority   : " << (c.priority.enabled ? L"enabled" : L"disabled")
+               << L" (max level set)\n";
+    std::wcout << L"  games      : " << c.games.size() << L" rule(s)\n";
+    return 0;
+}
+
 int RunLogCommand(int argc, wchar_t* argv[]) {
-    // --log <module> <message...>: one synchronous Info record to stderr.
-    // Read-only, foreground, no background thread; message text is never
-    // treated as a command. At least one message token is required.
+    // --log <module> <message...>: 向 stderr 写入一条同步 Info 记录。
+    // 只读、前台、无后台线程；消息文本永不被当作命令解析。
     if (argc < 4) {
         std::wcerr << L"  --log requires a module and a message\n";
         return 2;
@@ -198,6 +249,7 @@ void PrintUsage() {
         << L"                             optional low-load threshold 0..100 (default 50)\n"
         << L"  CppOptimizer.exe --log <module> <message...> Write one Info log line to stderr\n"
         << L"                             (read-only, foreground, bounded)\n"
+        << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -220,6 +272,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--log") {
             return RunLogCommand(argc, argv);
+        }
+        if (argc == 3 && std::wstring_view(argv[1]) == L"--config") {
+            return RunConfigCommand(argv[2]);
         }
         PrintUsage();
         return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;

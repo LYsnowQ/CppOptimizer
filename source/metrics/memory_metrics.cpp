@@ -1,4 +1,4 @@
-#include "metrics/memory_metrics.hpp"
+﻿#include "metrics/memory_metrics.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -28,8 +28,8 @@ namespace optimizer::metrics {
         report.minAvailableBytes = samples.front().availableBytes;
         report.maxAvailableBytes = samples.front().availableBytes;
 
-        // sum <= 100 * sampleCount, so the average is overflow-safe by construction
-        // for any bounded window; min/max never need a sum.
+        // 平均负载对 0..100 有界域求和，sum <= 100*N 构造性无溢出；
+        // 字节字段仅计算 min/max（无需求和），同样安全。
         std::uint64_t loadSum = 0;
         for (const auto& sample : samples) {
             report.minLoadPercent = std::min(report.minLoadPercent, sample.loadPercent);
@@ -39,8 +39,8 @@ namespace optimizer::metrics {
             report.maxAvailableBytes = std::max(report.maxAvailableBytes, sample.availableBytes);
         }
 
-        // Round-half-up mean, consistent with the project's integer display style.
-        // loadSum + sampleCount / 2 <= 100.5 * sampleCount, far below uint64_t limits.
+        // Round-half-up 均值（与项目整数显示风格一致）。
+        // loadSum + N/2 <= 100.5*N，远低于 uint64_t 上限。
         report.avgLoadPercent = static_cast<std::uint32_t>(
             (loadSum + report.sampleCount / 2) / report.sampleCount);
         return common::Result<MemoryWindowReport>::Success(std::move(report));
@@ -61,9 +61,9 @@ namespace optimizer::metrics {
                     L"Threshold must be in the range 0 to 100"));
         }
 
-        // Strictly below: loadPercent == thresholdPercent is NOT counted.
-        // count <= N, so count * 100 <= 100 * N, the same overflow bound as the
-        // window load sum; (count * 100 + N / 2) / N is round-half-up.
+        // 严格小于：loadPercent == threshold 不计入。
+        // count <= N 使 count*100 <= 100*N（与窗口负载和同界）；
+        // (count*100 + N/2)/N 为 round-half-up。
         const auto count = static_cast<std::size_t>(std::count_if(
             samples.begin(), samples.end(),
             [thresholdPercent](const MemorySample& sample) {

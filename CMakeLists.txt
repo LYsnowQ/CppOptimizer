@@ -25,18 +25,20 @@ set(SPDLOG_LIB_DIR ${CMAKE_SOURCE_DIR}/thirdParty/spdlog/lib)
 set(SPDLOG_LIB_DEBUG ${SPDLOG_LIB_DIR}/spdlogd.lib)
 set(SPDLOG_LIB_RELEASE ${SPDLOG_LIB_DIR}/spdlog.lib)
 set(SPDLOG_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/thirdParty/spdlog/include)
+set(TOMLPLUSPLUS_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/thirdParty/tomlplusplus/include)
 set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/thirdParty)
 
 add_executable(CppOptimizer
     source/main.cpp
     source/common/error.cpp
+    source/config/config_manager.cpp
     source/logger/logger.cpp
     source/memory/memory_tuner.cpp
     source/metrics/memory_metrics.cpp
     source/platform/native_api.cpp
 )
 
-target_include_directories(CppOptimizer PRIVATE include ${THIRDPARTY_DIR} ${SPDLOG_INCLUDE_DIR})
+target_include_directories(CppOptimizer PRIVATE include ${THIRDPARTY_DIR} ${SPDLOG_INCLUDE_DIR} ${TOMLPLUSPLUS_INCLUDE_DIR})
 target_link_libraries(CppOptimizer PRIVATE
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
@@ -76,7 +78,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     )
     target_compile_options(CppOptimizerCommonTests PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
     )
     if(MINGW)
         target_link_options(CppOptimizerCommonTests PRIVATE -municode)
@@ -94,7 +96,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     )
     target_compile_options(CppOptimizerMemoryTests PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
     )
     if(MINGW)
         target_link_options(CppOptimizerMemoryTests PRIVATE -municode)
@@ -112,7 +114,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     )
     target_compile_options(CppOptimizerMetricsTests PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
     )
     if(MINGW)
         target_link_options(CppOptimizerMetricsTests PRIVATE -municode)
@@ -140,4 +142,22 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerLoggerTests PRIVATE -municode)
     endif()
     add_test(NAME LoggerTests COMMAND CppOptimizerLoggerTests)
+
+    add_executable(CppOptimizerConfigTests
+        tests/config_tests.cpp
+        source/common/error.cpp
+        source/config/config_manager.cpp
+    )
+    target_include_directories(CppOptimizerConfigTests PRIVATE include ${TOMLPLUSPLUS_INCLUDE_DIR})
+    target_compile_features(CppOptimizerConfigTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerConfigTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerConfigTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerConfigTests PRIVATE -municode)
+    endif()
+    add_test(NAME ConfigTests COMMAND CppOptimizerConfigTests)
 endif()

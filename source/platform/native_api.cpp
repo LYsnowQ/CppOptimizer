@@ -1,4 +1,4 @@
-#include "platform/native_api.hpp"
+﻿#include "platform/native_api.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -28,7 +28,7 @@ common::Result<NativeCapabilities> NativeApi::Probe() noexcept {
 
 void NativeApi::ProbeOnce() noexcept {
     std::call_once(probeOnce_, [this]() noexcept {
-        // GetModuleHandleW returns a borrowed module handle. It must not be freed.
+        // GetModuleHandleW 返回借用模块句柄，不得释放。
         const HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
         if (ntdll == nullptr) {
             return;

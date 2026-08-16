@@ -10,6 +10,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
   - `--status`：单次物理内存快照（total / available / used / load / age）
   - `--observe <seconds>`：前台有界观测窗口（1–60 秒），输出负载 min/avg/max 与可用内存 min/max
 - **平台诊断**：`--diagnose` Native API 能力探测（只读）
+- **中文环境支持**：面向中文 Windows，内部宽字符（UTF-16）、日志/存储 UTF-8、控制台/日志/错误消息均可承载中文（见工程手册 8.1）
 - **工程基础**：统一错误域模型（`Result<T>` / `Error`）、RAII 资源所有权、C++20、CTest 单元测试
 
 ## 设计原则
@@ -70,6 +71,7 @@ out/
 - **源码处理**：下载源码后先编译，编译产物（`.lib`/`.dll`/`.pdb`）复制回该库自己的 `lib/` 目录；源码与构建脚本（`src/`、`cmake/`、`CMakeLists.txt`）**保留**以便未来重编或升级；
 - **引用方式**：包含路径配置为 `include` 与 `thirdParty` 两个根（另含 `thirdParty/<库>/include` 供库内部互引解析，如 spdlog 头文件间 `<spdlog/...>`）；代码中**写完整路径**便于知晓库的具体位置，例如 `#include <spdlog/include/spdlog/spdlog.h>`；
 - spdlog 为 compiled 模式静态库：CMake 按配置链接 `lib/spdlogd.lib`（Debug）/ `lib/spdlog.lib`（Release），vcxproj 的 Link 同样按配置链接；两套构建均定义 `SPDLOG_COMPILED_LIB` 并加 `/utf-8`（spdlog bundled fmt 要求）。
+- **toml++ v3.4.0**（配置解析）为 **header-only** 库（MIT）：`thirdParty/tomlplusplus/include/` 仅头文件，无编译产物；引用 `#include <toml++/toml.h>`（完整路径）。选型理由：TOML 面向玩家可读、支持注释（安全护栏）、可表达嵌套/数组（`[[games]]`）、不易写坏（对比 JSON 少逗号即全废）；JSON 留给未来 Web 界面（程序间传输），环境变量/命令行只做覆盖层不做主配置。
 
 ## 使用
 
@@ -78,6 +80,7 @@ CppOptimizer.exe --diagnose     平台与 Native API 能力探测（只读）
 CppOptimizer.exe --status       单次只读内存快照
 CppOptimizer.exe --observe <s> [threshold]  每秒采样并输出窗口报告（1–60 秒，前台有界，只读；可选低负载阈值 0..100，默认 50）
 CppOptimizer.exe --log <module> <message...>  写一条 Info 日志到 stderr（同步，只读）
+CppOptimizer.exe --config <path>  解析并校验 TOML 配置文件（只读）
 CppOptimizer.exe --help         帮助信息
 ```
 
@@ -108,6 +111,13 @@ Memory observation window (read-only, foreground, 5 s)
 
 > CppOptimizer.exe --log memory "hello"
 2026-08-13 20:21:04.746 [INFO] memory: hello
+
+> CppOptimizer.exe --config config\config.example.toml
+Config snapshot (read-only)
+  version    : 1
+  mode       : observe
+  logging    : level info, max 10 MB x 5 files
+  memory     : query on, clean off, native-write off
 ```
 
 ## 测试
@@ -122,8 +132,8 @@ ctest --preset test-debug
 
 **当前阶段**：工程基线与只读观测。
 
-- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）；
-- 规划中：Logger → ConfigManager → 指标采集（PDH）→ ProcessWatcher → PolicyEngine 只读决策 → 低风险执行（PowerLocker / PriorityBooster）→ Agent/Service 形态；
+- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）；
+- 规划中：Logger -> ConfigManager -> 指标采集（PDH）-> ProcessWatcher -> PolicyEngine 只读决策 -> 低风险执行（PowerLocker / PriorityBooster）-> Agent/Service 形态；
 - 实验性：内存清理、GPU 心跳、调度调整等模块默认关闭，仅在门禁、测试与审计就绪后评估。
 
 ## 目录结构

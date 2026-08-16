@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "common/error.hpp"
 
@@ -7,11 +7,13 @@
 #include <string>
 #include <string_view>
 
+namespace spdlog {
+class logger;
+} // namespace spdlog
+
 namespace optimizer::logger {
 
-// Structured log severity. Filtering rule: a record is written when
-// record.level >= Logger::level (default Info), so Trace/Debug are dropped by
-// default and Critical is always kept (subject to the configured threshold).
+// 日志级别。过滤规则：level >= Logger 当前级别才写入（默认 Info）。
 enum class LogLevel {
     Trace = 0,
     Debug = 1,
@@ -21,15 +23,12 @@ enum class LogLevel {
     Critical = 5
 };
 
-// Stable display names. LevelToString never fails; LevelFromString accepts the
-// exact names produced by LevelToString and returns Validation otherwise.
+// 级别名转换：ToString 恒成功；FromString 仅接受 ToString 的输出，否则返回 Validation。
 [[nodiscard]] const wchar_t* LevelToString(LogLevel level) noexcept;
 [[nodiscard]] common::Result<LogLevel> LevelFromString(std::wstring_view name) noexcept;
 
-// A single structured log line. localTime is expected in the exact display
-// format produced by the logger ("YYYY-MM-DD HH:MM:SS.mmm"); keeping it a plain
-// field makes FormatLogRecord a pure function (no system calls, no I/O), so it
-// can be unit-tested with fixed inputs and reused by any sink.
+// 结构化日志行。localTime 须为 logger 产出的 "YYYY-MM-DD HH:MM:SS.mmm" 格式；
+// 保持为纯字段使 FormatLogRecord 成为无 I/O 纯函数（可单测、可复用）。
 struct LogRecord {
     LogLevel level = LogLevel::Info;
     std::wstring localTime;
@@ -37,14 +36,13 @@ struct LogRecord {
     std::wstring message;
 };
 
-// Pure formatting: "<localTime> [<LEVEL>] <module>: <message>". No I/O, no
-// allocation policy beyond the returned string. May allocate.
+// 纯格式化： "<localTime> [<LEVEL>] <module>: <message>"。无 I/O，可能分配。
 [[nodiscard]] std::wstring FormatLogRecord(const LogRecord& record);
 
-// Thread-safe logger backed by spdlog (compiled mode). This is a thin adapter:
-// it keeps the project's public contract (LogLevel / Result / UTF-8 wide text)
-// and maps failures onto common::Error instead of spdlog exceptions, so logging
-// can never take the caller down. Sink failures degrade to the debug output.
+// 基于 spdlog（compiled 模式）的线程安全日志器薄适配层。契约：
+// - 保持项目宽文本(UTF-16)/Result 错误模型，异常映射为 common::Error；
+// - 日志失败绝不能让调用方崩溃（降级而非抛出）；
+// - sink 失败降级到 Debug 输出。
 class Logger {
 public:
     explicit Logger(LogLevel level = LogLevel::Info) noexcept;
@@ -54,26 +52,25 @@ public:
     Logger& operator=(const Logger&) = delete;
 
     void SetLevel(LogLevel level) noexcept;
-    [[nodiscard]] LogLevel Level() const noexcept;
+    // 纯查询（getter）：无失败、无副作用，丢弃返回值合法，故不加 nodiscard。
+    LogLevel Level() const noexcept;
 
-    // Opens (or creates) a log file in append mode and switches the sink to it.
-    // On failure the logger stays on the debug sink and returns a Win32-style
-    // error; it never throws and never leaves a half-open sink behind.
+    // 以追加模式打开日志文件并切换 sink。失败时保持原 sink 并返回 Win32 错误，
+    // 不抛出、不留下半开 sink。
     [[nodiscard]] common::Result<void> SetFileSink(const std::wstring& path) noexcept;
 
-    // Switches the sink to stderr or to the debug output (OutputDebugStringW).
+    // 切换 sink：stderr（控制台双路径）或 Debug 输出（OutputDebugStringW）。
     void SetStderrSink() noexcept;
     void SetDebugSink() noexcept;
 
-    // Writes one record when record.level >= Level(). Never throws: spdlog
-    // exceptions are caught and degraded, so logging cannot take the caller
-    // down (log failure must not recurse into another log write).
+    // 写入一条记录（level >= 当前级别时）。绝不抛出：spdlog 异常被捕获并降级，
+    // 日志失败不得递归触发新的日志写入。
     void Write(LogLevel level, std::wstring_view module,
                std::wstring_view message) noexcept;
 
 private:
     LogLevel level_;
-    std::shared_ptr<void> impl_; // opaque spdlog logger (owns sinks + thread safety)
+    std::shared_ptr<spdlog::logger> impl_; // 持有 sink 与线程安全
 };
 
 } // namespace optimizer::logger

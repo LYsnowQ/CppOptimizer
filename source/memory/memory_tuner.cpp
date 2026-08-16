@@ -1,4 +1,4 @@
-#include "memory/memory_tuner.hpp"
+﻿#include "memory/memory_tuner.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -69,12 +69,11 @@ namespace optimizer::memory {
 
     namespace {
 
-        // Rounds `bytes / divisor` to one decimal place using integer arithmetic only.
-        // Keeps FormatBytes free of floating point and free of overflow: remainder is
-        // strictly smaller than divisor, so remainder * 10 stays inside uint64_t.
+        // 纯整数计算 bytes/divisor 的一位小数。remainder < divisor 恒成立，
+        // 故 remainder*10 不会溢出 uint64_t；round-half-up 后 tenths==10 进位。
         struct Tenths {
             std::uint64_t whole;
-            std::uint32_t tenths; // 0..9 after round-half-up
+            std::uint32_t tenths; // 0..9（round-half-up 后）
         };
 
         Tenths ScaleToTenths(std::uint64_t bytes, std::uint64_t divisor) {
@@ -98,7 +97,7 @@ namespace optimizer::memory {
             return std::format(L"{} B", bytes);
         }
 
-        // Largest unit first: the first unit whose value is >= 1.0 wins.
+        // 从大到小取第一个 bytes >= divisor 的单位（值 >= 1.0 的最大单位）。
         struct Unit {
             std::uint64_t divisor;
             std::wstring_view label;
@@ -118,7 +117,7 @@ namespace optimizer::memory {
             }
         }
 
-        // Unreachable for bytes >= kKiB; defensive fallback keeps the function total.
+        // 对 bytes >= kKiB 不可达；防御性兜底确保函数始终有返回值。
         return std::format(L"{} B", bytes);
     }
 
@@ -126,9 +125,9 @@ namespace optimizer::memory {
         std::chrono::steady_clock::time_point sampledAt,
         std::chrono::steady_clock::time_point now,
         std::chrono::steady_clock::duration maxAge) {
-        // Boundary is inclusive: a snapshot sampled exactly maxAge ago is still fresh.
-        // maxAge == 0 is a valid window: fresh only when now == sampledAt (elapsed == 0 <= 0).
-        // A future timestamp makes now - sampledAt negative, which is never stale.
+        // 边界包含：恰好 maxAge 前采样的快照仍新鲜。
+        // maxAge==0 合法：仅 now==sampledAt（elapsed==0<=0）时新鲜。
+        // 未来时间戳使差值取负，永不判陈旧。
         return now - sampledAt <= maxAge;
     }
 

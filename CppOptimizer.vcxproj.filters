@@ -38,6 +38,9 @@
     <ClCompile Include="source\common\error.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="source\config\config_manager.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="source\logger\logger.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -65,6 +68,7 @@
     <None Include="CMakeLists.txt" />
     <None Include="CMakePresets.json" />
     <None Include="tests\common_tests.cpp" />
+    <None Include="tests\config_tests.cpp" />
     <None Include="tests\logger_tests.cpp" />
     <None Include="tests\memory_metrics_tests.cpp" />
     <None Include="tests\memory_tests.cpp" />

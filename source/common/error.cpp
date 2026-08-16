@@ -1,4 +1,4 @@
-#include "common/error.hpp"
+﻿#include "common/error.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -97,8 +97,8 @@ std::wstring FormatErrorMessage(ErrorDomain domain, std::uint64_t code) {
     }
     case ErrorDomain::Pdh:
     case ErrorDomain::NtStatus:
-        // Preserve the original domain and numeric code. Modules may add domain-specific
-        // formatters later; treating these as GetLastError values would be incorrect.
+        // 保留原始域与数值码。模块可后续添加专属格式化器；
+        // 把它们当 GetLastError 处理是不正确的。
         return FormatUnknown(domain, code);
     case ErrorDomain::Validation:
         return L"Validation error";

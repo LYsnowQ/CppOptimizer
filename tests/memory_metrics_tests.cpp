@@ -1,4 +1,4 @@
-#include "metrics/memory_metrics.hpp"
+﻿#include "metrics/memory_metrics.hpp"
 
 #include <iostream>
 #include <vector>
@@ -34,8 +34,8 @@ bool TestAggregateSingleSample() {
 }
 
 bool TestAggregateMinMaxAvgOverThreeSamples() {
-    // loads {40, 50, 60}: min 40, max 60, avg (150 / 3) = 50.
-    // available {100, 90, 80}: min 80, max 100.
+    // 负载 {40, 50, 60}: min 40, max 60, avg (150/3)=50。
+    // 可用 {100, 90, 80}: min 80, max 100。
     std::vector<optimizer::metrics::MemorySample> samples = {
         optimizer::metrics::MemorySample{40, 100},
         optimizer::metrics::MemorySample{50, 90},
@@ -51,7 +51,7 @@ bool TestAggregateMinMaxAvgOverThreeSamples() {
 }
 
 bool TestAggregateAverageRoundsHalfUp() {
-    // {1, 2}: mean 1.5 rounds half-up to 2; {0, 1}: mean 0.5 rounds half-up to 1.
+    // {1,2}: 均值 1.5 半向上取整为 2；{0,1}: 均值 0.5 取整为 1。
     std::vector<optimizer::metrics::MemorySample> first = {
         optimizer::metrics::MemorySample{1, 0},
         optimizer::metrics::MemorySample{2, 0}};
@@ -120,8 +120,8 @@ bool TestShareAllBelowThreshold() {
 }
 
 bool TestShareEqualThresholdIsNotCounted() {
-    // Strictly below: load == threshold is excluded, so {40, 50, 60} below 50
-    // is only one sample (40), and below 60 is two samples (40, 50).
+    // 严格小于：load == threshold 不计入，故 {40,50,60} 低于 50 只有 1 个(40)，
+    // 低于 60 有 2 个(40,50)。
     std::vector<optimizer::metrics::MemorySample> samples = {
         optimizer::metrics::MemorySample{40, 0},
         optimizer::metrics::MemorySample{50, 0},
@@ -133,7 +133,7 @@ bool TestShareEqualThresholdIsNotCounted() {
 }
 
 bool TestShareMixedWindow() {
-    // {10, 30, 70, 90} below 50: two samples of four => 50%.
+    // {10,30,70,90} 低于 50: 4 个中 2 个 => 50%。
     std::vector<optimizer::metrics::MemorySample> samples = {
         optimizer::metrics::MemorySample{10, 0},
         optimizer::metrics::MemorySample{30, 0},
@@ -144,7 +144,7 @@ bool TestShareMixedWindow() {
 }
 
 bool TestShareRoundsHalfUp() {
-    // 1 of 3 below 50 => 33 (33.3 rounds down), 2 of 3 below 50 => 67 (66.6 rounds up).
+    // 3 个中 1 个低于 50 => 33（33.3 向下）；3 个中 2 个 => 67（66.6 向上）。
     std::vector<optimizer::metrics::MemorySample> oneOfThree = {
         optimizer::metrics::MemorySample{10, 0},
         optimizer::metrics::MemorySample{60, 0},
@@ -173,13 +173,12 @@ bool TestShareIsOrderIndependent() {
 }
 
 bool TestShareThresholdZeroAndFullLoadExclusion() {
-    // threshold 0 is legal: loadPercent >= 0, so strictly below 0 is never
-    // true => share is always 0.
+    // threshold 0 合法：loadPercent >= 0 恒成立，严格小于 0 永假 => 占比恒 0。
     std::vector<optimizer::metrics::MemorySample> samples = {
         optimizer::metrics::MemorySample{0, 0},
         optimizer::metrics::MemorySample{50, 0}};
     auto atZero = optimizer::metrics::ShareOfLoadBelow(samples, 0);
-    // threshold 100 excludes only full-load samples: {0, 100} below 100 is 1/2.
+    // threshold 100 仅排除满载样本：{0,100} 低于 100 为 1/2。
     std::vector<optimizer::metrics::MemorySample> fullLoad = {
         optimizer::metrics::MemorySample{0, 0},
         optimizer::metrics::MemorySample{100, 0}};

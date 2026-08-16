@@ -52,7 +52,7 @@
       <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;SPDLOG_COMPILED_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)thirdParty;$(ProjectDir)thirdParty\spdlog\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)thirdParty;$(ProjectDir)thirdParty\spdlog\include;$(ProjectDir)thirdParty\tomlplusplus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalOptions>/permissive- /Zc:__cplusplus /utf-8 %(AdditionalOptions)</AdditionalOptions>
@@ -78,7 +78,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;SPDLOG_COMPILED_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)thirdParty;$(ProjectDir)thirdParty\spdlog\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)thirdParty;$(ProjectDir)thirdParty\spdlog\include;$(ProjectDir)thirdParty\tomlplusplus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalOptions>/permissive- /Zc:__cplusplus /utf-8 %(AdditionalOptions)</AdditionalOptions>
@@ -100,6 +100,7 @@
   <ItemGroup>
     <ClInclude Include="include\common\error.hpp" />
     <ClInclude Include="include\common\unique_resource.hpp" />
+    <ClInclude Include="include\config\config_manager.hpp" />
     <ClInclude Include="include\logger\logger.hpp" />
     <ClInclude Include="include\memory\memory_tuner.hpp" />
     <ClInclude Include="include\metrics\memory_metrics.hpp" />
@@ -107,6 +108,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp" />
+    <ClCompile Include="source\config\config_manager.cpp" />
     <ClCompile Include="source\logger\logger.cpp" />
     <ClCompile Include="source\main.cpp" />
     <ClCompile Include="source\memory\memory_tuner.cpp" />
@@ -124,6 +126,7 @@
     <None Include="CMakeLists.txt" />
     <None Include="CMakePresets.json" />
     <None Include="tests\common_tests.cpp" />
+    <None Include="tests\config_tests.cpp" />
     <None Include="tests\logger_tests.cpp" />
     <None Include="tests\memory_metrics_tests.cpp" />
     <None Include="tests\memory_tests.cpp" />

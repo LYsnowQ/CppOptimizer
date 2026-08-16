@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -14,8 +14,8 @@
 
 namespace optimizer::common {
 
-// Owns handles returned by Create*/Open* APIs whose documented closer is CloseHandle.
-// GetCurrentProcess/GetCurrentThread pseudo handles and borrowed handles must not be adopted.
+// 持有 Create*/Open* 返回、文档规定用 CloseHandle 释放的句柄（RAII）。
+// 禁止收养伪句柄（GetCurrentProcess/GetCurrentThread）与借用句柄。
 class UniqueHandle {
 public:
     UniqueHandle() noexcept = default;
@@ -56,7 +56,7 @@ private:
     HANDLE handle_ = nullptr;
 };
 
-// SC_HANDLE has a distinct release function and must never be passed to CloseHandle.
+// SC_HANDLE 用 CloseServiceHandle 释放，绝不能传给 CloseHandle。
 class UniqueServiceHandle {
 public:
     UniqueServiceHandle() noexcept = default;

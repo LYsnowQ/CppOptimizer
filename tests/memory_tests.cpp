@@ -1,4 +1,4 @@
-#include "memory/memory_tuner.hpp"
+﻿#include "memory/memory_tuner.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -70,7 +70,7 @@ bool TestFormatBytesSelectsBinaryUnits() {
 }
 
 bool TestFormatBytesRoundsHalfUpToTenths() {
-    // 1,101,005 bytes == 1.050003... MiB, which must round up to 1.1 MiB.
+    // 1,101,005 字节 == 1.050003... MiB，必须向上取整为 1.1 MiB。
     return optimizer::memory::FormatBytes(1'101'005) == L"1.1 MiB";
 }
 
@@ -105,8 +105,7 @@ bool TestIsSnapshotFreshFutureSampleIsNotStale() {
 bool TestIsSnapshotFreshZeroMaxAgeBoundary() {
     const auto sampledAt = std::chrono::steady_clock::time_point{} +
                            std::chrono::seconds(100);
-    // maxAge == 0 keeps the inclusive boundary: fresh only at the exact instant,
-    // stale one tick later, and never stale for a future timestamp.
+    // maxAge == 0 保持边界包含：仅当下时刻新鲜，下一秒即陈旧，未来时间戳永不陈旧。
     return optimizer::memory::IsSnapshotFresh(
                sampledAt, sampledAt, std::chrono::steady_clock::duration::zero()) &&
            !optimizer::memory::IsSnapshotFresh(

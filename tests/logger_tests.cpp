@@ -1,4 +1,4 @@
-#include "logger/logger.hpp"
+﻿#include "logger/logger.hpp"
 
 #include <windows.h>
 
@@ -79,7 +79,7 @@ bool TestFormatLogRecordFull() {
 }
 
 bool TestFormatLogRecordIsPureAndDeterministic() {
-    // Same inputs -> same output; no I/O or clock dependency.
+    // 相同输入 -> 相同输出；无 I/O、无时钟依赖。
     const optimizer::logger::LogRecord record{
         optimizer::logger::LogLevel::Error, L"2026-01-02 03:04:05.000",
         L"metrics", L"sample failed"};
@@ -93,8 +93,8 @@ bool TestLoggerFiltersBelowThreshold() {
     const std::wstring path = MakeTempLogPath();
     {
         optimizer::logger::Logger logger(optimizer::logger::LogLevel::Info);
-        // Trace/Debug must be dropped, Info kept. We observe the level filter via
-        // the file sink: only the Info line may reach the file.
+        // Trace/Debug 应被丢弃、Info 保留：通过文件 sink 观察级别过滤，
+        // 只有 Info 行应出现在文件中。
         const auto opened = logger.SetFileSink(path);
         if (!opened) {
             return false;
@@ -102,7 +102,7 @@ bool TestLoggerFiltersBelowThreshold() {
         logger.Write(optimizer::logger::LogLevel::Trace, L"t", L"dropped");
         logger.Write(optimizer::logger::LogLevel::Debug, L"d", L"dropped");
         logger.Write(optimizer::logger::LogLevel::Info, L"i", L"kept");
-    } // logger destroyed here: file handle closed (RAII), content flushed
+    } // logger 在此析构：句柄关闭（RAII），内容已刷出
     const std::wstring content = ReadWholeFile(path);
     std::filesystem::remove(std::filesystem::path(path));
     return content.find(L"[INFO] i: kept") != std::wstring::npos &&
@@ -119,7 +119,7 @@ bool TestLoggerFileSinkWritesAndCloses() {
         }
         logger.Write(optimizer::logger::LogLevel::Info, L"mod", L"line one");
         logger.Write(optimizer::logger::LogLevel::Error, L"mod", L"line two");
-    } // RAII: sink closes before we read the file
+    } // RAII: 读取文件前 sink 已关闭
     const std::wstring content = ReadWholeFile(path);
     std::filesystem::remove(std::filesystem::path(path));
     return content.find(L"[INFO] mod: line one") != std::wstring::npos &&
@@ -128,9 +128,8 @@ bool TestLoggerFileSinkWritesAndCloses() {
 
 bool TestLoggerFileSinkFailureStaysUsable() {
     optimizer::logger::Logger logger;
-    // A path that names an existing directory must fail to open as a file
-    // (spdlog auto-creates missing parent directories, so a missing subdir no
-    // longer fails): the logger stays usable and never throws.
+    // 指向已存在目录的路径打开为文件必然失败（spdlog 会自动创建缺失父目录，
+    // 所以不存在的子目录不再失败）：logger 仍可用且不抛异常。
     const std::wstring badPath = MakeTempLogPath() + L"_dir";
     std::filesystem::create_directory(std::filesystem::path(badPath));
     const auto opened = logger.SetFileSink(badPath);
@@ -138,7 +137,7 @@ bool TestLoggerFileSinkFailureStaysUsable() {
     if (opened.HasValue()) {
         return false;
     }
-    // The logger must still accept writes without throwing (degrades to debug).
+    // logger 仍须接受写入而不抛（降级到 Debug）。
     logger.Write(optimizer::logger::LogLevel::Error, L"m", L"still works");
     return true;
 }
@@ -183,7 +182,7 @@ bool TestLoggerConcurrentWritesNoCrash() {
         for (auto& thread : threads) {
             thread.join();
         }
-    } // logger destroyed: file handle closed before we read the file
+    } // logger 析构：读取文件前句柄已关闭
     const std::wstring content = ReadWholeFile(path);
     std::filesystem::remove(std::filesystem::path(path));
     // 4 threads * 100 lines = 400 non-empty lines (each ends with \r\n).
@@ -212,6 +211,58 @@ bool TestLoggerSetLevelChangesFilter() {
     return content.find(L"[TRACE] t: now kept") != std::wstring::npos;
 }
 
+// 中文支持（工程手册 8.1）：文件 sink 必须以 UTF-8 字节存储宽文本，使中文经
+// 文件往返不损坏、任何 UTF-8 工具可读。直接读原始字节查找中文载荷的精确 UTF-8
+// 编码（ReadWholeFile 的字节->wchar 拓宽对多字节文本有损，故在字节层比对）。
+bool TestLoggerFileSinkStoresChineseAsUtf8() {
+    const std::wstring path = MakeTempLogPath();
+    {
+        optimizer::logger::Logger logger;
+        const auto opened = logger.SetFileSink(path);
+        if (!opened) {
+            return false;
+        }
+        logger.Write(optimizer::logger::LogLevel::Info, L"内存模块",
+                     L"中文日志消息");
+    }
+    std::string bytes;
+    {
+        std::ifstream stream(std::filesystem::path(path), std::ios::binary);
+        bytes.assign((std::istreambuf_iterator<char>(stream)),
+                     std::istreambuf_iterator<char>());
+    } // 先关闭流再删除：Windows 上删除被占用文件会阻塞
+    std::filesystem::remove(std::filesystem::path(path));
+
+    // "中文日志消息" 的 UTF-8 字节。用程序构造以保证测试源码不受编译器
+    // 源编码影响（保持 ASCII 安全）。
+    const std::string zhUtf8 = [] {
+        std::string s;
+        const std::wstring zh = L"中文日志消息";
+        const int needed = ::WideCharToMultiByte(
+            CP_UTF8, 0, zh.data(), static_cast<int>(zh.size()),
+            nullptr, 0, nullptr, nullptr);
+        s.resize(static_cast<std::size_t>(needed));
+        ::WideCharToMultiByte(
+            CP_UTF8, 0, zh.data(), static_cast<int>(zh.size()),
+            s.data(), needed, nullptr, nullptr);
+        return s;
+    }();
+
+    // 模块名 "内存模块" 也须在同一行以 UTF-8 存活。
+    const std::wstring zhModule = L"内存模块";
+    std::string moduleUtf8;
+    const int needed = ::WideCharToMultiByte(
+        CP_UTF8, 0, zhModule.data(), static_cast<int>(zhModule.size()),
+        nullptr, 0, nullptr, nullptr);
+    moduleUtf8.resize(static_cast<std::size_t>(needed));
+    ::WideCharToMultiByte(
+        CP_UTF8, 0, zhModule.data(), static_cast<int>(zhModule.size()),
+        moduleUtf8.data(), needed, nullptr, nullptr);
+
+    return !bytes.empty() && bytes.find(zhUtf8) != std::string::npos &&
+           bytes.find(moduleUtf8) != std::string::npos;
+}
+
 } // namespace
 
 int wmain() {
@@ -235,5 +286,6 @@ int wmain() {
     run(L"Critical always written at Error level", &TestLoggerCriticalAlwaysWritten);
     run(L"Concurrent writes do not crash", &TestLoggerConcurrentWritesNoCrash);
     run(L"SetLevel changes the filter", &TestLoggerSetLevelChangesFilter);
+    run(L"File sink stores Chinese as UTF-8", &TestLoggerFileSinkStoresChineseAsUtf8);
     return failed == 0 ? 0 : 1;
 }

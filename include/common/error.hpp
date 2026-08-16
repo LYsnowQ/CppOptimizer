@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <string>
@@ -17,6 +17,8 @@ enum class ErrorDomain {
     Internal
 };
 
+// 统一错误模型：domain 标识来源域，code 为原始错误码（Win32/HRESULT 等），
+// operation 为出错的操作名（定位用），message 为可显示信息。
 struct Error {
     ErrorDomain domain = ErrorDomain::Internal;
     std::uint64_t code = 0;
@@ -34,6 +36,8 @@ struct Error {
 std::wstring FormatErrorMessage(ErrorDomain domain, std::uint64_t code);
 const wchar_t* ToString(ErrorDomain domain) noexcept;
 
+// 失败不伪装成成功：任何可能失败的接口都应返回 Result，调用方必须检查
+// HasValue()/operator bool 后再访问 Value()/ErrorValue()（在无值时访问为 UB）。
 template <typename T>
 class Result {
 public:
@@ -80,6 +84,7 @@ private:
     std::variant<T, Error> storage_;
 };
 
+// Result<void> 特化：只有成功/失败两种状态，无值负载。
 template <>
 class Result<void> {
 public:

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "common/error.hpp"
 
@@ -14,8 +14,7 @@ struct NativeCapabilities {
     bool ntStatusConversion = false;
 };
 
-// Runtime capability probe only. This class intentionally exposes no system-changing
-// operation yet; write APIs require a separate safety permit and experimental build flag.
+// 仅运行时能力探测。本类有意不暴露任何改系统的操作；写 API 需另行安全许可与实验开关。
 class NativeApi final {
 public:
     static NativeApi& Instance() noexcept;
