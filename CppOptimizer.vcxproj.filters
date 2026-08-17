@@ -53,6 +53,9 @@
     <ClCompile Include="source\metrics\memory_metrics.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="source\metrics\pdh_metrics.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="source\platform\native_api.cpp">
       <Filter>源文件</Filter>
     </ClCompile>

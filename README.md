@@ -81,6 +81,7 @@ CppOptimizer.exe --status       单次只读内存快照
 CppOptimizer.exe --observe <s> [threshold]  每秒采样并输出窗口报告（1–60 秒，前台有界，只读；可选低负载阈值 0..100，默认 50）
 CppOptimizer.exe --log <module> <message...>  写一条 Info 日志到 stderr（同步，只读）
 CppOptimizer.exe --config <path>  解析并校验 TOML 配置文件（只读）
+CppOptimizer.exe --cpu           采样 CPU 使用率（只读，PDH）
 CppOptimizer.exe --help         帮助信息
 ```
 
@@ -132,7 +133,7 @@ ctest --preset test-debug
 
 **当前阶段**：工程基线与只读观测。
 
-- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）；
+- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）、PDH 只读采样（`--cpu`）；
 - 规划中：Logger -> ConfigManager -> 指标采集（PDH）-> ProcessWatcher -> PolicyEngine 只读决策 -> 低风险执行（PowerLocker / PriorityBooster）-> Agent/Service 形态；
 - 实验性：内存清理、GPU 心跳、调度调整等模块默认关闭，仅在门禁、测试与审计就绪后评估。
 

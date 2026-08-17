@@ -3,6 +3,7 @@
 #include "logger/logger.hpp"
 #include "memory/memory_tuner.hpp"
 #include "metrics/memory_metrics.hpp"
+#include "metrics/pdh_metrics.hpp"
 #include "platform/native_api.hpp"
 
 #include <chrono>
@@ -186,6 +187,40 @@ int RunConfigCommand(std::wstring_view path) {
     return 0;
 }
 
+int RunCpuCommand() {
+    // --cpu: 前台、有界、只读的两次 PDH 采样（首次为 warming-up 基线）。
+    // 无后台线程、无周期任务。
+    optimizer::metrics::PdhCpuQuery query;
+    auto init = query.Initialize();
+    if (!init) {
+        std::wcerr << L"  cpu query init failed ["
+                   << optimizer::common::ToString(init.ErrorValue().domain) << L":"
+                   << init.ErrorValue().code << L"] "
+                   << init.ErrorValue().message << L"\n";
+        return 2;
+    }
+
+    auto first = query.Sample(); // warming-up 基线
+    if (!first) {
+        std::wcerr << L"  cpu sample failed ["
+                   << optimizer::common::ToString(first.ErrorValue().domain)
+                   << L":" << first.ErrorValue().code << L"] "
+                   << first.ErrorValue().message << L"\n";
+        return 2;
+    }
+
+    auto second = query.Sample();
+    if (!second || !second.Value().valid) {
+        std::wcerr << L"  cpu sample not ready (warming up)\n";
+        return 2;
+    }
+
+    std::wcout << L"CPU usage (read-only, PDH, two samples)\n";
+    std::wcout << L"  % Processor Time : " << second.Value().usagePercent
+               << L"%\n";
+    return 0;
+}
+
 int RunLogCommand(int argc, wchar_t* argv[]) {
     // --log <module> <message...>: 向 stderr 写入一条同步 Info 记录。
     // 只读、前台、无后台线程；消息文本永不被当作命令解析。
@@ -250,6 +285,7 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --log <module> <message...> Write one Info log line to stderr\n"
         << L"                             (read-only, foreground, bounded)\n"
         << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
+        << L"  CppOptimizer.exe --cpu          Sample CPU usage (read-only, PDH)\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -263,6 +299,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc == 2 && std::wstring_view(argv[1]) == L"--status") {
             return RunStatus();
+        }
+        if (argc == 2 && std::wstring_view(argv[1]) == L"--cpu") {
+            return RunCpuCommand();
         }
         if (argc == 3 && std::wstring_view(argv[1]) == L"--observe") {
             return RunObserve(argv[2], L"");

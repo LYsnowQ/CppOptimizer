@@ -35,11 +35,13 @@ add_executable(CppOptimizer
     source/logger/logger.cpp
     source/memory/memory_tuner.cpp
     source/metrics/memory_metrics.cpp
+    source/metrics/pdh_metrics.cpp
     source/platform/native_api.cpp
 )
 
 target_include_directories(CppOptimizer PRIVATE include ${THIRDPARTY_DIR} ${SPDLOG_INCLUDE_DIR} ${TOMLPLUSPLUS_INCLUDE_DIR})
 target_link_libraries(CppOptimizer PRIVATE
+    pdh
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
 )
@@ -160,4 +162,23 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerConfigTests PRIVATE -municode)
     endif()
     add_test(NAME ConfigTests COMMAND CppOptimizerConfigTests)
+
+    add_executable(CppOptimizerPdhMetricsTests
+        tests/pdh_metrics_tests.cpp
+        source/common/error.cpp
+        source/metrics/pdh_metrics.cpp
+    )
+    target_include_directories(CppOptimizerPdhMetricsTests PRIVATE include)
+    target_link_libraries(CppOptimizerPdhMetricsTests PRIVATE pdh)
+    target_compile_features(CppOptimizerPdhMetricsTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerPdhMetricsTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerPdhMetricsTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerPdhMetricsTests PRIVATE -municode)
+    endif()
+    add_test(NAME PdhMetricsTests COMMAND CppOptimizerPdhMetricsTests)
 endif()

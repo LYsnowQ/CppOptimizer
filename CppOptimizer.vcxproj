@@ -61,7 +61,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -87,7 +87,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -104,6 +104,7 @@
     <ClInclude Include="include\logger\logger.hpp" />
     <ClInclude Include="include\memory\memory_tuner.hpp" />
     <ClInclude Include="include\metrics\memory_metrics.hpp" />
+    <ClInclude Include="include\metrics\pdh_metrics.hpp" />
     <ClInclude Include="include\platform\native_api.hpp" />
   </ItemGroup>
   <ItemGroup>
@@ -113,6 +114,7 @@
     <ClCompile Include="source\main.cpp" />
     <ClCompile Include="source\memory\memory_tuner.cpp" />
     <ClCompile Include="source\metrics\memory_metrics.cpp" />
+    <ClCompile Include="source\metrics\pdh_metrics.cpp" />
     <ClCompile Include="source\platform\native_api.cpp" />
   </ItemGroup>
   <ItemGroup>
