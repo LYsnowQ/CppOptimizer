@@ -21,7 +21,7 @@ std::string ToLower(std::string_view text) {
     return result;
 }
 
-// toml++ 抛 toml::parse_error；此处统一转为 common::Error（Validation 域），
+// toml++ 抛 toml::parse_error；此处统一转为 common::Error Validation 域，
 // 契约保证 LoadConfig 不抛异常。
 common::Error TomlFailure(const toml::parse_error& error) {
     return common::Error::Validation(
@@ -69,7 +69,7 @@ common::Result<PriorityLevel> ParsePriorityLevel(std::string_view name) {
     if (lower == "high") {
         return common::Result<PriorityLevel>::Success(PriorityLevel::High);
     }
-    // realtime 明确拒绝（红色禁止，不提供该枚举值）。
+    // realtime 明确拒绝，不提供该枚举值。
     if (lower == "realtime") {
         return common::Result<PriorityLevel>::Failure(common::Error::Validation(
             "ParsePriorityLevel", L"realtime priority is forbidden"));
@@ -79,7 +79,7 @@ common::Result<PriorityLevel> ParsePriorityLevel(std::string_view name) {
 }
 
 common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
-    // toml++ 的 parse_file 接受 UTF-8 路径；从宽路径转换（跨平台/中文路径兼容）。
+    // toml++ 的 parse_file 接受 UTF-8 路径；从宽路径转换。
     std::filesystem::path fsPath(path);
     toml::table table;
     try {
@@ -147,7 +147,7 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
             if (parsed) {
                 snapshot.memory.maxCleanLevel = parsed.Value();
             }
-            // 非法清理级别保持默认（失败安全），不视为致命错误。
+            // 非法清理级别保持默认，不视为致命错误。
         }
     }
 
@@ -187,7 +187,7 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
             if (parsed) {
                 snapshot.priority.maxLevel = parsed.Value();
             }
-            // realtime 或非法级别保持默认（失败安全）。
+            // realtime 或非法级别保持默认。
         }
     }
 
@@ -218,7 +218,7 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
         for (const auto& element : *games) {
             const toml::table* gameTable = element.as_table();
             if (gameTable == nullptr) {
-                continue; // 非表元素跳过（失败安全）。
+                continue; // 非表元素跳过
             }
             GameConfig game;
             if (const auto id = (*gameTable)["id"].value<std::string>()) {
@@ -242,7 +242,7 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
                     (*gameTable)["pause_when_background"].value<bool>()) {
                 game.pauseWhenBackground = *pause;
             }
-            // 缺 id 的条目跳过（失败安全，不产生无效规则）。
+            // 缺 id 的条目跳过。
             if (!game.id.empty()) {
                 snapshot.games.push_back(std::move(game));
             }

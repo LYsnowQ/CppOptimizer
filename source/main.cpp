@@ -18,7 +18,7 @@
 
 namespace {
 
-// 严格无符号十进制解析：拒绝空输入、前缀垃圾与尾随非数字（"5x" 非法而非静默取 5）。
+// 严格无符号十进制解析：拒绝空输入、前缀垃圾与尾随非数字。
 // 仅在完全解析成功时写入 out，保持 CLI 解析严格。
 bool ParseUint32(std::wstring_view text, std::uint32_t& out) noexcept {
     const std::wstring copy(text);
@@ -83,7 +83,7 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
         return 2;
     }
 
-    // 可选低负载阈值（0..100，默认 50）。参数解析仅在命令层；纯函数将再次校验范围。
+    // 可选低负载阈值 0..100，默认 50。参数解析仅在命令层；纯函数将再次校验范围。
     std::uint32_t threshold = kDefaultLowLoadThreshold;
     if (!thresholdText.empty()) {
         std::uint32_t parsed = 0;
@@ -149,7 +149,7 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
 }
 
 int RunConfigCommand(std::wstring_view path) {
-    // --config <path>: 解析并校验 TOML 配置，输出关键项（只读，不修改任何状态）。
+    // --config <path>: 解析并校验 TOML 配置，输出关键项，只读。
     auto result = optimizer::config::LoadConfig(path);
     if (!result) {
         const auto& error = result.ErrorValue();
@@ -188,7 +188,7 @@ int RunConfigCommand(std::wstring_view path) {
 }
 
 int RunCpuCommand() {
-    // --cpu: 前台、有界、只读的两次 PDH 采样（首次为 warming-up 基线）。
+    // --cpu: 前台、有界、只读的两次 PDH 采样，首次为 warming-up 基线。
     // 无后台线程、无周期任务。
     optimizer::metrics::PdhCpuQuery query;
     auto init = query.Initialize();

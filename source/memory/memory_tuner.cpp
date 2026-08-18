@@ -73,7 +73,7 @@ namespace optimizer::memory {
         // 故 remainder*10 不会溢出 uint64_t；round-half-up 后 tenths==10 进位。
         struct Tenths {
             std::uint64_t whole;
-            std::uint32_t tenths; // 0..9（round-half-up 后）
+            std::uint32_t tenths; // 0..9
         };
 
         Tenths ScaleToTenths(std::uint64_t bytes, std::uint64_t divisor) {
@@ -97,7 +97,7 @@ namespace optimizer::memory {
             return std::format(L"{} B", bytes);
         }
 
-        // 从大到小取第一个 bytes >= divisor 的单位（值 >= 1.0 的最大单位）。
+        // 从大到小取第一个 bytes >= divisor 的单位。
         struct Unit {
             std::uint64_t divisor;
             std::wstring_view label;
@@ -126,7 +126,7 @@ namespace optimizer::memory {
         std::chrono::steady_clock::time_point now,
         std::chrono::steady_clock::duration maxAge) {
         // 边界包含：恰好 maxAge 前采样的快照仍新鲜。
-        // maxAge==0 合法：仅 now==sampledAt（elapsed==0<=0）时新鲜。
+        // maxAge==0 合法：仅 now==sampledAt 时新鲜。
         // 未来时间戳使差值取负，永不判陈旧。
         return now - sampledAt <= maxAge;
     }

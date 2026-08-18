@@ -132,7 +132,7 @@ bool TestLoadConfigBadModeFails() {
     }
     auto result = optimizer::config::LoadConfig(path);
     std::filesystem::remove(std::filesystem::path(path));
-    // 非法运行模式是显式配置错误，应报告失败（失败不伪装成功）。
+    // 非法运行模式是显式配置错误，应报告失败。
     return !result.HasValue() &&
            result.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
 }
@@ -150,7 +150,7 @@ bool TestLoadConfigBadCleanLevelDefaults() {
 }
 
 bool TestLoadConfigChineseValues() {
-    // 中文环境（工程手册 8.1）：配置值可含中文，UTF-8 往返无损。
+    // 配置值可含中文，UTF-8 往返无损。
     const std::wstring path = MakeTempConfigPath();
     const std::string content =
         "[logging]\ndirectory = \"日志目录\"\n\n[[games]]\nid = \"example\"\n";
@@ -253,7 +253,7 @@ process_names = ["B.exe"]
 }
 
 bool TestLoadConfigGameWithoutIdSkipped() {
-    // 缺 id 的 game 条目跳过（失败安全，不产生无效规则）。
+    // 缺 id 的 game 条目跳过。
     const std::wstring path = MakeTempConfigPath();
     const std::string content = R"(
 [[games]]

@@ -28,7 +28,7 @@ struct MemoryStatus {
 // 单次只读 GlobalMemoryStatusEx 查询：不创建资源、不需提权、不启动线程、不改系统状态。
 [[nodiscard]] common::Result<MemoryStatus> QueryMemoryStatus();
 
-// 仅显示用的字节格式化："0 B"/"1023 B"/"1.5 KiB"/"3.8 GiB"（二进制单位）。
+// 仅显示用的字节格式化："0 B"/"1023 B"/"1.5 KiB"/"3.8 GiB"。
 // 取整只发生在返回字符串中，uint64_t 真值永不被修改。
 [[nodiscard]] std::wstring FormatBytes(std::uint64_t bytes);
 

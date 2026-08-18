@@ -102,7 +102,7 @@ bool TestLoggerFiltersBelowThreshold() {
         logger.Write(optimizer::logger::LogLevel::Trace, L"t", L"dropped");
         logger.Write(optimizer::logger::LogLevel::Debug, L"d", L"dropped");
         logger.Write(optimizer::logger::LogLevel::Info, L"i", L"kept");
-    } // logger 在此析构：句柄关闭（RAII），内容已刷出
+    } // logger 在此析构：句柄关闭，内容已刷出
     const std::wstring content = ReadWholeFile(path);
     std::filesystem::remove(std::filesystem::path(path));
     return content.find(L"[INFO] i: kept") != std::wstring::npos &&
@@ -128,8 +128,8 @@ bool TestLoggerFileSinkWritesAndCloses() {
 
 bool TestLoggerFileSinkFailureStaysUsable() {
     optimizer::logger::Logger logger;
-    // 指向已存在目录的路径打开为文件必然失败（spdlog 会自动创建缺失父目录，
-    // 所以不存在的子目录不再失败）：logger 仍可用且不抛异常。
+    // 指向已存在目录的路径打开为文件必然失败，spdlog 会自动创建缺失父目录，
+    // 所以不存在的子目录不再失败：logger 仍可用且不抛异常。
     const std::wstring badPath = MakeTempLogPath() + L"_dir";
     std::filesystem::create_directory(std::filesystem::path(badPath));
     const auto opened = logger.SetFileSink(badPath);
@@ -137,7 +137,7 @@ bool TestLoggerFileSinkFailureStaysUsable() {
     if (opened.HasValue()) {
         return false;
     }
-    // logger 仍须接受写入而不抛（降级到 Debug）。
+    // logger 仍须接受写入而不抛，降级到 Debug。
     logger.Write(optimizer::logger::LogLevel::Error, L"m", L"still works");
     return true;
 }
@@ -211,9 +211,9 @@ bool TestLoggerSetLevelChangesFilter() {
     return content.find(L"[TRACE] t: now kept") != std::wstring::npos;
 }
 
-// 中文支持（工程手册 8.1）：文件 sink 必须以 UTF-8 字节存储宽文本，使中文经
+// 文件 sink 必须以 UTF-8 字节存储宽文本，使中文经
 // 文件往返不损坏、任何 UTF-8 工具可读。直接读原始字节查找中文载荷的精确 UTF-8
-// 编码（ReadWholeFile 的字节->wchar 拓宽对多字节文本有损，故在字节层比对）。
+// 编码，ReadWholeFile 的字节->wchar 拓宽对多字节文本有损，故在字节层比对。
 bool TestLoggerFileSinkStoresChineseAsUtf8() {
     const std::wstring path = MakeTempLogPath();
     {
@@ -234,7 +234,7 @@ bool TestLoggerFileSinkStoresChineseAsUtf8() {
     std::filesystem::remove(std::filesystem::path(path));
 
     // "中文日志消息" 的 UTF-8 字节。用程序构造以保证测试源码不受编译器
-    // 源编码影响（保持 ASCII 安全）。
+    // 源编码影响，保持 ASCII 安全。
     const std::string zhUtf8 = [] {
         std::string s;
         const std::wstring zh = L"中文日志消息";

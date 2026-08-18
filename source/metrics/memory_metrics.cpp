@@ -29,7 +29,7 @@ namespace optimizer::metrics {
         report.maxAvailableBytes = samples.front().availableBytes;
 
         // 平均负载对 0..100 有界域求和，sum <= 100*N 构造性无溢出；
-        // 字节字段仅计算 min/max（无需求和），同样安全。
+        // 字节字段仅计算 min/max，同样安全。
         std::uint64_t loadSum = 0;
         for (const auto& sample : samples) {
             report.minLoadPercent = std::min(report.minLoadPercent, sample.loadPercent);
@@ -39,7 +39,7 @@ namespace optimizer::metrics {
             report.maxAvailableBytes = std::max(report.maxAvailableBytes, sample.availableBytes);
         }
 
-        // Round-half-up 均值（与项目整数显示风格一致）。
+        // Round-half-up 均值。
         // loadSum + N/2 <= 100.5*N，远低于 uint64_t 上限。
         report.avgLoadPercent = static_cast<std::uint32_t>(
             (loadSum + report.sampleCount / 2) / report.sampleCount);
@@ -62,7 +62,7 @@ namespace optimizer::metrics {
         }
 
         // 严格小于：loadPercent == threshold 不计入。
-        // count <= N 使 count*100 <= 100*N（与窗口负载和同界）；
+        // count <= N 使 count*100 <= 100*N，与窗口负载和同界；
         // (count*100 + N/2)/N 为 round-half-up。
         const auto count = static_cast<std::size_t>(std::count_if(
             samples.begin(), samples.end(),

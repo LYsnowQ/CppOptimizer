@@ -144,7 +144,7 @@ bool TestShareMixedWindow() {
 }
 
 bool TestShareRoundsHalfUp() {
-    // 3 个中 1 个低于 50 => 33（33.3 向下）；3 个中 2 个 => 67（66.6 向上）。
+    // 3 个中 1 个低于 50 => 33；3 个中 2 个 => 67。
     std::vector<optimizer::metrics::MemorySample> oneOfThree = {
         optimizer::metrics::MemorySample{10, 0},
         optimizer::metrics::MemorySample{60, 0},

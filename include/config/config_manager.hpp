@@ -9,27 +9,27 @@
 
 namespace optimizer::config {
 
-// 应用运行模式（对应 config [application].mode）。
+// 应用运行模式。
 enum class RunMode {
     Observe,
     Balanced,
     Experimental
 };
 
-// 内存清理级别（对应 [memory].max_clean_level；无 realtime，红色禁止）。
+// 内存清理级别。无 realtime。
 enum class CleanLevel {
     None,
     Light
 };
 
-// 进程优先级上限（对应 [priority].max_level；无 realtime，红色禁止）。
+// 进程优先级上限。无 realtime。
 enum class PriorityLevel {
     None,
     AboveNormal,
     High
 };
 
-// [layers] 节：分层开关（只读观测/维护/紧急执行）。
+// [layers] 节：分层开关。
 struct LayerConfig {
     bool monitoring = true;
     bool maintenance = false;
@@ -43,7 +43,7 @@ struct PowerConfig {
     bool switchPowerScheme = false; // R2：默认关闭
 };
 
-// [priority] 节。maxLevel 上限无 realtime（红色禁止）。
+// [priority] 节。maxLevel 上限无 realtime。
 struct PriorityConfig {
     bool enabled = false;
     PriorityLevel maxLevel = PriorityLevel::AboveNormal;
@@ -55,7 +55,7 @@ struct GpuHeartbeatConfig {
     double maxMeasuredLoadPercent = 1.0;
 };
 
-// [scheduler] / [disk_cache] 节（Experimental / Planned）。
+// [scheduler] / [disk_cache] 节。
 struct ToggleConfig {
     bool enabled = false;
 };
@@ -94,7 +94,7 @@ struct MemoryConfig {
 };
 
 // 不可变配置快照。读取后拷贝使用，运行期不变量：所有字段已通过校验，
-// 危险开关保持默认或显式开启（见 LoadConfig 契约）。
+// 危险开关保持默认或显式开启。
 struct ConfigSnapshot {
     std::int64_t version = 0;
     ApplicationConfig application;
@@ -110,9 +110,9 @@ struct ConfigSnapshot {
 };
 
 // 从 TOML 文件加载配置。契约：
-// - 文件不存在、TOML 语法错误、类型不匹配或值越界均返回对应错误域（不抛异常）；
-// - 缺失的键使用默认值（失败安全：坏配置不导致程序崩溃）；
-// - 危险开关（scheduledCleanEnabled / allowNativeWrite）仅在显式配置为 true
+// - 文件不存在、TOML 语法错误、类型不匹配或值越界均返回对应错误域；
+// - 缺失的键使用默认值；
+// - 危险开关 scheduledCleanEnabled / allowNativeWrite 仅在显式配置为 true
 //   时开启，任何解析异常都回退到 false；
 // - 返回的 ConfigSnapshot 为不可变拷贝，调用方可安全持有。
 [[nodiscard]] common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path);

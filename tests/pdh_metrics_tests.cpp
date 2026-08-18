@@ -5,7 +5,7 @@
 
 namespace {
 
-// 测试用小采样间隔，保证测试快速（真实默认 500ms 只影响 --cpu 命令）。
+// 测试用小采样间隔，保证测试快速。
 constexpr auto kTestInterval = std::chrono::milliseconds(10);
 
 bool TestInitializeSucceeds() {
@@ -15,7 +15,7 @@ bool TestInitializeSucceeds() {
 }
 
 bool TestFirstSampleIsWarmingUp() {
-    // 速率型计数器首次采样无有效值：必须返回 valid=false（不伪装成零值）。
+    // 速率型计数器首次采样无有效值：必须返回 valid=false。
     optimizer::metrics::PdhCpuQuery query(kTestInterval);
     if (!query.Initialize().HasValue()) {
         return false;
@@ -43,7 +43,7 @@ bool TestSecondSampleIsValid() {
 }
 
 bool TestSampleEnforcesInterval() {
-    // 采样节奏契约：两次采样间隔必须 >= minInterval（不足则前台等待补齐），
+    // 采样节奏契约：两次采样间隔必须 >= minInterval，不足则前台等待补齐，
     // 调用方连续调用也能拿到有效速率值。
     optimizer::metrics::PdhCpuQuery query(std::chrono::milliseconds(100));
     if (!query.Initialize().HasValue()) {
@@ -61,7 +61,7 @@ bool TestSampleEnforcesInterval() {
     if (!third.HasValue()) {
         return false;
     }
-    // 第三次采样距第二次应 >= interval（100ms）。
+    // 第三次采样距第二次应 >= interval。
     return elapsed >= interval && third.Value().valid;
 }
 
@@ -77,7 +77,7 @@ bool TestReinitializeIsIdempotent() {
     if (!query.Initialize().HasValue()) {
         return false;
     }
-    // 重复初始化应先关闭旧句柄再重开（无泄漏、无错误）。
+    // 重复初始化应先关闭旧句柄再重开。
     return query.Initialize().HasValue();
 }
 

@@ -14,8 +14,8 @@
 
 namespace optimizer::common {
 
-// 持有 Create*/Open* 返回、文档规定用 CloseHandle 释放的句柄（RAII）。
-// 禁止收养伪句柄（GetCurrentProcess/GetCurrentThread）与借用句柄。
+// 持有 Create*/Open* 返回、文档规定用 CloseHandle 释放的句柄。
+// 禁止收养 GetCurrentProcess/GetCurrentThread 伪句柄与借用句柄。
 class UniqueHandle {
 public:
     UniqueHandle() noexcept = default;

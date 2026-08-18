@@ -18,11 +18,10 @@ namespace optimizer::logger {
 
 namespace {
 
-// 宽文本转 UTF-8（项目契约为宽文本，spdlog 处理窄文本，在边界转换）。
-// 有意不加 noexcept：结果分配可能抛 bad_alloc，两个调用点（Write/SetFileSink）
+// 宽文本转 UTF-8，项目契约为宽文本，spdlog 处理窄文本，在边界转换。
+// 有意不加 noexcept：结果分配可能抛 bad_alloc，两个调用点 Write/SetFileSink
 // 均有 try/catch 降级；加 noexcept 将导致 terminate 并绕过降级契约。
-// flags 传 0 为有意选择：CP_UTF8 对孤立代理对替换为 U+FFFD 而非整条失败，
-// 使日志正文损失最小化。
+// flags 传 0 为有意选择：CP_UTF8 对孤立代理对替换为 U+FFFD 而非整条失败。
 std::string ToUtf8(std::wstring_view text) {
     if (text.empty()) {
         return {};
@@ -31,7 +30,7 @@ std::string ToUtf8(std::wstring_view text) {
         CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
         nullptr, 0, nullptr, nullptr);
     if (needed <= 0) {
-        // 转换失败（罕见）：正文降级为空，时间/级别/模块仍输出。属有意降级而非静默成功。
+        // 转换失败：正文降级为空，时间/级别/模块仍输出。
         return {};
     }
     std::string utf8(static_cast<std::size_t>(needed), '\0');
@@ -41,7 +40,7 @@ std::string ToUtf8(std::wstring_view text) {
     return utf8;
 }
 
-// 显式映射，不依赖枚举数值一致（顺序当前相同，但契约上不假设）。
+// 显式映射，不依赖枚举数值一致。
 spdlog::level::level_enum ToSpdlogLevel(LogLevel level) noexcept {
     switch (level) {
     case LogLevel::Trace:
@@ -60,7 +59,7 @@ spdlog::level::level_enum ToSpdlogLevel(LogLevel level) noexcept {
     return spdlog::level::info;
 }
 
-// 有意不加 noexcept：std::format 分配宽字符串可能抛 bad_alloc（同 ToUtf8）。
+// 有意不加 noexcept：std::format 分配宽字符串可能抛 bad_alloc，同 ToUtf8。
 std::wstring NowLocalTime() {
     SYSTEMTIME st{};
     ::GetLocalTime(&st);
@@ -69,8 +68,8 @@ std::wstring NowLocalTime() {
                        st.wSecond, st.wMilliseconds);
 }
 
-// 控制台双路径 sink（中文环境策略）：
-// - 直连真实控制台（FILE_TYPE_CHAR）：WriteConsoleW 宽字符直写，绕过代码页 936；
+// 控制台双路径 sink：
+// - 直连真实控制台 FILE_TYPE_CHAR：WriteConsoleW 宽字符直写，绕过代码页 936；
 // - 重定向至文件/管道：WriteFile 写 UTF-8 字节，保持可移植性。
 // 目标类型运行期不变，构造时检测一次即可。
 class ConsoleOrUtf8Sink final : public spdlog::sinks::base_sink<std::mutex> {
@@ -168,7 +167,7 @@ std::wstring FormatLogRecord(const LogRecord& record) {
 }
 
 Logger::Logger(LogLevel level) noexcept : level_(level) {
-    // 默认 sink 为 Debug 输出；构造失败时 impl_ 置空（no-op 适配器）。
+    // 默认 sink 为 Debug 输出；构造失败时 impl_ 置空。
     try {
         auto sink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
         auto logger = std::make_shared<spdlog::logger>("optimizer", sink);
@@ -181,8 +180,8 @@ Logger::Logger(LogLevel level) noexcept : level_(level) {
 }
 
 Logger::~Logger() noexcept {
-    // make_shared 直接构造不会注册进 spdlog 全局 registry（注册走 spdlog::create），
-    // 因此释放 impl_ 即释放对 sink 的最后引用（文件句柄由 sink 析构关闭）。
+    // make_shared 直接构造不会注册进 spdlog 全局 registry，注册走 spdlog::create，
+    // 因此释放 impl_ 即释放对 sink 的最后引用，文件句柄由 sink 析构关闭。
     impl_.reset();
 }
 
@@ -207,8 +206,8 @@ common::Result<void> Logger::SetFileSink(const std::wstring& path) noexcept {
         impl_ = std::move(logger);
         return common::Result<void>::Success();
     } catch (const spdlog::spdlog_ex& exception) {
-        // 打开失败（路径无效/权限不足）：保持原 sink，失败不伪装成功。spdlog 不携带
-        // 打开失败的 Win32 错误码，尽力读取 GetLastError 并保留异常消息。
+        // 打开失败：保持原 sink。spdlog 不携带打开失败的 Win32 错误码，
+        // 尽力读取 GetLastError 并保留异常消息。
         const std::uint32_t code = static_cast<std::uint32_t>(::GetLastError());
         return common::Result<void>::Failure(common::Error::FromWin32(
             code, std::string("Logger::SetFileSink: ") + exception.what()));
@@ -220,7 +219,7 @@ common::Result<void> Logger::SetFileSink(const std::wstring& path) noexcept {
 
 void Logger::SetStderrSink() noexcept {
     try {
-        // 双路径 sink：真实控制台 -> WriteConsoleW（宽字符绕过代码页）；重定向 -> UTF-8。
+        // 双路径 sink：真实控制台 -> WriteConsoleW 宽字符绕过代码页；重定向 -> UTF-8。
         auto sink = std::make_shared<ConsoleOrUtf8Sink>(
             ::GetStdHandle(STD_ERROR_HANDLE));
         auto logger = std::make_shared<spdlog::logger>("optimizer", sink);
@@ -258,7 +257,7 @@ void Logger::Write(LogLevel level, std::wstring_view module,
             FormatLogRecord(LogRecord{level, NowLocalTime(),
                                       std::wstring(module), std::wstring(message)});
         logger->log(ToSpdlogLevel(level), ToUtf8(line));
-        // 契约：写入后立即刷盘（与原手写无缓冲实现一致），确保调用方返回时记录可见。
+        // 契约：写入后立即刷盘，确保调用方返回时记录可见。
         logger->flush();
     } catch (...) {
         // sink 写入失败不得使调用方崩溃，亦不得递归触发新的日志写入。

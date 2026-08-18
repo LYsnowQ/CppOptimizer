@@ -17,8 +17,8 @@ enum class ErrorDomain {
     Internal
 };
 
-// 统一错误模型：domain 标识来源域，code 为原始错误码（Win32/HRESULT 等），
-// operation 为出错的操作名（定位用），message 为可显示信息。
+// 统一错误模型：domain 标识来源域，code 为原始错误码，
+// operation 为出错的操作名，message 为可显示信息。
 struct Error {
     ErrorDomain domain = ErrorDomain::Internal;
     std::uint64_t code = 0;
@@ -37,7 +37,7 @@ std::wstring FormatErrorMessage(ErrorDomain domain, std::uint64_t code);
 const wchar_t* ToString(ErrorDomain domain) noexcept;
 
 // 失败不伪装成成功：任何可能失败的接口都应返回 Result，调用方必须检查
-// HasValue()/operator bool 后再访问 Value()/ErrorValue()（在无值时访问为 UB）。
+// HasValue()/operator bool 后再访问 Value()/ErrorValue()。
 template <typename T>
 class Result {
 public:

@@ -34,7 +34,7 @@ common::Result<void> PdhCpuQuery::Initialize() noexcept {
                                    "PdhOpenQueryW"));
     }
 
-    // 英文计数器路径：避免系统显示语言导致路径失效（docs/04 4.1）。
+    // 英文计数器路径：避免系统显示语言导致路径失效。
     const wchar_t* kCounterPath = L"\\Processor(_Total)\\% Processor Time";
     HCOUNTER counter = nullptr;
     status = ::PdhAddEnglishCounterW(query, kCounterPath, 0, &counter);
@@ -59,8 +59,7 @@ common::Result<CpuSample> PdhCpuQuery::Sample() noexcept {
     }
 
     // 采样节奏：速率计数器需要两次采样间有足够时间差才能算出有效速率。
-    // 距上次采样不足 minInterval 时前台等待补齐（不引入后台线程，符合红区
-    // “前台有界”约束）。调用方连续调用也能拿到有效值，这是 API 契约。
+    // 距上次采样不足 minInterval 时前台等待补齐。调用方连续调用也能拿到有效值，这是 API 契约。
     const auto now = std::chrono::steady_clock::now();
     if (hasLastSampleTime_) {
         const auto elapsed = now - lastSampleTime_;
@@ -79,7 +78,7 @@ common::Result<CpuSample> PdhCpuQuery::Sample() noexcept {
     lastSampleTime_ = std::chrono::steady_clock::now();
     hasLastSampleTime_ = true;
 
-    // 速率型计数器首次采样无有效值：返回 warming-up（不伪装成零值）。
+    // 速率型计数器首次采样无有效值：返回 warming-up。
     if (!hasPreviousSample_) {
         hasPreviousSample_ = true;
         return common::Result<CpuSample>::Success(CpuSample{false, 0.0});
