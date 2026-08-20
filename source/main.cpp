@@ -12,9 +12,11 @@
 #include <chrono>
 #include <cwchar>
 #include <exception>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -259,7 +261,12 @@ int RunWatchCommand(int argc, wchar_t* argv[]) {
 
     std::vector<optimizer::config::GameConfig> games;
     if (argc >= 4) {
-        auto config = optimizer::config::LoadConfig(argv[3]);
+        // main + 同目录 config.local.toml 合并（用户自建规则生效）。
+        const std::filesystem::path mainPath(argv[3]);
+        const std::wstring localPath =
+            (mainPath.parent_path() / L"config.local.toml").wstring();
+        auto config =
+            optimizer::config::LoadConfigWithLocal(argv[3], localPath);
         if (!config) {
             const auto& error = config.ErrorValue();
             std::wcerr << L"  config load failed ["
@@ -268,6 +275,16 @@ int RunWatchCommand(int argc, wchar_t* argv[]) {
             return 2;
         }
         games = std::move(config.Value().games);
+    } else {
+        // 无 main：仅加载当前目录 config.local.toml（存在时）。
+        std::error_code existsError;
+        if (std::filesystem::exists(
+                std::filesystem::path(L"config.local.toml"), existsError)) {
+            auto local = optimizer::config::LoadConfig(L"config.local.toml");
+            if (local) {
+                games = std::move(local.Value().games);
+            }
+        }
     }
 
     optimizer::process::ProcessWatcher watcher;
@@ -440,6 +457,221 @@ int RunDiagnostics() {
     return 0;
 }
 
+// --add-game 的 local 配置路径：main 同目录 config.local.toml；无 main 时当前目录。
+std::wstring LocalConfigPath(std::wstring_view mainPath) {
+    if (mainPath.empty()) {
+        return L"config.local.toml";
+    }
+    const std::filesystem::path main(mainPath);
+    return (main.parent_path() / L"config.local.toml").wstring();
+}
+
+// 读取一行宽字符输入（交互模式）。
+std::wstring ReadConsoleLine() {
+    std::wstring line;
+    std::getline(std::wcin, line);
+    return line;
+}
+
+// 打印一条游戏规则的预览。
+void PrintRulePreview(const optimizer::config::GameConfig& game) {
+    std::wostringstream line;
+    line << L"  id             : "
+         << std::wstring(game.id.begin(), game.id.end());
+    optimizer::common::WriteConsoleLine(line.str());
+    line.str(L"");
+    line.clear();
+    line << L"  display_name   : "
+         << std::wstring(game.displayName.begin(), game.displayName.end());
+    optimizer::common::WriteConsoleLine(line.str());
+    line.str(L"");
+    line.clear();
+    line << L"  process_names  : [";
+    for (std::size_t i = 0; i < game.processNames.size(); ++i) {
+        if (i > 0) {
+            line << L", ";
+        }
+        line << L"\""
+             << std::wstring(game.processNames[i].begin(),
+                             game.processNames[i].end())
+             << L"\"";
+    }
+    line << L"]";
+    optimizer::common::WriteConsoleLine(line.str());
+    line.str(L"");
+    line.clear();
+    line << L"  pause_when_background : "
+         << (game.pauseWhenBackground ? L"true" : L"false");
+    optimizer::common::WriteConsoleLine(line.str());
+}
+
+// 现有规则（用于 id 去重）：main + local 合并，或仅 local。
+optimizer::common::Result<std::vector<optimizer::config::GameConfig>>
+LoadExistingGameRules(std::wstring_view mainPath,
+                      std::wstring_view localPath) {
+    if (!mainPath.empty()) {
+        auto config =
+            optimizer::config::LoadConfigWithLocal(mainPath, localPath);
+        if (!config) {
+            return optimizer::common::Result<
+                std::vector<optimizer::config::GameConfig>>::Failure(
+                config.ErrorValue());
+        }
+        return optimizer::common::Result<
+            std::vector<optimizer::config::GameConfig>>::Success(
+            std::move(config.Value().games));
+    }
+    std::error_code existsError;
+    if (std::filesystem::exists(std::filesystem::path(localPath),
+                                existsError)) {
+        auto config = optimizer::config::LoadConfig(localPath);
+        if (!config) {
+            return optimizer::common::Result<
+                std::vector<optimizer::config::GameConfig>>::Failure(
+                config.ErrorValue());
+        }
+        return optimizer::common::Result<
+            std::vector<optimizer::config::GameConfig>>::Success(
+            std::move(config.Value().games));
+    }
+    return optimizer::common::Result<
+        std::vector<optimizer::config::GameConfig>>::Success({});
+}
+
+int RunAddGameCommand(int argc, wchar_t* argv[]) {
+    // --add-game [pid] [main.toml] [--dry-run]：从当前运行进程生成游戏规则
+    // 并写入 config.local.toml（用户自建配置，与预设 main 配置分离）。
+    // 交互模式（未给 pid）：列出有窗口进程 -> 输编号 -> 预览 -> 确认 -> 写入；
+    // 非交互模式（给了 pid）：直接预览并写入（显式指定即明确意图）。
+    // 写入是唯一的本地文件操作（原子写），无任何系统级动作。
+    std::uint32_t pid = 0;
+    std::wstring mainPath;
+    bool dryRun = false;
+    for (int i = 2; i < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--dry-run") {
+            dryRun = true;
+        } else if (ParseUint32(argv[i], pid) && pid > 0) {
+            // 纯数字参数 -> pid（非交互模式）。
+        } else if (mainPath.empty()) {
+            mainPath = argv[i];
+        } else {
+            std::wcerr << L"  unexpected argument: " << argv[i] << L"\n";
+            return 2;
+        }
+    }
+
+    // 确定选中的进程。
+    std::optional<optimizer::process::ProcessDetails> selected;
+    if (pid == 0) {
+        // 交互模式：列出有可见窗口的进程。
+        auto result = optimizer::process::EnumerateProcessDetails(true);
+        if (!result) {
+            const auto& error = result.ErrorValue();
+            std::wcerr << L"  process list failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        auto list = std::move(result.Value());
+        std::sort(list.begin(), list.end(),
+                  [](const auto& a, const auto& b) { return a.pid < b.pid; });
+        if (list.empty()) {
+            optimizer::common::WriteConsoleLine(
+                L"  没有可添加的有窗口进程（无窗口进程请用 --add-game <pid>）");
+            return 0;
+        }
+        for (std::size_t i = 0; i < list.size(); ++i) {
+            std::wostringstream line;
+            line << L"  [" << (i + 1) << L"] pid=" << list[i].pid << L"  "
+                 << list[i].name << L"  " << list[i].windowTitle;
+            optimizer::common::WriteConsoleLine(line.str());
+        }
+        for (;;) {
+            optimizer::common::WriteConsoleLine(L"  输入编号添加（q 退出）：");
+            const std::wstring input = ReadConsoleLine();
+            if (input.empty() || input == L"q" || input == L"Q") {
+                return 0;
+            }
+            std::uint32_t index = 0;
+            if (!ParseUint32(input, index) || index == 0 ||
+                index > list.size()) {
+                optimizer::common::WriteConsoleLine(L"  无效编号，请重新输入");
+                continue;
+            }
+            selected = list[index - 1];
+            break;
+        }
+    } else {
+        auto query = optimizer::process::QueryProcessDetails(pid);
+        if (!query) {
+            const auto& error = query.ErrorValue();
+            std::wcerr << L"  query pid failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        selected = query.Value();
+    }
+
+    // 生成规则（id 去重基于 main + local 的最终规则集）。
+    const std::wstring localPath = LocalConfigPath(mainPath);
+    auto existing = LoadExistingGameRules(mainPath, localPath);
+    if (!existing) {
+        const auto& error = existing.ErrorValue();
+        std::wcerr << L"  config load failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+    auto rule = optimizer::process::BuildGameRuleFromProcess(
+        selected.value(), existing.Value());
+    if (!rule) {
+        const auto& error = rule.ErrorValue();
+        std::wcerr << L"  rule build failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+
+    optimizer::common::WriteConsoleLine(L"将添加游戏规则：");
+    PrintRulePreview(rule.Value());
+
+    if (dryRun) {
+        optimizer::common::WriteConsoleLine(L"  --dry-run：未写入任何文件");
+        return 0;
+    }
+    if (pid == 0) {
+        std::wostringstream prompt;
+        prompt << L"  确认写入 " << localPath << L"？[y/N] ";
+        optimizer::common::WriteConsoleLine(prompt.str());
+        const std::wstring answer = ReadConsoleLine();
+        if (answer != L"y" && answer != L"Y") {
+            optimizer::common::WriteConsoleLine(L"  已取消");
+            return 0;
+        }
+    }
+
+    std::vector<optimizer::config::GameConfig> toWrite{rule.Value()};
+    auto append = optimizer::config::AppendGameRules(localPath, toWrite);
+    if (!append) {
+        const auto& error = append.ErrorValue();
+        std::wcerr << L"  write failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+
+    std::wostringstream done;
+    done << L"  已添加规则 -> " << localPath;
+    optimizer::common::WriteConsoleLine(done.str());
+    if (!mainPath.empty()) {
+        std::wostringstream hint;
+        hint << L"  验证：CppOptimizer.exe --watch 10 " << mainPath;
+        optimizer::common::WriteConsoleLine(hint.str());
+    }
+    return 0;
+}
+
 void PrintUsage() {
     std::wcout
         << L"CppOptimizer (engineering baseline)\n\n"
@@ -456,6 +688,9 @@ void PrintUsage() {
         << L"                             for 1..60 s (read-only, foreground, Toolhelp)\n"
         << L"  CppOptimizer.exe --list-processes [--all] [filter]  List running processes\n"
         << L"                             (read-only; default: visible windows only)\n"
+        << L"  CppOptimizer.exe --add-game [pid] [main.toml] [--dry-run]  Add a running\n"
+        << L"                             process as a game rule into config.local.toml\n"
+        << L"                             (interactive picker when pid is omitted)\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -490,6 +725,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 2 && std::wstring_view(argv[1]) == L"--list-processes") {
             return RunListProcesses(argc, argv);
+        }
+        if (argc >= 2 && std::wstring_view(argv[1]) == L"--add-game") {
+            return RunAddGameCommand(argc, argv);
         }
         PrintUsage();
         return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;
