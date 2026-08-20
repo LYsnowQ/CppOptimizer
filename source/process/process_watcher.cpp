@@ -10,8 +10,10 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 
+#include "common/console_output.hpp"
 #include "common/unique_resource.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 
@@ -43,6 +45,27 @@ wchar_t FoldAscii(wchar_t ch) noexcept {
         return static_cast<wchar_t>(ch - L'A' + L'a');
     }
     return ch;
+}
+
+// ASCII 小写折叠（窄字符版）。
+char FoldAsciiChar(char ch) noexcept {
+    if (ch >= 'A' && ch <= 'Z') {
+        return static_cast<char>(ch - 'A' + 'a');
+    }
+    return ch;
+}
+
+// ASCII 大小写不敏感相等（窄字符版）。
+bool AsciiEquals(std::string_view a, std::string_view b) noexcept {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (FoldAsciiChar(a[i]) != FoldAsciiChar(b[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // 用 (gameId, pid) 在跟踪表中查找条目。
@@ -384,6 +407,104 @@ bool ProcessMatchesFilter(const ProcessDetails& details,
     return ContainsAscii(details.name, filter) ||
            ContainsAscii(details.executablePath, filter) ||
            ContainsAscii(details.windowTitle, filter);
+}
+
+common::Result<std::string> DeriveGameId(
+    std::wstring_view processName) noexcept {
+    // 去扩展名（最后一个点之后视为扩展名；点不在开头才去除）。
+    std::wstring_view base = processName;
+    const auto dot = processName.find_last_of(L'.');
+    if (dot != std::wstring_view::npos && dot > 0) {
+        base = processName.substr(0, dot);
+    }
+    auto utf8 = common::WideToUtf8(base);
+    if (!utf8) {
+        return common::Result<std::string>::Failure(
+            common::Error::Validation(
+                "DeriveGameId", L"Process name is not valid UTF-16"));
+    }
+    // ASCII 小写（UTF-8 多字节首字节 >= 0x80，不受影响）。
+    std::string id = std::move(utf8.Value());
+    for (char& ch : id) {
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = static_cast<char>(ch - 'A' + 'a');
+        }
+    }
+    return common::Result<std::string>::Success(std::move(id));
+}
+
+std::string MakeUniqueGameId(
+    std::string_view baseId,
+    std::span<const config::GameConfig> existing) noexcept {
+    const auto conflict = [&existing](std::string_view candidate) {
+        for (const auto& game : existing) {
+            if (AsciiEquals(game.id, candidate)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!conflict(baseId)) {
+        return std::string(baseId);
+    }
+    for (int suffix = 2;; ++suffix) {
+        const std::string candidate =
+            std::string(baseId) + "-" + std::to_string(suffix);
+        if (!conflict(candidate)) {
+            return candidate;
+        }
+    }
+}
+
+common::Result<config::GameConfig> BuildGameRuleFromProcess(
+    const ProcessDetails& details,
+    std::span<const config::GameConfig> existing,
+    std::wstring_view displayNameHint) noexcept {
+    if (details.name.empty()) {
+        return common::Result<config::GameConfig>::Failure(
+            common::Error::Validation(
+                "BuildGameRuleFromProcess.name",
+                L"Process name is empty"));
+    }
+
+    auto baseId = DeriveGameId(details.name);
+    if (!baseId || baseId.Value().empty()) {
+        return common::Result<config::GameConfig>::Failure(
+            common::Error::Validation(
+                "BuildGameRuleFromProcess.id",
+                L"Cannot derive a stable id from the process name"));
+    }
+
+    config::GameConfig game;
+    game.id = MakeUniqueGameId(baseId.Value(), existing);
+
+    // display_name：提示 > 窗口标题 > 进程名。
+    if (!displayNameHint.empty()) {
+        auto hint = common::WideToUtf8(displayNameHint);
+        if (hint) {
+            game.displayName = std::move(hint.Value());
+        }
+    }
+    if (game.displayName.empty() && !details.windowTitle.empty()) {
+        auto title = common::WideToUtf8(details.windowTitle);
+        if (title) {
+            game.displayName = std::move(title.Value());
+        }
+    }
+    if (game.displayName.empty()) {
+        auto name = common::WideToUtf8(details.name);
+        if (name) {
+            game.displayName = std::move(name.Value());
+        }
+    }
+
+    auto processName = common::WideToUtf8(details.name);
+    if (!processName) {
+        return common::Result<config::GameConfig>::Failure(
+            processName.ErrorValue());
+    }
+    game.processNames.push_back(std::move(processName.Value()));
+    return common::Result<config::GameConfig>::Success(std::move(game));
 }
 
 common::Result<ProcessDetails> QueryProcessDetails(

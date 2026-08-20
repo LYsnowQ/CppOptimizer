@@ -1,9 +1,20 @@
 #include "config/config_manager.hpp"
 
+#include "common/unique_resource.hpp"
+
 #include <toml++/toml.h>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <utility>
@@ -76,6 +87,202 @@ common::Result<PriorityLevel> ParsePriorityLevel(std::string_view name) {
     }
     return common::Result<PriorityLevel>::Failure(common::Error::Validation(
         "ParsePriorityLevel", L"Unknown priority level (expected none/above_normal/high)"));
+}
+
+std::string ToTomlString(std::string_view text) noexcept {
+    std::string out;
+    out.reserve(text.size() + 8);
+    out.push_back('"');
+    for (const char ch : text) {
+        switch (ch) {
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\b':
+                out += "\\b";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\f':
+                out += "\\f";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            default:
+                if (static_cast<unsigned char>(ch) < 0x20) {
+                    // 其余控制字符：\uXXXX 转义。
+                    char buffer[8]{};
+                    std::snprintf(buffer, sizeof(buffer), "\\u%04X",
+                                  static_cast<unsigned int>(
+                                      static_cast<unsigned char>(ch)));
+                    out += buffer;
+                } else {
+                    out.push_back(ch);
+                }
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+std::string FormatGameRulesToml(
+    std::span<const GameConfig> rules) noexcept {
+    std::string out;
+    for (const auto& game : rules) {
+        out += "# 由 CppOptimizer --add-game 生成\n";
+        out += "[[games]]\n";
+        out += "id = " + ToTomlString(game.id) + "\n";
+        if (!game.displayName.empty()) {
+            out += "display_name = " + ToTomlString(game.displayName) + "\n";
+        }
+        if (!game.processNames.empty()) {
+            out += "process_names = [";
+            for (std::size_t i = 0; i < game.processNames.size(); ++i) {
+                if (i > 0) {
+                    out += ", ";
+                }
+                out += ToTomlString(game.processNames[i]);
+            }
+            out += "]\n";
+        }
+        out += "pause_when_background = ";
+        out += game.pauseWhenBackground ? "true" : "false";
+        out += "\n\n";
+    }
+    return out;
+}
+
+common::Result<void> AppendGameRules(
+    std::wstring_view path, std::span<const GameConfig> rules) noexcept {
+    if (rules.empty()) {
+        return common::Result<void>::Success();
+    }
+    const std::wstring pathStr(path);
+
+    // 读现有内容（文件不存在视为空，不报错）。
+    std::string content;
+    {
+        common::UniqueHandle file(::CreateFileW(
+            pathStr.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (file.IsValid()) {
+            bool readFailed = false;
+            char buffer[4096]{};
+            for (;;) {
+                DWORD bytes = 0;
+                if (!::ReadFile(file.Get(), buffer, sizeof(buffer), &bytes,
+                                nullptr)) {
+                    readFailed = true;
+                    break;
+                }
+                if (bytes == 0) {
+                    break; // EOF
+                }
+                content.append(buffer, bytes);
+            }
+            if (readFailed) {
+                return common::Result<void>::Failure(
+                    common::Error::FromWin32(::GetLastError(), "ReadFile"));
+            }
+        } else {
+            const DWORD code = ::GetLastError();
+            if (code != ERROR_FILE_NOT_FOUND) {
+                return common::Result<void>::Failure(
+                    common::Error::FromWin32(code, "CreateFileW"));
+            }
+        }
+    }
+
+    // 追加到末尾；原文件未以换行结尾则补一个，避免拼接到同一行。
+    if (!content.empty() && content.back() != '\n') {
+        content.push_back('\n');
+    }
+    content += FormatGameRulesToml(rules);
+
+    // 原子写：临时文件 + MoveFileEx 替换；任何失败清理临时文件。
+    const std::wstring tempPath = pathStr + L".tmp";
+    {
+        common::UniqueHandle file(::CreateFileW(
+            tempPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!file.IsValid()) {
+            return common::Result<void>::Failure(
+                common::Error::FromWin32(::GetLastError(), "CreateFileW(tmp)"));
+        }
+        DWORD written = 0;
+        if (!::WriteFile(file.Get(), content.data(),
+                         static_cast<DWORD>(content.size()), &written, nullptr) ||
+            written != content.size()) {
+            const DWORD code = ::GetLastError();
+            ::DeleteFileW(tempPath.c_str());
+            return common::Result<void>::Failure(
+                common::Error::FromWin32(code, "WriteFile"));
+        }
+        ::FlushFileBuffers(file.Get());
+    }
+    if (!::MoveFileExW(tempPath.c_str(), pathStr.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD code = ::GetLastError();
+        ::DeleteFileW(tempPath.c_str());
+        return common::Result<void>::Failure(
+            common::Error::FromWin32(code, "MoveFileExW"));
+    }
+    return common::Result<void>::Success();
+}
+
+std::vector<GameConfig> MergeGameRules(
+    std::span<const GameConfig> mainRules,
+    std::span<const GameConfig> localRules) noexcept {
+    std::vector<GameConfig> merged(mainRules.begin(), mainRules.end());
+    for (const auto& local : localRules) {
+        const std::string localLower = ToLower(local.id);
+        bool replaced = false;
+        for (auto& item : merged) {
+            if (ToLower(item.id) == localLower) {
+                item = local;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            merged.push_back(local);
+        }
+    }
+    return merged;
+}
+
+common::Result<ConfigSnapshot> LoadConfigWithLocal(
+    std::wstring_view mainPath, std::wstring_view localPath) noexcept {
+    auto mainResult = LoadConfig(mainPath);
+    if (!mainResult) {
+        return common::Result<ConfigSnapshot>::Failure(mainResult.ErrorValue());
+    }
+
+    // local 文件不存在：仅返回 main 结果（显式路径下未创建 local 不算错误）。
+    std::error_code existsError;
+    if (!std::filesystem::exists(std::filesystem::path(localPath),
+                                 existsError)) {
+        return common::Result<ConfigSnapshot>::Success(
+            std::move(mainResult.Value()));
+    }
+
+    auto localResult = LoadConfig(localPath);
+    if (!localResult) {
+        return common::Result<ConfigSnapshot>::Failure(
+            localResult.ErrorValue());
+    }
+
+    ConfigSnapshot snapshot = std::move(mainResult.Value());
+    snapshot.games = MergeGameRules(snapshot.games, localResult.Value().games);
+    return common::Result<ConfigSnapshot>::Success(std::move(snapshot));
 }
 
 common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {

@@ -508,6 +508,53 @@ bool TestProcessMatchesFilter() {
            !process::ProcessMatchesFilter(details, L"nonexistent");
 }
 
+// ---------- 规则生成测试 ----------
+
+bool TestDeriveGameId() {
+    auto id1 = process::DeriveGameId(L"EldenRing.exe");
+    auto id2 = process::DeriveGameId(L"eldenring.EXE");
+    auto id3 = process::DeriveGameId(L"explorer"); // 无扩展名
+    auto id4 = process::DeriveGameId(L"哔哩哔哩.exe"); // 非 ASCII 保留
+    return id1.HasValue() && id1.Value() == "eldenring" &&
+           id2.HasValue() && id2.Value() == "eldenring" &&
+           id3.HasValue() && id3.Value() == "explorer" &&
+           id4.HasValue() && id4.Value() == "哔哩哔哩";
+}
+
+bool TestMakeUniqueGameId() {
+    const std::vector<optimizer::config::GameConfig> existing = {
+        MakeGame("eldenring", {}),
+        MakeGame("Game-2", {}),
+    };
+    // 保留传入大小写（派生函数 DeriveGameId 负责小写化）；仅处理冲突。
+    return process::MakeUniqueGameId("new", existing) == "new" &&
+           process::MakeUniqueGameId("ELDENRING", existing) == "ELDENRING-2" &&
+           process::MakeUniqueGameId("game-2", existing) == "game-2-2";
+}
+
+bool TestBuildGameRuleFromProcess() {
+    process::ProcessDetails details;
+    details.name = L"EldenRing.exe";
+    details.windowTitle = L"艾尔登法环";
+    details.pid = 1234;
+
+    // 无冲突：id 派生 + display_name 取窗口标题。
+    auto rule = process::BuildGameRuleFromProcess(details, {});
+    if (!rule.HasValue() || rule.Value().id != "eldenring" ||
+        rule.Value().displayName != "艾尔登法环" ||
+        rule.Value().processNames.size() != 1 ||
+        rule.Value().processNames[0] != "EldenRing.exe") {
+        return false;
+    }
+
+    // 冲突：加后缀；hint 优先于窗口标题。
+    const std::vector<optimizer::config::GameConfig> existing = {
+        MakeGame("eldenring", {})};
+    auto rule2 = process::BuildGameRuleFromProcess(details, existing, L"自定名");
+    return rule2.HasValue() && rule2.Value().id == "eldenring-2" &&
+           rule2.Value().displayName == "自定名";
+}
+
 } // namespace
 
 int wmain() {
@@ -547,6 +594,9 @@ int wmain() {
     run(L"EnumerateProcessDetails all contains self", &TestEnumerateProcessDetailsAllContainsSelf);
     run(L"EnumerateProcessDetails windowOnly excludes self", &TestEnumerateProcessDetailsWindowOnlyExcludesSelf);
     run(L"ProcessMatchesFilter substring", &TestProcessMatchesFilter);
+    run(L"DeriveGameId strips extension and folds case", &TestDeriveGameId);
+    run(L"MakeUniqueGameId appends suffix on conflict", &TestMakeUniqueGameId);
+    run(L"BuildGameRuleFromProcess derives rule", &TestBuildGameRuleFromProcess);
     run(L"Watcher PollOnce self rule", &TestWatcherPollOnceSelfRule);
     run(L"Watcher thread delivers events", &TestWatcherThreadDeliversEvents);
     run(L"Watcher stop idempotent", &TestWatcherStopIdempotent);

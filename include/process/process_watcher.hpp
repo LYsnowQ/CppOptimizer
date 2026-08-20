@@ -164,6 +164,26 @@ struct ProcessDetails {
 [[nodiscard]] bool ProcessMatchesFilter(const ProcessDetails& details,
                                         std::wstring_view filter) noexcept;
 
+// 纯函数：从进程可执行文件名派生稳定 id（去扩展名 + ASCII 小写，
+// 非 ASCII 字符按 UTF-8 保留）。非法 UTF-16 返回 Validation 错误。
+[[nodiscard]] common::Result<std::string> DeriveGameId(
+    std::wstring_view processName) noexcept;
+
+// 纯函数：在已有规则中生成不冲突的 id（ASCII 大小写不敏感比较），
+// 冲突时追加 -2、-3 后缀。
+[[nodiscard]] std::string MakeUniqueGameId(
+    std::string_view baseId,
+    std::span<const config::GameConfig> existing) noexcept;
+
+// 从进程详情生成游戏规则（纯函数）。
+// - id：DeriveGameId + MakeUniqueGameId；
+// - display_name：displayNameHint（用户提示）优先，其次窗口标题，再进程名；
+// - processNames：进程可执行文件名（UTF-8）。
+[[nodiscard]] common::Result<config::GameConfig> BuildGameRuleFromProcess(
+    const ProcessDetails& details,
+    std::span<const config::GameConfig> existing,
+    std::wstring_view displayNameHint = {}) noexcept;
+
 // ---------- 进程观测器（可停止轮询线程） ----------
 
 class ProcessWatcher {

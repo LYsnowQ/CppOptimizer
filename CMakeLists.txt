@@ -190,6 +190,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
     add_executable(CppOptimizerProcessTests
         tests/process_tests.cpp
         source/common/error.cpp
+        source/common/console_output.cpp
         source/process/process_watcher.cpp
     )
     target_include_directories(CppOptimizerProcessTests PRIVATE include)

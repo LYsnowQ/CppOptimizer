@@ -9,6 +9,13 @@
 
 namespace {
 
+optimizer::config::GameConfig MakeGame(std::string id, std::vector<std::string> names) {
+    optimizer::config::GameConfig game;
+    game.id = std::move(id);
+    game.processNames = std::move(names);
+    return game;
+}
+
 std::wstring MakeTempConfigPath() {
     wchar_t buffer[MAX_PATH]{};
     const DWORD length = ::GetTempPathW(MAX_PATH, buffer);
@@ -271,6 +278,150 @@ id = "ok"
            result.Value().games[0].id == "ok";
 }
 
+// ---------- 规则写入与合并测试 ----------
+
+bool TestToTomlString() {
+    return optimizer::config::ToTomlString("a\"b\\c") == "\"a\\\"b\\\\c\"" &&
+           optimizer::config::ToTomlString("中文标题") == "\"中文标题\"" &&
+           optimizer::config::ToTomlString("") == "\"\"";
+}
+
+bool TestFormatGameRulesRoundTrip() {
+    // 生成文本 -> 写临时文件 -> LoadConfig 读回，字段一致。
+    const std::wstring path = MakeTempConfigPath();
+    std::vector<optimizer::config::GameConfig> rules;
+    optimizer::config::GameConfig game;
+    game.id = "eldenring";
+    game.displayName = "艾尔登法环";
+    game.processNames.push_back("EldenRing.exe");
+    game.pauseWhenBackground = true;
+    rules.push_back(game);
+
+    const std::string content =
+        "version = 1\n" + optimizer::config::FormatGameRulesToml(rules);
+    if (!WriteTempConfig(path, content)) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!result.HasValue() || result.Value().games.size() != 1) {
+        return false;
+    }
+    const auto& g = result.Value().games[0];
+    return g.id == "eldenring" && g.displayName == "艾尔登法环" &&
+           g.processNames.size() == 1 && g.processNames[0] == "EldenRing.exe" &&
+           g.pauseWhenBackground;
+}
+
+bool TestAppendGameRulesKeepsOriginal() {
+    // 追加不重写原内容：注释保留，version 不变，规则可读回。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path, "# 我的注释\nversion = 1\n")) {
+        return false;
+    }
+    std::vector<optimizer::config::GameConfig> rules;
+    optimizer::config::GameConfig game;
+    game.id = "added";
+    game.processNames.push_back("Added.exe");
+    rules.push_back(game);
+
+    auto append = optimizer::config::AppendGameRules(path, rules);
+    if (!append.HasValue()) {
+        std::filesystem::remove(std::filesystem::path(path));
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!result.HasValue()) {
+        return false;
+    }
+    const auto& c = result.Value();
+    return c.version == 1 && c.games.size() == 1 && c.games[0].id == "added";
+}
+
+bool TestAppendGameRulesCreatesFile() {
+    // 文件不存在：创建并可读回。
+    const std::wstring path =
+        MakeTempConfigPath() + L"_new";
+    std::filesystem::remove(std::filesystem::path(path));
+    std::vector<optimizer::config::GameConfig> rules;
+    optimizer::config::GameConfig game;
+    game.id = "created";
+    game.processNames.push_back("Created.exe");
+    rules.push_back(game);
+
+    auto append = optimizer::config::AppendGameRules(path, rules);
+    const bool appendOk = append.HasValue();
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return appendOk && result.HasValue() && result.Value().games.size() == 1 &&
+           result.Value().games[0].id == "created";
+}
+
+bool TestMergeGameRules() {
+    std::vector<optimizer::config::GameConfig> mainRules;
+    mainRules.push_back(MakeGame("a", {}));
+    mainRules.push_back(MakeGame("b", {}));
+
+    std::vector<optimizer::config::GameConfig> localRules;
+    optimizer::config::GameConfig overwrite;
+    overwrite.id = "A"; // 大小写不敏感覆盖 main 的 "a"
+    overwrite.displayName = "覆盖";
+    localRules.push_back(overwrite);
+    localRules.push_back(MakeGame("c", {}));
+
+    const auto merged = optimizer::config::MergeGameRules(mainRules, localRules);
+    // "A" 覆盖 main 的 "a"（id 与 displayName 均以 local 为准），"c" 追加。
+    return merged.size() == 3 && merged[0].id == "A" &&
+           merged[0].displayName == "覆盖" && merged[1].id == "b" &&
+           merged[2].id == "c";
+}
+
+bool TestLoadConfigWithLocal() {
+    const std::wstring mainPath = MakeTempConfigPath() + L"_main";
+    const std::wstring localPath = MakeTempConfigPath() + L"_local";
+    if (!WriteTempConfig(mainPath, "version = 1\n[[games]]\nid = \"main-game\"\n") ||
+        !WriteTempConfig(localPath, "[[games]]\nid = \"main-game\"\ndisplay_name = \"本地覆盖\"\n[[games]]\nid = \"local-game\"\n")) {
+        return false;
+    }
+
+    auto result = optimizer::config::LoadConfigWithLocal(mainPath, localPath);
+    std::filesystem::remove(std::filesystem::path(mainPath));
+    std::filesystem::remove(std::filesystem::path(localPath));
+    if (!result.HasValue()) {
+        return false;
+    }
+    const auto& games = result.Value().games;
+    // main-game 被 local 覆盖（displayName 生效），local-game 追加。
+    return games.size() == 2 && games[0].id == "main-game" &&
+           games[0].displayName == "本地覆盖" && games[1].id == "local-game";
+}
+
+bool TestLoadConfigWithLocalMissingLocal() {
+    // local 文件不存在：返回 main 结果，不报错。
+    const std::wstring mainPath = MakeTempConfigPath() + L"_m";
+    if (!WriteTempConfig(mainPath, "version = 1\n")) {
+        return false;
+    }
+    auto result =
+        optimizer::config::LoadConfigWithLocal(mainPath, L"Z:\\nonexistent\\local.toml");
+    std::filesystem::remove(std::filesystem::path(mainPath));
+    return result.HasValue() && result.Value().version == 1;
+}
+
+bool TestLoadConfigWithLocalBrokenLocal() {
+    // local 解析失败：报错（显式路径下 local 损坏必须暴露）。
+    const std::wstring mainPath = MakeTempConfigPath() + L"_m";
+    const std::wstring localPath = MakeTempConfigPath() + L"_l";
+    if (!WriteTempConfig(mainPath, "version = 1\n") ||
+        !WriteTempConfig(localPath, "[[ broken")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfigWithLocal(mainPath, localPath);
+    std::filesystem::remove(std::filesystem::path(mainPath));
+    std::filesystem::remove(std::filesystem::path(localPath));
+    return !result.HasValue();
+}
 
 } // namespace
 
@@ -297,5 +448,13 @@ int wmain() {
     run(L"Load config extended sections", &TestLoadConfigExtendedSections);
     run(L"Load config games array", &TestLoadConfigGamesArray);
     run(L"Load config skips game without id", &TestLoadConfigGameWithoutIdSkipped);
+    run(L"ToTomlString escapes", &TestToTomlString);
+    run(L"FormatGameRulesToml round-trip", &TestFormatGameRulesRoundTrip);
+    run(L"AppendGameRules keeps original", &TestAppendGameRulesKeepsOriginal);
+    run(L"AppendGameRules creates file", &TestAppendGameRulesCreatesFile);
+    run(L"MergeGameRules local overrides by id", &TestMergeGameRules);
+    run(L"LoadConfigWithLocal merges games", &TestLoadConfigWithLocal);
+    run(L"LoadConfigWithLocal missing local", &TestLoadConfigWithLocalMissingLocal);
+    run(L"LoadConfigWithLocal broken local fails", &TestLoadConfigWithLocalBrokenLocal);
     return failed == 0 ? 0 : 1;
 }
