@@ -1,4 +1,5 @@
-﻿#include "common/error.hpp"
+﻿#include "common/console_output.hpp"
+#include "common/error.hpp"
 #include "config/config_manager.hpp"
 #include "logger/logger.hpp"
 #include "memory/memory_tuner.hpp"
@@ -7,11 +8,14 @@
 #include "platform/native_api.hpp"
 #include "process/process_watcher.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cwchar>
 #include <exception>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -283,19 +287,20 @@ int RunWatchCommand(int argc, wchar_t* argv[]) {
     }
 
     watcher.Subscribe([](const optimizer::process::ProcessTransition& transition) {
-        std::wcout << L"  ["
-                   << optimizer::process::StateToString(transition.previous)
-                   << L" -> "
-                   << optimizer::process::StateToString(transition.current)
-                   << L"] "
-                   << std::wstring(transition.gameId.begin(), transition.gameId.end());
+        std::wostringstream line;
+        line << L"  ["
+             << optimizer::process::StateToString(transition.previous)
+             << L" -> "
+             << optimizer::process::StateToString(transition.current)
+             << L"] "
+             << std::wstring(transition.gameId.begin(), transition.gameId.end());
         if (transition.current == optimizer::process::ProcessState::Starting ||
             transition.current == optimizer::process::ProcessState::Running) {
-            std::wcout << L" pid=" << transition.info.pid << L" "
-                       << transition.info.processName
-                       << (transition.info.isForeground ? L" foreground" : L"");
+            line << L" pid=" << transition.info.pid << L" "
+                 << transition.info.processName
+                 << (transition.info.isForeground ? L" foreground" : L"");
         }
-        std::wcout << L"\n";
+        optimizer::common::WriteConsoleLine(line.str());
     });
 
     auto started = watcher.Start();
@@ -311,13 +316,94 @@ int RunWatchCommand(int argc, wchar_t* argv[]) {
     watcher.Stop();
 
     const auto tracked = watcher.GetTrackedProcesses();
-    std::wcout << L"  tracked : " << tracked.size() << L" process(es)\n";
+    std::wostringstream summary;
+    summary << L"  tracked : " << tracked.size() << L" process(es)";
+    optimizer::common::WriteConsoleLine(summary.str());
     for (const auto& info : tracked) {
-        std::wcout << L"    [" << std::wstring(info.gameId.begin(), info.gameId.end())
-                   << L"] " << info.processName
-                   << L" pid=" << info.pid << L" "
-                   << optimizer::process::StateToString(info.state) << L"\n";
+        std::wostringstream line;
+        line << L"    [" << std::wstring(info.gameId.begin(), info.gameId.end())
+             << L"] " << info.processName << L" pid=" << info.pid << L" "
+             << optimizer::process::StateToString(info.state);
+        optimizer::common::WriteConsoleLine(line.str());
     }
+    return 0;
+}
+
+int RunListProcesses(int argc, wchar_t* argv[]) {
+    // --list-processes [--all] [filter]: 只读进程目录，默认只列有可见窗口的进程。
+    // 供用户辨认并挑选要添加为游戏的进程；无任何系统修改。
+    bool windowOnly = true;
+    std::wstring filter;
+    for (int i = 2; i < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--all") {
+            windowOnly = false;
+        } else if (filter.empty()) {
+            filter = argv[i]; // 首个非开关参数作为子串过滤
+        }
+    }
+
+    auto result =
+        optimizer::process::EnumerateProcessDetails(windowOnly);
+    if (!result) {
+        const auto& error = result.ErrorValue();
+        std::wcerr << L"  process list failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+
+    // 过滤（子串匹配进程名/路径/窗口标题）。
+    std::vector<optimizer::process::ProcessDetails> details;
+    details.reserve(result.Value().size());
+    for (const auto& item : result.Value()) {
+        if (optimizer::process::ProcessMatchesFilter(item, filter)) {
+            details.push_back(item);
+        }
+    }
+    // 按 pid 升序，输出稳定。
+    std::sort(details.begin(), details.end(),
+              [](const auto& a, const auto& b) { return a.pid < b.pid; });
+
+    constexpr int kNameWidth = 30;
+    constexpr int kPathWidth = 52;
+    constexpr int kTitleWidth = 26;
+
+    // 用 wostringstream 构建行（纯内存，无 locale 转换），再经双路径控制台输出。
+    std::wostringstream line;
+    line << L"Process list (read-only"
+         << (windowOnly ? L", visible windows" : L", all") << L")\n";
+    optimizer::common::WriteConsoleLine(line.str());
+    line.str(L"");
+    line.clear();
+
+    line << L"  pid     " << L"name"
+         << std::wstring(kNameWidth - 4, L' ') << L"path"
+         << std::wstring(kPathWidth - 4, L' ') << L"window title"
+         << std::wstring(kTitleWidth - 12, L' ') << L"memory";
+    optimizer::common::WriteConsoleLine(line.str());
+
+    const auto trim = [](const std::wstring& text, std::size_t width) {
+        return text.size() <= width ? text : text.substr(0, width);
+    };
+    for (const auto& item : details) {
+        line.str(L"");
+        line.clear();
+        line << L"  " << std::setw(7) << item.pid << L"  "
+             << std::setw(kNameWidth) << std::left
+             << trim(item.name, kNameWidth) << L" "
+             << std::setw(kPathWidth) << std::left
+             << trim(item.executablePath, kPathWidth) << L" "
+             << std::setw(kTitleWidth) << std::left
+             << trim(item.windowTitle, kTitleWidth) << L" "
+             << (item.isForeground ? L"[FG] " : L"")
+             << optimizer::memory::FormatBytes(item.workingSetBytes);
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+
+    line.str(L"");
+    line.clear();
+    line << L"  " << details.size() << L" process(es)";
+    optimizer::common::WriteConsoleLine(line.str());
     return 0;
 }
 
@@ -368,6 +454,8 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --cpu          Sample CPU usage (read-only, PDH)\n"
         << L"  CppOptimizer.exe --watch <s> [config.toml]  Watch game process lifecycle\n"
         << L"                             for 1..60 s (read-only, foreground, Toolhelp)\n"
+        << L"  CppOptimizer.exe --list-processes [--all] [filter]  List running processes\n"
+        << L"                             (read-only; default: visible windows only)\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -399,6 +487,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if ((argc == 3 || argc == 4) && std::wstring_view(argv[1]) == L"--watch") {
             return RunWatchCommand(argc, argv);
+        }
+        if (argc >= 2 && std::wstring_view(argv[1]) == L"--list-processes") {
+            return RunListProcesses(argc, argv);
         }
         PrintUsage();
         return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;

@@ -125,6 +125,7 @@ struct DiffResult {
 // 进程窗口信息。
 struct WindowInfo {
     std::wstring title;           // 主窗口标题（无窗口时为空）
+    bool hasVisibleWindow = false; // 是否存在可见顶层窗口
     bool isForeground = false;
     bool isFullscreen = false;
 };
@@ -132,6 +133,36 @@ struct WindowInfo {
 // 查询进程主窗口标题 / 前台 / 全屏状态。
 // 窗口枚举失败（罕见）降级为空信息，不阻断观测（尽力而为）。
 [[nodiscard]] common::Result<WindowInfo> QueryWindowInfo(std::uint32_t pid) noexcept;
+
+// ---------- 进程目录（供进程列表/挑选，只读） ----------
+
+// 进程详情：供用户在进程列表中辨认"哪个是要添加的游戏"。
+// 查询全部为最小权限（PROCESS_QUERY_LIMITED_INFORMATION），
+// 权限不足的字段为空/零，不视为错误。
+struct ProcessDetails {
+    std::uint32_t pid = 0;
+    std::wstring name;            // 可执行文件名，如 L"ExampleGame.exe"
+    std::wstring executablePath;  // 完整路径（权限不足时为空）
+    std::wstring windowTitle;     // 主窗口标题（无窗口时为空）
+    bool hasVisibleWindow = false;
+    bool isForeground = false;
+    bool isFullscreen = false;
+    std::uint64_t workingSetBytes = 0; // 内存占用（权限不足时为零）
+};
+
+// 查询单个进程详情。进程不存在/无法访问返回 Win32 错误。
+[[nodiscard]] common::Result<ProcessDetails> QueryProcessDetails(
+    std::uint32_t pid) noexcept;
+
+// 枚举全部进程详情。单进程查询失败降级为最小条目（pid + name），
+// 不阻断整体列表；windowOnly 时只保留有可见窗口的进程。
+[[nodiscard]] common::Result<std::vector<ProcessDetails>> EnumerateProcessDetails(
+    bool windowOnly) noexcept;
+
+// 纯函数：进程是否匹配过滤子串（大小写不敏感，ASCII 折叠），
+// 匹配进程名/完整路径/窗口标题任一；filter 为空恒真。
+[[nodiscard]] bool ProcessMatchesFilter(const ProcessDetails& details,
+                                        std::wstring_view filter) noexcept;
 
 // ---------- 进程观测器（可停止轮询线程） ----------
 

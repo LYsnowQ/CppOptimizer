@@ -21,6 +21,9 @@
     <ClInclude Include="include\common\unique_resource.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\common\console_output.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="include\logger\logger.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -39,6 +42,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\common\console_output.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\config\config_manager.cpp">

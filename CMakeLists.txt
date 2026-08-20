@@ -31,6 +31,7 @@ set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/thirdParty)
 add_executable(CppOptimizer
     source/main.cpp
     source/common/error.cpp
+    source/common/console_output.cpp
     source/config/config_manager.cpp
     source/logger/logger.cpp
     source/memory/memory_tuner.cpp
@@ -44,6 +45,7 @@ target_include_directories(CppOptimizer PRIVATE include ${THIRDPARTY_DIR} ${SPDL
 target_link_libraries(CppOptimizer PRIVATE
     pdh
     user32
+    psapi
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
 )
@@ -75,6 +77,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
     add_executable(CppOptimizerCommonTests
         tests/common_tests.cpp
         source/common/error.cpp
+        source/common/console_output.cpp
     )
     target_include_directories(CppOptimizerCommonTests PRIVATE include)
     target_compile_features(CppOptimizerCommonTests PRIVATE cxx_std_20)
@@ -190,7 +193,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         source/process/process_watcher.cpp
     )
     target_include_directories(CppOptimizerProcessTests PRIVATE include)
-    target_link_libraries(CppOptimizerProcessTests PRIVATE user32)
+    target_link_libraries(CppOptimizerProcessTests PRIVATE user32 psapi)
     target_compile_features(CppOptimizerProcessTests PRIVATE cxx_std_20)
     target_compile_definitions(CppOptimizerProcessTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX

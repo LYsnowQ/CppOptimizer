@@ -8,6 +8,7 @@
 #endif
 #include <windows.h>
 #include <tlhelp32.h>
+#include <psapi.h>
 
 #include "common/unique_resource.hpp"
 
@@ -87,6 +88,7 @@ struct WindowEnumContext {
     std::uint32_t pid = 0;
     std::wstring title;
     bool foundTitle = false;
+    bool foundVisible = false;
 };
 
 BOOL CALLBACK EnumWindowProc(HWND hwnd, LPARAM lparam) noexcept {
@@ -99,6 +101,7 @@ BOOL CALLBACK EnumWindowProc(HWND hwnd, LPARAM lparam) noexcept {
     if (windowPid != context->pid) {
         return TRUE;
     }
+    context->foundVisible = true;
     if (!context->foundTitle) {
         wchar_t buffer[512]{};
         const int length = ::GetWindowTextW(hwnd, buffer, 512);
@@ -333,6 +336,7 @@ common::Result<WindowInfo> QueryWindowInfo(std::uint32_t pid) noexcept {
     // 枚举失败降级为空信息，不阻断观测。
     if (::EnumWindows(EnumWindowProc, reinterpret_cast<LPARAM>(&context))) {
         info.title = std::move(context.title);
+        info.hasVisibleWindow = context.foundVisible;
     }
 
     const HWND foreground = ::GetForegroundWindow();
@@ -345,6 +349,109 @@ common::Result<WindowInfo> QueryWindowInfo(std::uint32_t pid) noexcept {
         }
     }
     return common::Result<WindowInfo>::Success(info);
+}
+
+// ---------- 进程目录 ----------
+
+// ASCII 大小写不敏感的包含判断（无区域依赖）。
+bool ContainsAscii(std::wstring_view text, std::wstring_view needle) noexcept {
+    if (needle.empty()) {
+        return true;
+    }
+    if (needle.size() > text.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i + needle.size() <= text.size(); ++i) {
+        bool matched = true;
+        for (std::size_t j = 0; j < needle.size(); ++j) {
+            if (FoldAscii(text[i + j]) != FoldAscii(needle[j])) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ProcessMatchesFilter(const ProcessDetails& details,
+                          std::wstring_view filter) noexcept {
+    if (filter.empty()) {
+        return true;
+    }
+    return ContainsAscii(details.name, filter) ||
+           ContainsAscii(details.executablePath, filter) ||
+           ContainsAscii(details.windowTitle, filter);
+}
+
+common::Result<ProcessDetails> QueryProcessDetails(
+    std::uint32_t pid) noexcept {
+    // 最小权限：只请求查询受限信息，绝不请求 PROCESS_ALL_ACCESS。
+    common::UniqueHandle process(::OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!process.IsValid()) {
+        return common::Result<ProcessDetails>::Failure(
+            common::Error::FromWin32(::GetLastError(), "OpenProcess"));
+    }
+
+    ProcessDetails details;
+    details.pid = pid;
+
+    // 完整路径（进程可能已改名，当前名只作参考）。
+    wchar_t pathBuffer[MAX_PATH]{};
+    DWORD pathSize = MAX_PATH;
+    if (::QueryFullProcessImageNameW(process.Get(), 0, pathBuffer, &pathSize)) {
+        details.executablePath.assign(pathBuffer, pathSize);
+        const auto pos = details.executablePath.find_last_of(L'\\');
+        details.name = pos == std::wstring::npos
+                           ? details.executablePath
+                           : details.executablePath.substr(pos + 1);
+    }
+
+    // 内存占用（工作集）。
+    PROCESS_MEMORY_COUNTERS counters{};
+    if (::GetProcessMemoryInfo(process.Get(), &counters, sizeof(counters))) {
+        details.workingSetBytes = counters.WorkingSetSize;
+    }
+
+    // 窗口信息（尽力而为，失败不阻断）。
+    const auto window = QueryWindowInfo(pid);
+    if (window) {
+        details.windowTitle = window.Value().title;
+        details.hasVisibleWindow = window.Value().hasVisibleWindow;
+        details.isForeground = window.Value().isForeground;
+        details.isFullscreen = window.Value().isFullscreen;
+    }
+    return common::Result<ProcessDetails>::Success(details);
+}
+
+common::Result<std::vector<ProcessDetails>> EnumerateProcessDetails(
+    bool windowOnly) noexcept {
+    auto processes = EnumerateProcesses();
+    if (!processes) {
+        return common::Result<std::vector<ProcessDetails>>::Failure(
+            processes.ErrorValue());
+    }
+
+    std::vector<ProcessDetails> result;
+    result.reserve(processes.Value().size());
+    for (const auto& entry : processes.Value()) {
+        ProcessDetails details;
+        auto query = QueryProcessDetails(entry.pid);
+        if (query) {
+            details = std::move(query.Value());
+        } else {
+            // 单进程查询失败降级为最小条目，不阻断列表。
+            details.pid = entry.pid;
+            details.name = entry.name;
+        }
+        if (!windowOnly || details.hasVisibleWindow) {
+            result.push_back(std::move(details));
+        }
+    }
+    return common::Result<std::vector<ProcessDetails>>::Success(std::move(result));
 }
 
 // ---------- ProcessWatcher ----------

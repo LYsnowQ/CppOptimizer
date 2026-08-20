@@ -442,6 +442,72 @@ bool TestWatcherStopIdempotent() {
     return !watcher.IsRunning();
 }
 
+// ---------- 进程目录测试 ----------
+
+bool TestQueryProcessDetailsSelf() {
+    const auto result = process::QueryProcessDetails(::GetCurrentProcessId());
+    if (!result.HasValue()) {
+        return false;
+    }
+    const auto& d = result.Value();
+    // 测试进程：名称为 CppOptimizerProcessTests.exe，路径以同名结尾，内存非零。
+    return d.pid == ::GetCurrentProcessId() &&
+           !d.name.empty() &&
+           !d.executablePath.empty() &&
+           d.executablePath.size() >= d.name.size() &&
+           d.executablePath.compare(d.executablePath.size() - d.name.size(),
+                                    d.name.size(), d.name) == 0 &&
+           d.workingSetBytes > 0;
+}
+
+bool TestQueryProcessDetailsMissingPid() {
+    // 不存在的 pid：应失败（Win32 域）。
+    const auto result = process::QueryProcessDetails(0xFFFFFFFE);
+    return !result.HasValue() &&
+           result.ErrorValue().domain == optimizer::common::ErrorDomain::Win32;
+}
+
+bool TestEnumerateProcessDetailsAllContainsSelf() {
+    auto result = process::EnumerateProcessDetails(false);
+    if (!result.HasValue()) {
+        return false;
+    }
+    bool foundSelf = false;
+    for (const auto& item : result.Value()) {
+        if (item.pid == ::GetCurrentProcessId()) {
+            foundSelf = true;
+            break;
+        }
+    }
+    return foundSelf;
+}
+
+bool TestEnumerateProcessDetailsWindowOnlyExcludesSelf() {
+    // 测试进程无可见窗口：windowOnly 列表不应包含自身。
+    auto result = process::EnumerateProcessDetails(true);
+    if (!result.HasValue()) {
+        return false;
+    }
+    for (const auto& item : result.Value()) {
+        if (item.pid == ::GetCurrentProcessId()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestProcessMatchesFilter() {
+    process::ProcessDetails details;
+    details.name = L"ExampleGame.exe";
+    details.executablePath = L"C:\\Games\\ExampleGame\\ExampleGame.exe";
+    details.windowTitle = L"艾尔登法环";
+    return process::ProcessMatchesFilter(details, L"") &&
+           process::ProcessMatchesFilter(details, L"example") &&
+           process::ProcessMatchesFilter(details, L"GAMES") &&
+           process::ProcessMatchesFilter(details, L"艾尔登") &&
+           !process::ProcessMatchesFilter(details, L"nonexistent");
+}
+
 } // namespace
 
 int wmain() {
@@ -476,6 +542,11 @@ int wmain() {
     run(L"EnumerateProcesses contains self", &TestEnumerateProcessesContainsSelf);
     run(L"QueryProcessCreationTime self", &TestQueryCreationTimeSelf);
     run(L"QueryWindowInfo self", &TestQueryWindowInfoSelf);
+    run(L"QueryProcessDetails self", &TestQueryProcessDetailsSelf);
+    run(L"QueryProcessDetails missing pid fails", &TestQueryProcessDetailsMissingPid);
+    run(L"EnumerateProcessDetails all contains self", &TestEnumerateProcessDetailsAllContainsSelf);
+    run(L"EnumerateProcessDetails windowOnly excludes self", &TestEnumerateProcessDetailsWindowOnlyExcludesSelf);
+    run(L"ProcessMatchesFilter substring", &TestProcessMatchesFilter);
     run(L"Watcher PollOnce self rule", &TestWatcherPollOnceSelfRule);
     run(L"Watcher thread delivers events", &TestWatcherThreadDeliversEvents);
     run(L"Watcher stop idempotent", &TestWatcherStopIdempotent);

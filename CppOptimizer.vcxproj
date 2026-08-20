@@ -61,7 +61,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;user32.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -87,7 +87,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;user32.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -100,6 +100,7 @@
   <ItemGroup>
     <ClInclude Include="include\common\error.hpp" />
     <ClInclude Include="include\common\unique_resource.hpp" />
+    <ClInclude Include="include\common\console_output.hpp" />
     <ClInclude Include="include\config\config_manager.hpp" />
     <ClInclude Include="include\logger\logger.hpp" />
     <ClInclude Include="include\memory\memory_tuner.hpp" />
@@ -110,6 +111,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp" />
+    <ClCompile Include="source\common\console_output.cpp" />
     <ClCompile Include="source\config\config_manager.cpp" />
     <ClCompile Include="source\logger\logger.cpp" />
     <ClCompile Include="source\main.cpp" />
