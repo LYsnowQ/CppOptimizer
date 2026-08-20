@@ -61,7 +61,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -87,7 +87,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -106,6 +106,7 @@
     <ClInclude Include="include\metrics\memory_metrics.hpp" />
     <ClInclude Include="include\metrics\pdh_metrics.hpp" />
     <ClInclude Include="include\platform\native_api.hpp" />
+    <ClInclude Include="include\process\process_watcher.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp" />
@@ -116,6 +117,7 @@
     <ClCompile Include="source\metrics\memory_metrics.cpp" />
     <ClCompile Include="source\metrics\pdh_metrics.cpp" />
     <ClCompile Include="source\platform\native_api.cpp" />
+    <ClCompile Include="source\process\process_watcher.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="CppOptimizer.slnx" />
@@ -132,6 +134,7 @@
     <None Include="tests\logger_tests.cpp" />
     <None Include="tests\memory_metrics_tests.cpp" />
     <None Include="tests\memory_tests.cpp" />
+    <None Include="tests\process_tests.cpp" />
     <None Include="docs\00-project-ai-learning-harness.md" />
     <None Include="docs\01-help-documentation-guide.md" />
     <None Include="docs\02-overall-architecture.md" />

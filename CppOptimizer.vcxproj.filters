@@ -33,6 +33,9 @@
     <ClInclude Include="include\platform\native_api.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\process\process_watcher.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp">
@@ -59,6 +62,9 @@
     <ClCompile Include="source\platform\native_api.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="source\process\process_watcher.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="CppOptimizer.slnx" />
@@ -75,6 +81,7 @@
     <None Include="tests\logger_tests.cpp" />
     <None Include="tests\memory_metrics_tests.cpp" />
     <None Include="tests\memory_tests.cpp" />
+    <None Include="tests\process_tests.cpp" />
     <None Include="docs\00-project-ai-learning-harness.md" />
     <None Include="docs\01-help-documentation-guide.md" />
     <None Include="docs\02-overall-architecture.md" />

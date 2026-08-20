@@ -5,6 +5,7 @@
 #include "metrics/memory_metrics.hpp"
 #include "metrics/pdh_metrics.hpp"
 #include "platform/native_api.hpp"
+#include "process/process_watcher.hpp"
 
 #include <chrono>
 #include <cwchar>
@@ -241,6 +242,85 @@ int RunLogCommand(int argc, wchar_t* argv[]) {
     return 0;
 }
 
+int RunWatchCommand(int argc, wchar_t* argv[]) {
+    // --watch <seconds> [config-path]: 前台、有界、只读的进程生命周期观测。
+    // 后台轮询线程仅在命令执行期间存在，命令结束后立即停止。
+    constexpr std::uint32_t kMaxSeconds = 60;
+    std::uint32_t seconds = 0;
+    if (!ParseUint32(argv[2], seconds) || seconds == 0 ||
+        seconds > kMaxSeconds) {
+        std::wcerr << L"  --watch seconds must be in 1.." << kMaxSeconds << L"\n";
+        return 2;
+    }
+
+    std::vector<optimizer::config::GameConfig> games;
+    if (argc >= 4) {
+        auto config = optimizer::config::LoadConfig(argv[3]);
+        if (!config) {
+            const auto& error = config.ErrorValue();
+            std::wcerr << L"  config load failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        games = std::move(config.Value().games);
+    }
+
+    optimizer::process::ProcessWatcher watcher;
+    auto setup = watcher.SetRules(games);
+    if (!setup) {
+        const auto& error = setup.ErrorValue();
+        std::wcerr << L"  rule setup failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+
+    std::wcout << L"Process watcher (read-only, foreground, " << seconds << L" s)\n";
+    std::wcout << L"  rules : " << games.size() << L" game rule(s)\n";
+    if (games.empty()) {
+        std::wcout << L"  (pass --watch <s> <config.toml> to track game processes)\n";
+    }
+
+    watcher.Subscribe([](const optimizer::process::ProcessTransition& transition) {
+        std::wcout << L"  ["
+                   << optimizer::process::StateToString(transition.previous)
+                   << L" -> "
+                   << optimizer::process::StateToString(transition.current)
+                   << L"] "
+                   << std::wstring(transition.gameId.begin(), transition.gameId.end());
+        if (transition.current == optimizer::process::ProcessState::Starting ||
+            transition.current == optimizer::process::ProcessState::Running) {
+            std::wcout << L" pid=" << transition.info.pid << L" "
+                       << transition.info.processName
+                       << (transition.info.isForeground ? L" foreground" : L"");
+        }
+        std::wcout << L"\n";
+    });
+
+    auto started = watcher.Start();
+    if (!started) {
+        const auto& error = started.ErrorValue();
+        std::wcerr << L"  watcher start failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    watcher.Stop();
+
+    const auto tracked = watcher.GetTrackedProcesses();
+    std::wcout << L"  tracked : " << tracked.size() << L" process(es)\n";
+    for (const auto& info : tracked) {
+        std::wcout << L"    [" << std::wstring(info.gameId.begin(), info.gameId.end())
+                   << L"] " << info.processName
+                   << L" pid=" << info.pid << L" "
+                   << optimizer::process::StateToString(info.state) << L"\n";
+    }
+    return 0;
+}
+
 int RunDiagnostics() {
     std::wcout << L"CppOptimizer diagnostics\n";
     std::wcout << L"  process mode : user mode (Ring 3)\n";
@@ -286,6 +366,8 @@ void PrintUsage() {
         << L"                             (read-only, foreground, bounded)\n"
         << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
         << L"  CppOptimizer.exe --cpu          Sample CPU usage (read-only, PDH)\n"
+        << L"  CppOptimizer.exe --watch <s> [config.toml]  Watch game process lifecycle\n"
+        << L"                             for 1..60 s (read-only, foreground, Toolhelp)\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -314,6 +396,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc == 3 && std::wstring_view(argv[1]) == L"--config") {
             return RunConfigCommand(argv[2]);
+        }
+        if ((argc == 3 || argc == 4) && std::wstring_view(argv[1]) == L"--watch") {
+            return RunWatchCommand(argc, argv);
         }
         PrintUsage();
         return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;
