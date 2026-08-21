@@ -61,6 +61,16 @@ struct ToggleConfig {
     bool enabled = false;
 };
 
+// [policy] 节：策略分级阈值与防抖冷却期。数值语义见 optimizer::policy。
+// 合法约束：0 <= tight < adequate < comfortable <= 100，cooldown_ms >= 0。
+// 违反约束属语义错误，LoadConfig 直接拒绝（错误阈值会产生错误决策）。
+struct PolicyConfig {
+    std::int32_t comfortableMarginPercent = 30;
+    std::int32_t adequateMarginPercent = 15;
+    std::int32_t tightMarginPercent = 5;
+    std::int32_t cooldownMs = 5000;
+};
+
 // [[games]] 数组元素。每个游戏规则必须有稳定 id。
 struct GameConfig {
     std::string id;
@@ -107,6 +117,7 @@ struct ConfigSnapshot {
     GpuHeartbeatConfig gpuHeartbeat;
     ToggleConfig scheduler;
     ToggleConfig diskCache;
+    PolicyConfig policy;
     std::vector<GameConfig> games;
 };
 

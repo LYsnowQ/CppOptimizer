@@ -41,6 +41,12 @@ enabled = false                # Experimental
 [disk_cache]
 enabled = false                # Planned
 
+[policy]
+comfortable_margin_percent = 30  # 余量 > 30% -> Comfortable
+adequate_margin_percent = 15     # 余量 > 15% -> Adequate
+tight_margin_percent = 5         # 余量 > 5% -> Tight；否则 Critical
+cooldown_ms = 5000               # 决策防抖冷却期（毫秒），>= 0
+
 # 每个游戏规则必须有稳定 id。实际生产配置建议同时限制完整安装路径。
 [[games]]
 id = "example-game"

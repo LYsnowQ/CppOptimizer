@@ -225,6 +225,101 @@ enabled = true
            c.scheduler.enabled && c.diskCache.enabled;
 }
 
+bool TestLoadConfigPolicyDefaults() {
+    // 无 [policy] 节：使用默认阈值 30/15/5，冷却 5000ms。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path, "version = 1\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!result.HasValue()) {
+        return false;
+    }
+    const auto& p = result.Value().policy;
+    return p.comfortableMarginPercent == 30 && p.adequateMarginPercent == 15 &&
+           p.tightMarginPercent == 5 && p.cooldownMs == 5000;
+}
+
+bool TestLoadConfigPolicySection() {
+    const std::wstring path = MakeTempConfigPath();
+    const std::string content = R"(
+[policy]
+comfortable_margin_percent = 80
+adequate_margin_percent = 50
+tight_margin_percent = 20
+cooldown_ms = 3000
+)";
+    if (!WriteTempConfig(path, content)) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!result.HasValue()) {
+        return false;
+    }
+    const auto& p = result.Value().policy;
+    return p.comfortableMarginPercent == 80 && p.adequateMarginPercent == 50 &&
+           p.tightMarginPercent == 20 && p.cooldownMs == 3000;
+}
+
+bool TestLoadConfigPolicyZeroCooldown() {
+    // 冷却期 0 合法（不做防抖）。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[policy]\ncooldown_ms = 0\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return result.HasValue() && result.Value().policy.cooldownMs == 0;
+}
+
+bool TestLoadConfigPolicyRejectsDisordered() {
+    // 阈值违序（adequate >= comfortable）：语义错误，直接拒绝。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[policy]\nadequate_margin_percent = 40\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
+bool TestLoadConfigPolicyRejectsNegativeTight() {
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[policy]\ntight_margin_percent = -1\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
+bool TestLoadConfigPolicyRejectsOutOfRangeComfortable() {
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[policy]\ncomfortable_margin_percent = 101\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
+bool TestLoadConfigPolicyRejectsNegativeCooldown() {
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[policy]\ncooldown_ms = -5\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
 bool TestLoadConfigGamesArray() {
     const std::wstring path = MakeTempConfigPath();
     const std::string content = R"(
@@ -446,6 +541,17 @@ int wmain() {
     run(L"Load config keeps Chinese values", &TestLoadConfigChineseValues);
     run(L"Parse priority level", &TestParsePriorityLevel);
     run(L"Load config extended sections", &TestLoadConfigExtendedSections);
+    run(L"Load config policy defaults", &TestLoadConfigPolicyDefaults);
+    run(L"Load config policy section", &TestLoadConfigPolicySection);
+    run(L"Load config policy zero cooldown", &TestLoadConfigPolicyZeroCooldown);
+    run(L"Load config rejects disordered policy thresholds",
+        &TestLoadConfigPolicyRejectsDisordered);
+    run(L"Load config rejects negative tight threshold",
+        &TestLoadConfigPolicyRejectsNegativeTight);
+    run(L"Load config rejects out-of-range comfortable threshold",
+        &TestLoadConfigPolicyRejectsOutOfRangeComfortable);
+    run(L"Load config rejects negative cooldown",
+        &TestLoadConfigPolicyRejectsNegativeCooldown);
     run(L"Load config games array", &TestLoadConfigGamesArray);
     run(L"Load config skips game without id", &TestLoadConfigGameWithoutIdSkipped);
     run(L"ToTomlString escapes", &TestToTomlString);

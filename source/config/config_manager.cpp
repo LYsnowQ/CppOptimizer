@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -418,6 +419,55 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
         if (const auto enabled = (*section)["enabled"].value<bool>()) {
             snapshot.diskCache.enabled = *enabled;
         }
+    }
+
+    // [policy]：策略阈值。数值须落在 int32 范围；节缺失时用默认值（恒合法）。
+    if (auto* section = table["policy"].as_table()) {
+        if (const auto v =
+                (*section)["comfortable_margin_percent"].value<std::int64_t>()) {
+            if (*v >= std::numeric_limits<std::int32_t>::min() &&
+                *v <= std::numeric_limits<std::int32_t>::max()) {
+                snapshot.policy.comfortableMarginPercent =
+                    static_cast<std::int32_t>(*v);
+            }
+        }
+        if (const auto v =
+                (*section)["adequate_margin_percent"].value<std::int64_t>()) {
+            if (*v >= std::numeric_limits<std::int32_t>::min() &&
+                *v <= std::numeric_limits<std::int32_t>::max()) {
+                snapshot.policy.adequateMarginPercent =
+                    static_cast<std::int32_t>(*v);
+            }
+        }
+        if (const auto v =
+                (*section)["tight_margin_percent"].value<std::int64_t>()) {
+            if (*v >= std::numeric_limits<std::int32_t>::min() &&
+                *v <= std::numeric_limits<std::int32_t>::max()) {
+                snapshot.policy.tightMarginPercent =
+                    static_cast<std::int32_t>(*v);
+            }
+        }
+        if (const auto v = (*section)["cooldown_ms"].value<std::int64_t>()) {
+            if (*v >= std::numeric_limits<std::int32_t>::min() &&
+                *v <= std::numeric_limits<std::int32_t>::max()) {
+                snapshot.policy.cooldownMs = static_cast<std::int32_t>(*v);
+            }
+        }
+    }
+    // 阈值有序性与范围校验：无论节是否存在，默认值恒合法；
+    // 违序/越界配置是语义错误，直接拒绝（错误阈值会产生错误决策）。
+    if (!(snapshot.policy.tightMarginPercent >= 0 &&
+          snapshot.policy.tightMarginPercent <
+              snapshot.policy.adequateMarginPercent &&
+          snapshot.policy.adequateMarginPercent <
+              snapshot.policy.comfortableMarginPercent &&
+          snapshot.policy.comfortableMarginPercent <= 100) ||
+        snapshot.policy.cooldownMs < 0) {
+        return common::Result<ConfigSnapshot>::Failure(
+            common::Error::Validation(
+                "LoadConfig",
+                L"[policy] thresholds must satisfy "
+                L"0 <= tight < adequate < comfortable <= 100 and cooldown_ms >= 0"));
     }
 
     // [[games]]：数组 of table，每项必须有稳定 id。

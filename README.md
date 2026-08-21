@@ -13,6 +13,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
 - **进程生命周期观测**：`--watch <seconds> [config.toml]` 按配置的游戏规则轮询 Toolhelp 进程快照，输出 `NotRunning/Starting/Running/Exiting` 状态转移（PID + 创建时间双重身份防 PID 重用）
 - **进程目录**：`--list-processes [--all] [filter]` 只读列出运行进程（pid/路径/窗口标题/前台/内存），供辨认并挑选要添加为游戏的进程；支持中文进程名与窗口标题
 - **自选进程添加游戏**：`--add-game [pid] [main.toml] [--dry-run]` 从运行进程自动生成游戏规则（id 从进程名派生并去重、display_name 取窗口标题），写入用户自建配置 `config.local.toml`（与预设配置分离，原子写）；交互模式（无 pid）列出有窗口进程供编号选择
+- **只读策略决策**：`--policy <s> [config.toml]` 消费内存余量与游戏焦点（ProcessWatcher 前台轮询），按 `[policy]` 阈值分级（Comfortable/Adequate/Tight/Critical）并评估只读咨询规则（危急仅提示、紧张建议 Layer 2 内存维护、后台暂停不优化），附防抖冷却抑制抖动；所有决策均为建议，不产生任何系统修改
 - **平台诊断**：`--diagnose` Native API 能力探测（只读）
 - **中文环境支持**：面向中文 Windows，内部宽字符（UTF-16）、日志/存储 UTF-8、控制台/日志/错误消息均可承载中文（见工程手册 8.1）
 - **工程基础**：统一错误域模型（`Result<T>` / `Error`）、RAII 资源所有权、C++20、CTest 单元测试
@@ -89,6 +90,7 @@ CppOptimizer.exe --cpu           采样 CPU 使用率（只读，PDH）
 CppOptimizer.exe --watch <s> [config.toml]  按配置的游戏规则观测进程生命周期（只读，Toolhelp，1–60 秒）
 CppOptimizer.exe --list-processes [--all] [filter]  列出运行进程（只读；默认仅有可见窗口者）
 CppOptimizer.exe --add-game [pid] [main.toml] [--dry-run]  从运行进程添加游戏规则到 config.local.toml（无 pid 时交互选择）
+CppOptimizer.exe --policy <s> [config.toml]  只读咨询决策窗口（1–60 秒，无任何系统修改）
 CppOptimizer.exe --help         帮助信息
 ```
 
@@ -155,20 +157,30 @@ Process watcher (read-only, foreground, 3 s)
   [Starting -> Running] explorer pid=14648 explorer.exe
 ```
 
+```text
+> CppOptimizer.exe --policy 5 config\config.example.toml
+Policy decision (read-only advisory, no system changes)
+  rules : 1 game rule(s)
+  [1s] margin 28% adequate game=none -> NoOp (no_game)
+  [2s] margin 28% adequate game=self fg=no -> Notify (mem_critical)
+  [3s] margin 29% critical game=self fg=no -> Notify (mem_critical)
+  summary : NoOp 1 / Notify 2 / SuggestMemoryTune 0 / SuggestPriorityBoost 0
+```
+
 ## 测试
 
 ```powershell
 ctest --preset test-debug
 ```
 
-当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）、低负载占比（严格小于语义、阈值 0/100 边界、round-half-up）、结构化日志（级别过滤、格式化纯函数、文件 sink 与 RAII 关闭、失败降级不递归、并发写）、PDH 采样（warming-up、节奏契约）、进程生命周期（名称匹配、规则匹配、状态差分全状态机、PID 重用/重启、窗口/创建时间查询、轮询线程事件投递）、进程目录（详情查询、窗口过滤、子串匹配）、规则生成与配置写入（id 派生/去重、TOML 转义、原子写、main+local 合并）、宽字符控制台输出（UTF-8 往返）。
+当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）、低负载占比（严格小于语义、阈值 0/100 边界、round-half-up）、结构化日志（级别过滤、格式化纯函数、文件 sink 与 RAII 关闭、失败降级不递归、并发写）、PDH 采样（warming-up、节奏契约）、进程生命周期（名称匹配、规则匹配、状态差分全状态机、PID 重用/重启、窗口/创建时间查询、轮询线程事件投递）、进程目录（详情查询、窗口过滤、子串匹配）、规则生成与配置写入（id 派生/去重、TOML 转义、原子写、main+local 合并）、宽字符控制台输出（UTF-8 往返）、策略决策（余量计算与分级边界、规则评估全分支、防抖冷却语义、求值器组合、`[policy]` 配置校验）。
 
 ## 项目状态与路线图
 
 **当前阶段**：工程基线与只读观测。
 
-- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）、PDH 只读采样（`--cpu`）、进程生命周期观测（`--watch`，Toolhelp 轮询 + 窗口检测 + PID/创建时间身份）、进程目录（`--list-processes`，路径/窗口/内存详情）、自选进程添加游戏闭环（`--add-game`，规则自动生成 + `config.local.toml` 原子写 + main/local 合并加载）；
-- 规划中：PolicyEngine 只读决策 -> 低风险执行（PowerLocker / PriorityBooster）-> Agent/Service 形态；
+- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）、PDH 只读采样（`--cpu`）、进程生命周期观测（`--watch`，Toolhelp 轮询 + 窗口检测 + PID/创建时间身份）、进程目录（`--list-processes`，路径/窗口/内存详情）、自选进程添加游戏闭环（`--add-game`，规则自动生成 + `config.local.toml` 原子写 + main/local 合并加载）、PolicyEngine 只读决策（`--policy`，压力分级 + 规则评估 + 防抖，`[policy]` 配置节，只读咨询不执行）；
+- 规划中：PolicyEngine 接入执行器（低风险执行 PowerLocker / PriorityBooster）-> Agent/Service 形态；
 - 实验性：内存清理、GPU 心跳、调度调整等模块默认关闭，仅在门禁、测试与审计就绪后评估。
 
 ## 目录结构
