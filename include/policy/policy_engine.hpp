@@ -91,7 +91,7 @@ struct PolicyDecision {
 // 5) 其余（Adequate/Comfortable）   -> NoOp (mem_ok)：无证据不优化
 [[nodiscard]] PolicyDecision EvaluatePolicy(const PolicyInput& input) noexcept;
 
-// 防抖滤波器（模块设计 4.2）：状态切换需经过冷却期，防止决策抖动。
+// 防抖滤波器：状态切换需经过冷却期，防止决策抖动。
 // Update 接受外部时钟以便确定性测试；首次调用立即生效（无历史基线）。
 class HysteresisFilter {
 public:

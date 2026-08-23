@@ -108,6 +108,7 @@
     <ClInclude Include="include\metrics\pdh_metrics.hpp" />
     <ClInclude Include="include\platform\native_api.hpp" />
     <ClInclude Include="include\policy\policy_engine.hpp" />
+    <ClInclude Include="include\power\power_locker.hpp" />
     <ClInclude Include="include\process\process_watcher.hpp" />
   </ItemGroup>
   <ItemGroup>
@@ -121,6 +122,7 @@
     <ClCompile Include="source\metrics\pdh_metrics.cpp" />
     <ClCompile Include="source\platform\native_api.cpp" />
     <ClCompile Include="source\policy\policy_engine.cpp" />
+    <ClCompile Include="source\power\power_locker.cpp" />
     <ClCompile Include="source\process\process_watcher.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -139,6 +141,7 @@
     <None Include="tests\memory_metrics_tests.cpp" />
     <None Include="tests\memory_tests.cpp" />
     <None Include="tests\policy_tests.cpp" />
+    <None Include="tests\power_tests.cpp" />
     <None Include="tests\process_tests.cpp" />
     <None Include="docs\00-project-ai-learning-harness.md" />
     <None Include="docs\01-help-documentation-guide.md" />

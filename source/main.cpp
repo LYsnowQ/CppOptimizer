@@ -7,6 +7,7 @@
 #include "metrics/pdh_metrics.hpp"
 #include "platform/native_api.hpp"
 #include "policy/policy_engine.hpp"
+#include "power/power_locker.hpp"
 #include "process/process_watcher.hpp"
 
 #include <algorithm>
@@ -40,6 +41,24 @@ bool ParseUint32(std::wstring_view text, std::uint32_t& out) noexcept {
         return false; // 数值超出 uint32_t 范围
     }
     out = static_cast<std::uint32_t>(value);
+    return true;
+}
+
+// ASCII 大小写不敏感比较（A-Z 折叠为 a-z，无区域依赖；
+// 与进程名匹配/配置解析的折叠语义一致）。
+bool AsciiEqualsIgnoreCaseW(std::wstring_view a, std::wstring_view b) noexcept {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const wchar_t ca =
+            a[i] >= L'A' && a[i] <= L'Z' ? a[i] - L'A' + L'a' : a[i];
+        const wchar_t cb =
+            b[i] >= L'A' && b[i] <= L'Z' ? b[i] - L'A' + L'a' : b[i];
+        if (ca != cb) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -535,6 +554,94 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     return 0;
 }
 
+int RunPowerLockCommand(int argc, wchar_t* argv[]) {
+    // --power-lock <s> [execution|display|both] [reason...]：
+    // R1 局部可逆演示命令——前台有界持有电源请求（阻止睡眠/熄屏），
+    // 到点自动释放；进程退出时句柄随进程句柄表关闭，系统侧请求自动取消。
+    // Power Request 表达睡眠/显示需求，不承诺锁定 CPU/GPU 频率。
+    constexpr std::uint32_t kMaxSeconds = 60;
+    std::uint32_t seconds = 0;
+    if (!ParseUint32(argv[2], seconds) || seconds == 0 ||
+        seconds > kMaxSeconds) {
+        std::wcerr << L"  --power-lock seconds must be in 1.." << kMaxSeconds
+                   << L"\n";
+        return 2;
+    }
+
+    // 类型：execution（默认）/ display / both（ASCII 大小写不敏感）。
+    std::vector<optimizer::power::PowerLockType> types{
+        optimizer::power::PowerLockType::ExecutionRequired};
+    int index = 3;
+    if (argc > index) {
+        const std::wstring_view first(argv[index]);
+        if (AsciiEqualsIgnoreCaseW(first, L"both")) {
+            types = {optimizer::power::PowerLockType::ExecutionRequired,
+                     optimizer::power::PowerLockType::DisplayRequired};
+            ++index;
+        } else {
+            auto utf8 = optimizer::common::WideToUtf8(first);
+            if (utf8) {
+                auto parsed =
+                    optimizer::power::ParsePowerLockType(utf8.Value());
+                if (parsed) {
+                    types = {parsed.Value()};
+                    ++index;
+                }
+            }
+        }
+    }
+
+    // reason：剩余参数以空格连接（默认内置说明）。
+    std::wstring reason = L"CppOptimizer bounded power-lock demo (R1)";
+    if (argc > index) {
+        reason.clear();
+        for (int i = index; i < argc; ++i) {
+            if (i > index) {
+                reason += L' ';
+            }
+            reason += argv[i];
+        }
+    }
+
+    auto backend = optimizer::power::CreateWin32Backend();
+    optimizer::power::PowerLocker locker(backend);
+
+    std::wcout
+        << L"Power lock (R1, reversible; system state restored on exit)\n";
+    std::wcout << L"  type(s) :";
+    for (const auto type : types) {
+        std::wcout << L" " << optimizer::power::PowerLockTypeToString(type);
+    }
+    std::wcout << L"\n  reason  : " << reason << L"\n";
+
+    for (const auto type : types) {
+        const auto acquired = locker.AcquireLock(type, reason);
+        if (!acquired) {
+            const auto& error = acquired.ErrorValue();
+            std::wcerr
+                << L"  acquire "
+                << optimizer::power::PowerLockTypeToString(type)
+                << L" failed [" << optimizer::common::ToString(error.domain)
+                << L":" << error.code << L"] " << error.message << L"\n";
+            locker.ReleaseAll();
+            return 2;
+        }
+        std::wcout << L"  [acquired] "
+                   << optimizer::power::PowerLockTypeToString(type) << L"\n";
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(seconds);
+    std::wcout << L"  holding for " << seconds << L" s ...\n";
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    locker.ReleaseAll();
+    std::wcout << L"  [released] all power requests (sleep/display restored)\n";
+    return 0;
+}
+
 int RunListProcesses(int argc, wchar_t* argv[]) {
     // --list-processes [--all] [filter]: 只读进程目录，默认只列有可见窗口的进程。
     // 供用户辨认并挑选要添加为游戏的进程；无任何系统修改。
@@ -882,6 +989,9 @@ void PrintUsage() {
         << L"                             (interactive picker when pid is omitted)\n"
         << L"  CppOptimizer.exe --policy <s> [config.toml]  Evaluate advisory policy\n"
         << L"                             decisions for 1..60 s (read-only, no changes)\n"
+        << L"  CppOptimizer.exe --power-lock <s> [execution|display|both]\n"
+        << L"                             [reason...]  Hold a power request for 1..60 s\n"
+        << L"                             (R1, reversible; released on exit)\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -916,6 +1026,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if ((argc == 3 || argc == 4) && std::wstring_view(argv[1]) == L"--policy") {
             return RunPolicyCommand(argc, argv);
+        }
+        if (argc >= 3 && std::wstring_view(argv[1]) == L"--power-lock") {
+            return RunPowerLockCommand(argc, argv);
         }
         if (argc >= 2 && std::wstring_view(argv[1]) == L"--list-processes") {
             return RunListProcesses(argc, argv);

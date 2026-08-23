@@ -39,6 +39,9 @@
     <ClInclude Include="include\policy\policy_engine.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\power\power_locker.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="include\process\process_watcher.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -74,6 +77,9 @@
     <ClCompile Include="source\policy\policy_engine.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="source\power\power_locker.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="source\process\process_watcher.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -94,6 +100,7 @@
     <None Include="tests\memory_metrics_tests.cpp" />
     <None Include="tests\memory_tests.cpp" />
     <None Include="tests\policy_tests.cpp" />
+    <None Include="tests\power_tests.cpp" />
     <None Include="tests\process_tests.cpp" />
     <None Include="docs\00-project-ai-learning-harness.md" />
     <None Include="docs\01-help-documentation-guide.md" />

@@ -39,6 +39,7 @@ add_executable(CppOptimizer
     source/metrics/pdh_metrics.cpp
     source/platform/native_api.cpp
     source/policy/policy_engine.cpp
+    source/power/power_locker.cpp
     source/process/process_watcher.cpp
 )
 
@@ -225,4 +226,22 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerPolicyTests PRIVATE -municode)
     endif()
     add_test(NAME PolicyTests COMMAND CppOptimizerPolicyTests)
+
+    add_executable(CppOptimizerPowerTests
+        tests/power_tests.cpp
+        source/common/error.cpp
+        source/power/power_locker.cpp
+    )
+    target_include_directories(CppOptimizerPowerTests PRIVATE include)
+    target_compile_features(CppOptimizerPowerTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerPowerTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerPowerTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerPowerTests PRIVATE -municode)
+    endif()
+    add_test(NAME PowerTests COMMAND CppOptimizerPowerTests)
 endif()
