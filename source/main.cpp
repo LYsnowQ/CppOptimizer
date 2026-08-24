@@ -8,6 +8,7 @@
 #include "platform/native_api.hpp"
 #include "policy/policy_engine.hpp"
 #include "power/power_locker.hpp"
+#include "priority/priority_booster.hpp"
 #include "process/process_watcher.hpp"
 
 #include <algorithm>
@@ -642,6 +643,101 @@ int RunPowerLockCommand(int argc, wchar_t* argv[]) {
     return 0;
 }
 
+int RunPriorityBoostCommand(int argc, wchar_t* argv[]) {
+    // --priority-boost <s> <pid> [config.toml]：
+    // R1 局部可逆演示命令——对指定进程临时提升优先级类，到点按"条件恢复"还原：
+    // 仅当进程仍同实例且当前优先级未被外部改动时才恢复原值（不覆盖外部修改）；
+    // 进程退出时提升随进程消失（目标退出视为正常取消）。
+    // 等级取自配置 [priority].max_level（默认 above_normal），High 需显式配置。
+    constexpr std::uint32_t kMaxSeconds = 60;
+    std::uint32_t seconds = 0;
+    if (!ParseUint32(argv[2], seconds) || seconds == 0 ||
+        seconds > kMaxSeconds) {
+        std::wcerr << L"  --priority-boost seconds must be in 1.."
+                   << kMaxSeconds << L"\n";
+        return 2;
+    }
+    std::uint32_t pid = 0;
+    if (argc < 4 || !ParseUint32(argv[3], pid) || pid == 0) {
+        std::wcerr << L"  --priority-boost requires a positive pid\n";
+        return 2;
+    }
+
+    optimizer::config::PriorityConfig priorityConfig;
+    if (argc >= 5) {
+        const std::filesystem::path mainPath(argv[4]);
+        const std::wstring localPath =
+            (mainPath.parent_path() / L"config.local.toml").wstring();
+        auto config =
+            optimizer::config::LoadConfigWithLocal(argv[4], localPath);
+        if (!config) {
+            const auto& error = config.ErrorValue();
+            std::wcerr << L"  config load failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        priorityConfig = config.Value().priority;
+    }
+    const auto level = priorityConfig.maxLevel;
+    if (level == optimizer::config::PriorityLevel::None) {
+        std::wcerr << L"  [priority].max_level is \"none\"; nothing to boost\n";
+        return 2;
+    }
+
+    // 进程名（尽力而为，只读；权限不足时为空）。
+    std::wstring processName;
+    if (const auto details = optimizer::process::QueryProcessDetails(pid)) {
+        processName = details.Value().name;
+    }
+
+    const wchar_t* levelName = level == optimizer::config::PriorityLevel::High
+                                   ? L"high"
+                                   : L"above_normal";
+    optimizer::priority::PriorityBooster::Options options;
+    options.maxLevel = level;
+    auto backend = optimizer::priority::CreateWin32Backend();
+    optimizer::priority::PriorityBooster booster(backend, options);
+
+    std::wcout
+        << L"Priority boost (R1, reversible; priority restored on exit)\n";
+    std::wcout << L"  target   : pid " << pid;
+    if (!processName.empty()) {
+        std::wcout << L" (" << processName << L")";
+    }
+    std::wcout << L"\n  level    : " << levelName << L"\n";
+    std::wcout << L"  enabled  : "
+               << (priorityConfig.enabled
+                       ? L"yes"
+                       : L"no (policy automation off; manual demo still applies)")
+               << L"\n";
+
+    const auto acquired =
+        booster.AcquireBoost("cli-demo", pid, 0, level);
+    if (!acquired) {
+        const auto& error = acquired.ErrorValue();
+        std::wcerr << L"  acquire failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+    std::wcout << L"  [boosted] pid " << pid << L" -> " << levelName
+               << L"\n";
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(seconds);
+    std::wcout << L"  holding for " << seconds << L" s ...\n";
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    booster.ReleaseAll();
+    std::wcout
+        << L"  [restored] priority (conditional restore; external changes "
+           L"never overwritten)\n";
+    return 0;
+}
+
 int RunListProcesses(int argc, wchar_t* argv[]) {
     // --list-processes [--all] [filter]: 只读进程目录，默认只列有可见窗口的进程。
     // 供用户辨认并挑选要添加为游戏的进程；无任何系统修改。
@@ -992,6 +1088,10 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --power-lock <s> [execution|display|both]\n"
         << L"                             [reason...]  Hold a power request for 1..60 s\n"
         << L"                             (R1, reversible; released on exit)\n"
+        << L"  CppOptimizer.exe --priority-boost <s> <pid> [config.toml]\n"
+        << L"                             Temporarily raise a process priority class\n"
+        << L"                             for 1..60 s (R1, reversible; level from\n"
+        << L"                             [priority].max_level)\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -1029,6 +1129,10 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--power-lock") {
             return RunPowerLockCommand(argc, argv);
+        }
+        if ((argc == 4 || argc == 5) &&
+            std::wstring_view(argv[1]) == L"--priority-boost") {
+            return RunPriorityBoostCommand(argc, argv);
         }
         if (argc >= 2 && std::wstring_view(argv[1]) == L"--list-processes") {
             return RunListProcesses(argc, argv);
