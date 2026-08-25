@@ -106,15 +106,25 @@ PolicyDecision EvaluatePolicy(const PolicyInput& input) noexcept {
         return decision;
     }
 
-    // 规则 4：压力紧张 -> 建议 Layer 2 内存维护（v1 为咨询，不执行）。
+    // 规则 4：压力紧张 -> 建议 Layer 2 内存维护（无 R2 执行器，仅咨询）。
     if (input.pressure == ResourcePressure::Tight) {
         decision.action = PolicyAction::SuggestMemoryTune;
         decision.reasonCode = "mem_tight";
-        decision.reason = "内存余量紧张，建议 Layer 2 内存维护（咨询，不执行）";
+        decision.reason = "内存余量紧张，建议 Layer 2 内存维护（咨询，无执行器）";
         return decision;
     }
 
-    // 规则 5：余量充足/一般 -> 无证据不优化。
+    // 规则 5（PWR-002）：压力 Adequate/Comfortable 且游戏在前台
+    // -> 建议 Layer 3 优先级提升（由 PolicyExecutor 经 PriorityBooster 落地）。
+    // 仅前台提升；后台游戏（含未暂停）不提升，避免与可见应用抢调度。
+    if (input.game.foreground) {
+        decision.action = PolicyAction::SuggestPriorityBoost;
+        decision.reasonCode = "prio_boost";
+        decision.reason = "游戏前台且内存余量充足，建议 Layer 3 优先级提升";
+        return decision;
+    }
+
+    // 规则 6：其余（后台未暂停 + 余量充足）-> 无证据不优化。
     decision.action = PolicyAction::NoOp;
     decision.reasonCode = "mem_ok";
     decision.reason = "资源余量充足或一般，无证据不启用优化";

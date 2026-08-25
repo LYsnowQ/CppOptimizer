@@ -7,6 +7,7 @@
 #include "metrics/pdh_metrics.hpp"
 #include "platform/native_api.hpp"
 #include "policy/policy_engine.hpp"
+#include "policy/policy_executor.hpp"
 #include "power/power_locker.hpp"
 #include "priority/priority_booster.hpp"
 #include "process/process_watcher.hpp"
@@ -374,11 +375,12 @@ int RunWatchCommand(int argc, wchar_t* argv[]) {
 }
 
 int RunPolicyCommand(int argc, wchar_t* argv[]) {
-    // --policy <s> [config.toml]：前台、有界、只读的策略决策观测窗口。
+    // --policy <s> [config.toml]：前台、有界策略决策窗口。
     // 每秒：内存余量（只读查询）-> 压力分级 -> 游戏焦点（单轮 Toolhelp 轮询）
-    // -> 规则评估 + 防抖，输出只读咨询决策。
-    // v1 无任何执行器：所有决策均为建议，不产生系统修改；
-    // 无效/缺失指标不触发决策（黄色不变量）。
+    // -> 规则评估 + 防抖，输出决策；PWR-002 起，决策经配置门禁后落地为
+    // R1 执行器动作（[priority].enabled -> 前台游戏提升；[power].execution_required
+    // -> 游戏运行期持有电源请求），门禁全关时保持 POL-001 纯咨询行为。
+    // 无效/缺失指标不触发决策（黄色不变量），但仍对账释放已持动作。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (!ParseUint32(argv[2], seconds) || seconds == 0 ||
@@ -392,6 +394,9 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     // 无 main 时加载当前目录 config.local.toml（存在时）。
     std::vector<optimizer::config::GameConfig> games;
     optimizer::config::PolicyConfig policyConfig;
+    optimizer::config::PowerConfig powerConfig;
+    optimizer::config::PriorityConfig priorityConfig;
+    bool configLoaded = false; // 无配置时执行门禁全关（保守默认）
     if (argc >= 4) {
         const std::filesystem::path mainPath(argv[3]);
         const std::wstring localPath =
@@ -405,16 +410,22 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
                        << error.code << L"] " << error.message << L"\n";
             return 2;
         }
+        configLoaded = true;
         games = config.Value().games;
         policyConfig = config.Value().policy;
+        powerConfig = config.Value().power;
+        priorityConfig = config.Value().priority;
     } else {
         std::error_code existsError;
         if (std::filesystem::exists(
                 std::filesystem::path(L"config.local.toml"), existsError)) {
             auto local = optimizer::config::LoadConfig(L"config.local.toml");
             if (local) {
+                configLoaded = true;
                 games = std::move(local.Value().games);
                 policyConfig = local.Value().policy;
+                powerConfig = local.Value().power;
+                priorityConfig = local.Value().priority;
             }
         }
     }
@@ -442,7 +453,40 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     optimizer::policy::PolicyEvaluator evaluator(
         thresholds, std::chrono::milliseconds(policyConfig.cooldownMs));
 
-    std::wcout << L"Policy decision (read-only advisory, no system changes)\n";
+    // PWR-002：决策经配置门禁后落地为 R1 执行器动作；
+    // 无配置或门禁关闭 = 纯咨询（POL-001 行为不变）。
+    optimizer::policy::ExecutorConfig executorConfig;
+    executorConfig.priorityEnabled =
+        configLoaded && priorityConfig.enabled;
+    executorConfig.priorityMaxLevel = priorityConfig.maxLevel;
+    executorConfig.powerExecutionRequired =
+        configLoaded && powerConfig.executionRequired;
+    optimizer::priority::PriorityBooster::Options boosterOptions;
+    boosterOptions.maxLevel = executorConfig.priorityMaxLevel;
+    auto powerLocker = std::make_shared<optimizer::power::PowerLocker>(
+        optimizer::power::CreateWin32Backend());
+    auto booster = std::make_shared<optimizer::priority::PriorityBooster>(
+        optimizer::priority::CreateWin32Backend(), boosterOptions);
+    optimizer::policy::PolicyExecutor executor(powerLocker, booster,
+                                               executorConfig);
+    const bool executionOn =
+        executorConfig.priorityEnabled || executorConfig.powerExecutionRequired;
+
+    if (executionOn) {
+        std::wcout
+            << L"Policy decision window (advisory; R1 executors active)\n";
+        std::wcout << L"  exec     : priority "
+                   << (executorConfig.priorityEnabled ? L"on"
+                                                      : L"off (gated)")
+                   << L", power "
+                   << (executorConfig.powerExecutionRequired
+                           ? L"on"
+                           : L"off (gated)")
+                   << L"\n";
+    } else {
+        std::wcout
+            << L"Policy decision (read-only advisory, no system changes)\n";
+    }
     std::wcout << L"  rules : " << games.size() << L" game rule(s)\n";
     if (games.empty()) {
         std::wcout
@@ -453,6 +497,10 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
                           std::chrono::seconds(seconds);
     std::size_t tick = 1;
     std::map<optimizer::policy::PolicyAction, int> counts;
+    std::size_t execBoost = 0;
+    std::size_t execUnboost = 0;
+    std::size_t execPowerHold = 0;
+    std::size_t execPowerRelease = 0;
 
     while (std::chrono::steady_clock::now() < deadline) {
         const auto now = std::chrono::steady_clock::now();
@@ -468,8 +516,9 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
             }
         }
 
-        // 游戏焦点（单轮前台轮询，只读，不启动后台线程）。
+        // 游戏焦点与目标身份（单轮前台轮询，只读，不启动后台线程）。
         optimizer::policy::GameFocus focus;
+        optimizer::policy::ExecutorTarget target;
         if (auto polled = watcher.PollOnce(); polled) {
             for (const auto& info : watcher.GetTrackedProcesses()) {
                 if (info.state == optimizer::process::ProcessState::Running ||
@@ -477,6 +526,10 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
                     focus.gameId = info.gameId;
                     focus.running = true;
                     focus.foreground = info.isForeground;
+                    target.gameId = info.gameId;
+                    target.pid = info.pid;
+                    target.creationTime100ns = info.creationTime100ns;
+                    target.running = true;
                     const auto it = pauseByGame.find(info.gameId);
                     focus.pauseWhenBackground =
                         it == pauseByGame.end() ? true : it->second;
@@ -486,62 +539,96 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
         }
 
         std::wostringstream line;
+        optimizer::policy::PolicyDecision effectiveDecision;
         if (!margin) {
-            // 无效/缺失指标：不触发任何决策（黄色不变量）。
+            // 无效/缺失指标：不触发新决策，但对账释放已持动作（游戏退出自动释放）。
             line << L"  [" << tick
                  << L"s] margin n/a (memory query unavailable; no decision)";
             optimizer::common::WriteConsoleLine(line.str());
-            if (std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-            ++tick;
-            continue;
-        }
-
-        optimizer::policy::PolicyInput input;
-        auto pressure = optimizer::policy::ClassifyPressure(
-            static_cast<std::int32_t>(*margin), thresholds);
-        if (!pressure) {
-            // 阈值非法（配置层已拦截，此处防御）：不决策。
-            line << L"  [" << tick
-                 << L"s] policy thresholds invalid; no decision";
-            optimizer::common::WriteConsoleLine(line.str());
-            if (std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-            ++tick;
-            continue;
-        }
-        input.pressure = pressure.Value();
-        input.game = focus;
-
-        const auto evaluation = evaluator.Evaluate(input, now);
-        ++counts[evaluation.decision.action];
-
-        line << L"  [" << tick << L"s] margin " << *margin << L"% "
-             << optimizer::policy::PressureToString(input.pressure) << L" game=";
-        if (focus.running) {
-            line << std::wstring(focus.gameId.begin(), focus.gameId.end())
-                 << L" fg=" << (focus.foreground ? L"yes" : L"no");
         } else {
-            line << L"none";
+            optimizer::policy::PolicyInput input;
+            auto pressure = optimizer::policy::ClassifyPressure(
+                static_cast<std::int32_t>(*margin), thresholds);
+            if (!pressure) {
+                // 阈值非法（配置层已拦截，此处防御）：不决策。
+                line << L"  [" << tick
+                     << L"s] policy thresholds invalid; no decision";
+                optimizer::common::WriteConsoleLine(line.str());
+            } else {
+                input.pressure = pressure.Value();
+                input.game = focus;
+
+                const auto evaluation = evaluator.Evaluate(input, now);
+                counts[evaluation.decision.action]++;
+                effectiveDecision = evaluation.decision;
+
+                line << L"  [" << tick << L"s] margin " << *margin << L"% "
+                     << optimizer::policy::PressureToString(input.pressure)
+                     << L" game=";
+                if (focus.running) {
+                    line << std::wstring(focus.gameId.begin(),
+                                         focus.gameId.end())
+                         << L" fg=" << (focus.foreground ? L"yes" : L"no");
+                } else {
+                    line << L"none";
+                }
+                line << L" -> "
+                     << optimizer::policy::ActionToString(
+                            evaluation.decision.action)
+                     << L" ("
+                     << std::wstring(evaluation.decision.reasonCode.begin(),
+                                     evaluation.decision.reasonCode.end());
+                if (evaluation.suppressed) {
+                    line << L", cooldown";
+                }
+                line << L")";
+                optimizer::common::WriteConsoleLine(line.str());
+            }
         }
-        line << L" -> "
-             << optimizer::policy::ActionToString(evaluation.decision.action)
-             << L" ("
-             << std::wstring(evaluation.decision.reasonCode.begin(),
-                             evaluation.decision.reasonCode.end());
-        if (evaluation.suppressed) {
-            line << L", cooldown";
+
+        // 决策落地（含 margin 无效时的对账释放）。
+        if (const auto applied = executor.ApplyDecision(effectiveDecision,
+                                                        target)) {
+            const auto& effect = applied.Value();
+            if (effect.priorityBoosted) {
+                std::wostringstream out;
+                out << L"  [exec] priority boosted: "
+                    << std::wstring(target.gameId.begin(), target.gameId.end())
+                    << L" pid=" << target.pid;
+                optimizer::common::WriteConsoleLine(out.str());
+                ++execBoost;
+            }
+            if (effect.priorityReleased) {
+                std::wostringstream out;
+                out << L"  [exec] priority released: "
+                    << std::wstring(target.gameId.begin(), target.gameId.end());
+                optimizer::common::WriteConsoleLine(out.str());
+                ++execUnboost;
+            }
+            if (effect.powerHeld) {
+                optimizer::common::WriteConsoleLine(
+                    L"  [exec] power request held (game running)");
+                ++execPowerHold;
+            }
+            if (effect.powerReleased) {
+                optimizer::common::WriteConsoleLine(
+                    L"  [exec] power request released");
+                ++execPowerRelease;
+            }
+            if (!effect.skipped.empty()) {
+                std::wostringstream out;
+                out << L"  [exec] skipped: " << effect.skipped;
+                optimizer::common::WriteConsoleLine(out.str());
+            }
         }
-        line << L")";
-        optimizer::common::WriteConsoleLine(line.str());
 
         if (std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         ++tick;
     }
+
+    executor.ReleaseAll(); // 退出前释放全部已持动作（尽力而为）
 
     std::wostringstream summary;
     summary << L"  summary : NoOp "
@@ -552,6 +639,13 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
             << L" / SuggestPriorityBoost "
             << counts[optimizer::policy::PolicyAction::SuggestPriorityBoost];
     optimizer::common::WriteConsoleLine(summary.str());
+    if (executionOn) {
+        std::wostringstream execSummary;
+        execSummary << L"  exec     : boost " << execBoost << L" / unboost "
+                    << execUnboost << L" / power+ " << execPowerHold
+                    << L" / power- " << execPowerRelease;
+        optimizer::common::WriteConsoleLine(execSummary.str());
+    }
     return 0;
 }
 
@@ -1083,8 +1177,10 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --add-game [pid] [main.toml] [--dry-run]  Add a running\n"
         << L"                             process as a game rule into config.local.toml\n"
         << L"                             (interactive picker when pid is omitted)\n"
-        << L"  CppOptimizer.exe --policy <s> [config.toml]  Evaluate advisory policy\n"
-        << L"                             decisions for 1..60 s (read-only, no changes)\n"
+        << L"  CppOptimizer.exe --policy <s> [config.toml]  Evaluate policy\n"
+        << L"                             decisions for 1..60 s (advisory; R1\n"
+        << L"                             executors act only when config gates\n"
+        << L"                             [priority].enabled / [power].execution_required)\n"
         << L"  CppOptimizer.exe --power-lock <s> [execution|display|both]\n"
         << L"                             [reason...]  Hold a power request for 1..60 s\n"
         << L"                             (R1, reversible; released on exit)\n"

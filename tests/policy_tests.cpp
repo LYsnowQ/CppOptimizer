@@ -197,17 +197,28 @@ bool TestEvaluateTightForegroundSuggests() {
            d.reasonCode == "mem_tight";
 }
 
-bool TestEvaluateAdequateNoOp() {
+bool TestEvaluateAdequateForegroundBoosts() {
+    // PWR-002：余量充足 + 前台游戏 -> 建议优先级提升（Layer 3）。
     const auto d = EvaluatePolicy(MakeInput(
         ResourcePressure::Adequate, /*running=*/true,
         /*foreground=*/true, /*pauseWhenBackground=*/true));
-    return d.action == PolicyAction::NoOp && d.reasonCode == "mem_ok";
+    return d.action == PolicyAction::SuggestPriorityBoost &&
+           d.reasonCode == "prio_boost" && d.gameId == "g";
 }
 
-bool TestEvaluateComfortableNoOp() {
+bool TestEvaluateComfortableForegroundBoosts() {
     const auto d = EvaluatePolicy(MakeInput(
         ResourcePressure::Comfortable, /*running=*/true,
         /*foreground=*/true, /*pauseWhenBackground=*/true));
+    return d.action == PolicyAction::SuggestPriorityBoost &&
+           d.reasonCode == "prio_boost";
+}
+
+bool TestEvaluateBackgroundNoPauseAdequateNoOp() {
+    // 后台未暂停 + 余量充足：仅前台提升，后台不提升 -> NoOp。
+    const auto d = EvaluatePolicy(MakeInput(
+        ResourcePressure::Adequate, /*running=*/true,
+        /*foreground=*/false, /*pauseWhenBackground=*/false));
     return d.action == PolicyAction::NoOp && d.reasonCode == "mem_ok";
 }
 
@@ -286,10 +297,10 @@ bool TestEvaluatorFirstApplies() {
 bool TestEvaluatorFlapSuppressed() {
     PolicyEvaluator evaluator({}, std::chrono::milliseconds(5000));
     const auto t0 = T0();
-    // t0：余量一般 -> NoOp（首次生效）。
+    // t0：后台未暂停 + 余量一般 -> NoOp（mem_ok，非行动态，首次生效）。
     auto e1 = evaluator.Evaluate(
         MakeInput(ResourcePressure::Adequate, /*running=*/true,
-                  /*foreground=*/true, /*pauseWhenBackground=*/true),
+                  /*foreground=*/false, /*pauseWhenBackground=*/false),
         t0);
     if (e1.suppressed || e1.decision.action != PolicyAction::NoOp) {
         return false;
@@ -297,7 +308,7 @@ bool TestEvaluatorFlapSuppressed() {
     // t0+1s：余量紧张 -> 切换在冷却期内被抑制，输出保持上一次有效决策（NoOp）。
     auto e2 = evaluator.Evaluate(
         MakeInput(ResourcePressure::Tight, /*running=*/true,
-                  /*foreground=*/true, /*pauseWhenBackground=*/true),
+                  /*foreground=*/false, /*pauseWhenBackground=*/false),
         t0 + std::chrono::seconds(1));
     if (!e2.suppressed || e2.decision.action != PolicyAction::NoOp) {
         return false;
@@ -308,7 +319,7 @@ bool TestEvaluatorFlapSuppressed() {
     // t0+6s：冷却期结束，切换生效。
     auto e3 = evaluator.Evaluate(
         MakeInput(ResourcePressure::Tight, /*running=*/true,
-                  /*foreground=*/true, /*pauseWhenBackground=*/true),
+                  /*foreground=*/false, /*pauseWhenBackground=*/false),
         t0 + std::chrono::seconds(6));
     if (e3.suppressed ||
         e3.decision.action != PolicyAction::SuggestMemoryTune) {
@@ -320,7 +331,7 @@ bool TestEvaluatorFlapSuppressed() {
     // t0+7s：切回 NoOp 在冷却期内被抑制，保持行动态。
     auto e4 = evaluator.Evaluate(
         MakeInput(ResourcePressure::Adequate, /*running=*/true,
-                  /*foreground=*/true, /*pauseWhenBackground=*/true),
+                  /*foreground=*/false, /*pauseWhenBackground=*/false),
         t0 + std::chrono::seconds(7));
     if (!e4.suppressed ||
         e4.decision.action != PolicyAction::SuggestMemoryTune) {
@@ -329,7 +340,7 @@ bool TestEvaluatorFlapSuppressed() {
     // t0+12s：冷却期结束，切回 NoOp 生效。
     auto e5 = evaluator.Evaluate(
         MakeInput(ResourcePressure::Adequate, /*running=*/true,
-                  /*foreground=*/true, /*pauseWhenBackground=*/true),
+                  /*foreground=*/false, /*pauseWhenBackground=*/false),
         t0 + std::chrono::seconds(12));
     return !e5.suppressed && e5.decision.action == PolicyAction::NoOp;
 }
@@ -356,14 +367,15 @@ bool TestEvaluatorActionSwitchWhileActing() {
 bool TestEvaluatorReset() {
     PolicyEvaluator evaluator({}, std::chrono::milliseconds(5000));
     const auto t0 = T0();
+    // t0：后台未暂停 + 余量一般 -> NoOp（非行动态，首次生效）。
     evaluator.Evaluate(
         MakeInput(ResourcePressure::Adequate, /*running=*/true,
-                  /*foreground=*/true, /*pauseWhenBackground=*/true),
+                  /*foreground=*/false, /*pauseWhenBackground=*/false),
         t0);
     // 冷却期内切换被抑制。
     auto suppressed = evaluator.Evaluate(
         MakeInput(ResourcePressure::Tight, /*running=*/true,
-                  /*foreground=*/true, /*pauseWhenBackground=*/true),
+                  /*foreground=*/false, /*pauseWhenBackground=*/false),
         t0 + std::chrono::seconds(1));
     if (!suppressed.suppressed) {
         return false;
@@ -407,8 +419,11 @@ int wmain() {
     run(L"EvaluatePolicy background without pause suggests",
         &TestEvaluateBackgroundNoPauseSuggests);
     run(L"EvaluatePolicy tight foreground suggests", &TestEvaluateTightForegroundSuggests);
-    run(L"EvaluatePolicy adequate is NoOp", &TestEvaluateAdequateNoOp);
-    run(L"EvaluatePolicy comfortable is NoOp", &TestEvaluateComfortableNoOp);
+    run(L"EvaluatePolicy adequate foreground boosts", &TestEvaluateAdequateForegroundBoosts);
+    run(L"EvaluatePolicy comfortable foreground boosts",
+        &TestEvaluateComfortableForegroundBoosts);
+    run(L"EvaluatePolicy background no-pause adequate is NoOp",
+        &TestEvaluateBackgroundNoPauseAdequateNoOp);
     run(L"HysteresisFilter first call applies", &TestHysteresisFirstApply);
     run(L"HysteresisFilter same state stable", &TestHysteresisSameStateStable);
     run(L"HysteresisFilter suppress then apply", &TestHysteresisSuppressThenApply);

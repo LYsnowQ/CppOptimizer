@@ -13,7 +13,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
 - **进程生命周期观测**：`--watch <seconds> [config.toml]` 按配置的游戏规则轮询 Toolhelp 进程快照，输出 `NotRunning/Starting/Running/Exiting` 状态转移（PID + 创建时间双重身份防 PID 重用）
 - **进程目录**：`--list-processes [--all] [filter]` 只读列出运行进程（pid/路径/窗口标题/前台/内存），供辨认并挑选要添加为游戏的进程；支持中文进程名与窗口标题
 - **自选进程添加游戏**：`--add-game [pid] [main.toml] [--dry-run]` 从运行进程自动生成游戏规则（id 从进程名派生并去重、display_name 取窗口标题），写入用户自建配置 `config.local.toml`（与预设配置分离，原子写）；交互模式（无 pid）列出有窗口进程供编号选择
-- **只读策略决策**：`--policy <s> [config.toml]` 消费内存余量与游戏焦点（ProcessWatcher 前台轮询），按 `[policy]` 阈值分级（Comfortable/Adequate/Tight/Critical）并评估只读咨询规则（危急仅提示、紧张建议 Layer 2 内存维护、后台暂停不优化），附防抖冷却抑制抖动；所有决策均为建议，不产生任何系统修改
+- **只读策略决策 + 门禁执行**：`--policy <s> [config.toml]` 消费内存余量与游戏焦点（ProcessWatcher 前台轮询），按 `[policy]` 阈值分级（Comfortable/Adequate/Tight/Critical）并评估规则（无游戏 no_game / 危急仅提示 mem_critical / 后台暂停不优化 game_background / 紧张建议内存维护 mem_tight / 前台余量充足建议优先级提升 prio_boost），附防抖冷却抑制抖动；PWR-002 起，决策经配置门禁落地为 R1 动作（`[priority].enabled` -> 前台游戏提升优先级；`[power].execution_required` -> 游戏运行期持有电源请求），游戏退出自动释放；无配置或门禁关闭时保持纯咨询不产生任何系统修改
 - **R1 局部可逆电源请求**：`--power-lock <s> [execution|display|both] [reason...]` 前台有界持有 Windows Power Request（`execution` 阻止睡眠 / `display` 阻止熄屏），到点自动释放，进程退出时句柄随句柄表关闭、系统侧请求自动取消；Power Request 表达睡眠/显示需求，不承诺锁定 CPU/GPU 频率
 - **R1 局部可逆优先级提升**：`--priority-boost <s> <pid> [config.toml]` 对指定进程临时提升优先级类（等级取自 `[priority].max_level`，默认 AboveNormal，High 需显式配置；realtime 在配置层拒绝），到点条件恢复——仅当进程仍同实例且当前优先级未被外部改动时才恢复原值（不覆盖外部修改）；目标退出视为正常取消
 - **平台诊断**：`--diagnose` Native API 能力探测（只读）
@@ -31,7 +31,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
 
 ## 安全边界
 
-- 当前除 `--power-lock`（R1 局部可逆、前台有界、退出自动释放）与 `--priority-boost`（R1 局部可逆、前台有界、条件恢复、不覆盖外部修改）外，所有命令均为只读查询，不修改系统状态；
+- 当前除 `--power-lock`（R1 局部可逆、前台有界、退出自动释放）、`--priority-boost`（R1 局部可逆、前台有界、条件恢复、不覆盖外部修改）与 `--policy` 在配置门禁开启时的 R1 落地（`[priority].enabled` / `[power].execution_required`，游戏退出自动释放）外，所有命令均为只读查询，不修改系统状态；
 - 不注入、不 Hook、不读写游戏内存、不加载内核驱动；
 - 自动内存清理（Standby/Modified List 等）、全局电源修改、进程优先级调整等高风险动作默认关闭；
 - 调用 `Nt*` API 不等于编写内核驱动；本项目当前全部位于用户态（Ring 3）。
@@ -92,7 +92,7 @@ CppOptimizer.exe --cpu           采样 CPU 使用率（只读，PDH）
 CppOptimizer.exe --watch <s> [config.toml]  按配置的游戏规则观测进程生命周期（只读，Toolhelp，1–60 秒）
 CppOptimizer.exe --list-processes [--all] [filter]  列出运行进程（只读；默认仅有可见窗口者）
 CppOptimizer.exe --add-game [pid] [main.toml] [--dry-run]  从运行进程添加游戏规则到 config.local.toml（无 pid 时交互选择）
-CppOptimizer.exe --policy <s> [config.toml]  只读咨询决策窗口（1–60 秒，无任何系统修改）
+CppOptimizer.exe --policy <s> [config.toml]  决策窗口（1–60 秒；门禁开启时落地 R1 执行，门禁全关为纯咨询）
 CppOptimizer.exe --power-lock <s> [execution|display|both] [reason...]  持有电源请求（R1，前台有界 1–60 秒，退出自动释放）
 CppOptimizer.exe --priority-boost <s> <pid> [config.toml]  临时提升进程优先级类（R1，前台有界 1–60 秒，条件恢复；等级取自 [priority].max_level）
 CppOptimizer.exe --help         帮助信息
@@ -171,20 +171,34 @@ Policy decision (read-only advisory, no system changes)
   summary : NoOp 1 / Notify 2 / SuggestMemoryTune 0 / SuggestPriorityBoost 0
 ```
 
+```text
+> CppOptimizer.exe --policy 6 config\pwr002-demo.toml   （[priority].enabled / [power].execution_required 开启时）
+Policy decision window (advisory; R1 executors active)
+  exec     : priority on, power on
+  rules : 1 game rule(s)
+  [1s] margin 57% comfortable game=blender-demo fg=yes -> SuggestPriorityBoost (prio_boost)
+  [exec] priority boosted: blender-demo pid=7016
+  [exec] power request held (game running)
+  [6s] margin 56% comfortable game=blender-demo fg=no -> NoOp (game_background)
+  [exec] priority released: blender-demo
+  summary : NoOp 1 / Notify 0 / SuggestMemoryTune 0 / SuggestPriorityBoost 5
+  exec     : boost 1 / unboost 1 / power+ 1 / power- 0
+```
+
 ## 测试
 
 ```powershell
 ctest --preset test-debug
 ```
 
-当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）、低负载占比（严格小于语义、阈值 0/100 边界、round-half-up）、结构化日志（级别过滤、格式化纯函数、文件 sink 与 RAII 关闭、失败降级不递归、并发写）、PDH 采样（warming-up、节奏契约）、进程生命周期（名称匹配、规则匹配、状态差分全状态机、PID 重用/重启、窗口/创建时间查询、轮询线程事件投递）、进程目录（详情查询、窗口过滤、子串匹配）、规则生成与配置写入（id 派生/去重、TOML 转义、原子写、main+local 合并）、宽字符控制台输出（UTF-8 往返）、策略决策（余量计算与分级边界、规则评估全分支、防抖冷却语义、求值器组合、`[policy]` 配置校验）、电源请求（可注入 fake 的引用计数状态机：配对释放、幂等、失败路径、RAII 自动释放、类型解析）、优先级提升（可注入 fake 的租约状态机：最小权限、身份重验、条件恢复不覆盖外部修改、失败不伪装成功、目标退出视为取消、max_level 门禁）。
+当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）、低负载占比（严格小于语义、阈值 0/100 边界、round-half-up）、结构化日志（级别过滤、格式化纯函数、文件 sink 与 RAII 关闭、失败降级不递归、并发写）、PDH 采样（warming-up、节奏契约）、进程生命周期（名称匹配、规则匹配、状态差分全状态机、PID 重用/重启、窗口/创建时间查询、轮询线程事件投递）、进程目录（详情查询、窗口过滤、子串匹配）、规则生成与配置写入（id 派生/去重、TOML 转义、原子写、main+local 合并）、宽字符控制台输出（UTF-8 往返）、策略决策（余量计算与分级边界、规则评估全分支含 prio_boost、防抖冷却语义、求值器组合、`[policy]` 配置校验）、电源请求（可注入 fake 的引用计数状态机：配对释放、幂等、失败路径、RAII 自动释放、类型解析）、优先级提升（可注入 fake 的租约状态机：最小权限、身份重验、条件恢复不覆盖外部修改、失败不伪装成功、目标退出视为取消、max_level 门禁）、策略执行器（可注入双 fake 的期望状态对账：门禁开关、幂等、目标变化替换、游戏退出自动释放、电源生命周期、失败路径、RAII）。
 
 ## 项目状态与路线图
 
 **当前阶段**：工程基线与只读观测。
 
-- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）、PDH 只读采样（`--cpu`）、进程生命周期观测（`--watch`，Toolhelp 轮询 + 窗口检测 + PID/创建时间身份）、进程目录（`--list-processes`，路径/窗口/内存详情）、自选进程添加游戏闭环（`--add-game`，规则自动生成 + `config.local.toml` 原子写 + main/local 合并加载）、PolicyEngine 只读决策（`--policy`，压力分级 + 规则评估 + 防抖，`[policy]` 配置节，只读咨询不执行）、PowerLocker 首切片（`--power-lock`，电源请求引用计数状态机 + 可注入后端 + R1 可逆演示）、PriorityBooster 首切片（`--priority-boost`，租约状态机 + 条件恢复 + 可注入后端 + R1 可逆演示）；
-- 规划中：PolicyEngine 接入执行器（低风险执行 PowerLocker / PriorityBooster，消费 `[power]`/`[priority]` 配置）-> Agent/Service 形态；
+- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）、PDH 只读采样（`--cpu`）、进程生命周期观测（`--watch`，Toolhelp 轮询 + 窗口检测 + PID/创建时间身份）、进程目录（`--list-processes`，路径/窗口/内存详情）、自选进程添加游戏闭环（`--add-game`，规则自动生成 + `config.local.toml` 原子写 + main/local 合并加载）、PolicyEngine 只读决策（`--policy`，压力分级 + 规则评估 + 防抖，`[policy]` 配置节）、PowerLocker 首切片（`--power-lock`，电源请求引用计数状态机 + 可注入后端 + R1 可逆演示）、PriorityBooster 首切片（`--priority-boost`，租约状态机 + 条件恢复 + 可注入后端 + R1 可逆演示）、PolicyEngine 接入执行器（`--policy` 决策经 `[priority]`/`[power]` 门禁落地 R1 动作：前台游戏提升 + 游戏运行期电源请求，游戏退出自动释放，无配置或门禁全关纯咨询）；
+- 规划中：Agent/Service 运行形态（控制台宿主 -> ServiceHost / Per-user Agent）；
 - 实验性：内存清理、GPU 心跳、调度调整等模块默认关闭，仅在门禁、测试与审计就绪后评估。
 
 ## 目录结构

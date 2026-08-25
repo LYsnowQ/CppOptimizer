@@ -39,6 +39,9 @@
     <ClInclude Include="include\policy\policy_engine.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\policy\policy_executor.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="include\power\power_locker.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -80,6 +83,9 @@
     <ClCompile Include="source\policy\policy_engine.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="source\policy\policy_executor.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="source\power\power_locker.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -106,6 +112,7 @@
     <None Include="tests\memory_metrics_tests.cpp" />
     <None Include="tests\memory_tests.cpp" />
     <None Include="tests\policy_tests.cpp" />
+    <None Include="tests\policy_executor_tests.cpp" />
     <None Include="tests\power_tests.cpp" />
     <None Include="tests\priority_tests.cpp" />
     <None Include="tests\process_tests.cpp" />

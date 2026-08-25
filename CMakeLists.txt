@@ -39,6 +39,7 @@ add_executable(CppOptimizer
     source/metrics/pdh_metrics.cpp
     source/platform/native_api.cpp
     source/policy/policy_engine.cpp
+    source/policy/policy_executor.cpp
     source/power/power_locker.cpp
     source/priority/priority_booster.cpp
     source/process/process_watcher.cpp
@@ -263,4 +264,25 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerPriorityTests PRIVATE -municode)
     endif()
     add_test(NAME PriorityTests COMMAND CppOptimizerPriorityTests)
+
+    add_executable(CppOptimizerPolicyExecutorTests
+        tests/policy_executor_tests.cpp
+        source/common/error.cpp
+        source/policy/policy_engine.cpp
+        source/policy/policy_executor.cpp
+        source/power/power_locker.cpp
+        source/priority/priority_booster.cpp
+    )
+    target_include_directories(CppOptimizerPolicyExecutorTests PRIVATE include)
+    target_compile_features(CppOptimizerPolicyExecutorTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerPolicyExecutorTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerPolicyExecutorTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerPolicyExecutorTests PRIVATE -municode)
+    endif()
+    add_test(NAME PolicyExecutorTests COMMAND CppOptimizerPolicyExecutorTests)
 endif()
