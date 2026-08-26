@@ -185,20 +185,35 @@ Policy decision window (advisory; R1 executors active)
   exec     : boost 1 / unboost 1 / power+ 1 / power- 0
 ```
 
+```text
+> CppOptimizer.exe --service console 3
+Service host (console mode, R0 workload, 3 s)
+  workload : memory snapshot + info log (read-only)
+  stop     : Ctrl+C or timeout
+2026-08-26 10:25:40.665 [INFO] service: tick 1: available 18.5 GiB, load 41%
+2026-08-26 10:25:41.668 [INFO] service: tick 2: available 18.6 GiB, load 41%
+2026-08-26 10:25:42.677 [INFO] service: tick 3: available 18.5 GiB, load 41%
+  ticks    : 3
+  stopped  : timeout
+
+> CppOptimizer.exe --service install
+  service install failed [Win32:5] 拒绝访问。 (需要管理员权限)
+```
+
 ## 测试
 
 ```powershell
 ctest --preset test-debug
 ```
 
-当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）、低负载占比（严格小于语义、阈值 0/100 边界、round-half-up）、结构化日志（级别过滤、格式化纯函数、文件 sink 与 RAII 关闭、失败降级不递归、并发写）、PDH 采样（warming-up、节奏契约）、进程生命周期（名称匹配、规则匹配、状态差分全状态机、PID 重用/重启、窗口/创建时间查询、轮询线程事件投递）、进程目录（详情查询、窗口过滤、子串匹配）、规则生成与配置写入（id 派生/去重、TOML 转义、原子写、main+local 合并）、宽字符控制台输出（UTF-8 往返）、策略决策（余量计算与分级边界、规则评估全分支含 prio_boost、防抖冷却语义、求值器组合、`[policy]` 配置校验）、电源请求（可注入 fake 的引用计数状态机：配对释放、幂等、失败路径、RAII 自动释放、类型解析）、优先级提升（可注入 fake 的租约状态机：最小权限、身份重验、条件恢复不覆盖外部修改、失败不伪装成功、目标退出视为取消、max_level 门禁）、策略执行器（可注入双 fake 的期望状态对账：门禁开关、幂等、目标变化替换、游戏退出自动释放、电源生命周期、失败路径、RAII）。
+当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）、低负载占比（严格小于语义、阈值 0/100 边界、round-half-up）、结构化日志（级别过滤、格式化纯函数、文件 sink 与 RAII 关闭、失败降级不递归、并发写）、PDH 采样（warming-up、节奏契约）、进程生命周期（名称匹配、规则匹配、状态差分全状态机、PID 重用/重启、窗口/创建时间查询、轮询线程事件投递）、进程目录（详情查询、窗口过滤、子串匹配）、规则生成与配置写入（id 派生/去重、TOML 转义、原子写、main+local 合并）、宽字符控制台输出（UTF-8 往返）、策略决策（余量计算与分级边界、规则评估全分支含 prio_boost、防抖冷却语义、求值器组合、`[policy]` 配置校验）、电源请求（可注入 fake 的引用计数状态机：配对释放、幂等、失败路径、RAII 自动释放、类型解析）、优先级提升（可注入 fake 的租约状态机：最小权限、身份重验、条件恢复不覆盖外部修改、失败不伪装成功、目标退出视为取消、max_level 门禁）、策略执行器（可注入双 fake 的期望状态对账：门禁开关、幂等、目标变化替换、游戏退出自动释放、电源生命周期、失败路径、RAII）、服务宿主（运行模式解析、状态机合法/非法转移、上报构造与控制码、可注入 SCM fake 的服务状态序列、控制码分支、负载失败/上报失败不伪装、控制台生命周期、停止幂等粘性、安装/卸载参数校验、真实后端非 SCM 启动失败路径）。
 
 ## 项目状态与路线图
 
 **当前阶段**：工程基线与只读观测。
 
-- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）、PDH 只读采样（`--cpu`）、进程生命周期观测（`--watch`，Toolhelp 轮询 + 窗口检测 + PID/创建时间身份）、进程目录（`--list-processes`，路径/窗口/内存详情）、自选进程添加游戏闭环（`--add-game`，规则自动生成 + `config.local.toml` 原子写 + main/local 合并加载）、PolicyEngine 只读决策（`--policy`，压力分级 + 规则评估 + 防抖，`[policy]` 配置节）、PowerLocker 首切片（`--power-lock`，电源请求引用计数状态机 + 可注入后端 + R1 可逆演示）、PriorityBooster 首切片（`--priority-boost`，租约状态机 + 条件恢复 + 可注入后端 + R1 可逆演示）、PolicyEngine 接入执行器（`--policy` 决策经 `[priority]`/`[power]` 门禁落地 R1 动作：前台游戏提升 + 游戏运行期电源请求，游戏退出自动释放，无配置或门禁全关纯咨询）；
-- 规划中：Agent/Service 运行形态（控制台宿主 -> ServiceHost / Per-user Agent）；
+- 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）、PDH 只读采样（`--cpu`）、进程生命周期观测（`--watch`，Toolhelp 轮询 + 窗口检测 + PID/创建时间身份）、进程目录（`--list-processes`，路径/窗口/内存详情）、自选进程添加游戏闭环（`--add-game`，规则自动生成 + `config.local.toml` 原子写 + main/local 合并加载）、PolicyEngine 只读决策（`--policy`，压力分级 + 规则评估 + 防抖，`[policy]` 配置节）、PowerLocker 首切片（`--power-lock`，电源请求引用计数状态机 + 可注入后端 + R1 可逆演示）、PriorityBooster 首切片（`--priority-boost`，租约状态机 + 条件恢复 + 可注入后端 + R1 可逆演示）、PolicyEngine 接入执行器（`--policy` 决策经 `[priority]`/`[power]` 门禁落地 R1 动作：前台游戏提升 + 游戏运行期电源请求，游戏退出自动释放，无配置或门禁全关纯咨询）、ServiceHost 首切片（`--service console/install/uninstall` + SCM 入口：控制台/服务双模式宿主、SCM 状态机与安装卸载、可注入后端、R0 只读负载）；
+- 规划中：Agent/Service 运行形态（控制台宿主 -> ServiceHost / Per-user Agent）；ServiceHost 首切片已落地，Per-user Agent 与受保护 IPC 属后续切片；
 - 实验性：内存清理、GPU 心跳、调度调整等模块默认关闭，仅在门禁、测试与审计就绪后评估。
 
 ## 目录结构

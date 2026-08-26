@@ -11,6 +11,9 @@
 #include "power/power_locker.hpp"
 #include "priority/priority_booster.hpp"
 #include "process/process_watcher.hpp"
+#include "service/service_host.hpp"
+
+#include <windows.h>
 
 #include <algorithm>
 #include <chrono>
@@ -1158,6 +1161,190 @@ int RunAddGameCommand(int argc, wchar_t* argv[]) {
     return 0;
 }
 
+// 服务宿主：服务名（SCM 以 argv[1]==服务名 启动本进程，与 --service service 等价）。
+constexpr wchar_t kServiceName[] = L"CppOptimizerService";
+constexpr wchar_t kServiceDisplayName[] = L"CppOptimizer Service";
+constexpr wchar_t kServiceDescription[] =
+    L"CppOptimizer 只读观测与受控优化宿主（R0 负载）";
+
+// 服务宿主负载状态：R0 只读观测（每 tick 一次内存快照 + Info 日志）。
+// 服务模式不接受临时危险命令（docs/23 第 3 节），本负载不产生任何系统修改。
+struct ServiceHostDemoState {
+    optimizer::logger::Logger logger;
+    std::size_t tickCount = 0;
+};
+
+optimizer::common::Result<void> ServiceWorkloadTick(
+    ServiceHostDemoState& state) noexcept {
+    auto status = optimizer::memory::QueryMemoryStatus();
+    if (!status) {
+        return optimizer::common::Result<void>::Failure(status.ErrorValue());
+    }
+    const auto& s = status.Value();
+    ++state.tickCount;
+    std::wstring message =
+        L"tick " + std::to_wstring(state.tickCount) + L": available " +
+        optimizer::memory::FormatBytes(s.availablePhysicalBytes) + L", load " +
+        std::to_wstring(s.memoryLoadPercent) + L"%";
+    state.logger.Write(optimizer::logger::LogLevel::Info, L"service", message);
+    return optimizer::common::Result<void>::Success();
+}
+
+// 服务日志 sink：文件优先（服务模式无控制台），失败降级到 Debug 输出
+// （Logger 契约：sink 失败不阻断、保持原 sink）。
+void SetupServiceLogger(optimizer::logger::Logger& logger) noexcept {
+    std::error_code dirError;
+    const auto logDir = std::filesystem::temp_directory_path(dirError);
+    if (dirError) {
+        logger.SetDebugSink();
+        return;
+    }
+    const auto logPath = logDir / L"CppOptimizerService.log";
+    if (const auto file = logger.SetFileSink(logPath.wstring()); !file) {
+        logger.SetDebugSink();
+    }
+}
+
+int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
+    // --service console <s>：控制台托管演示（前台、有界、Ctrl+C 优雅停止）。
+    constexpr std::uint32_t kMaxSeconds = 60;
+    std::uint32_t seconds = 0;
+    if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
+        seconds > kMaxSeconds) {
+        std::wcerr << L"  --service console seconds must be in 1.."
+                   << kMaxSeconds << L"\n";
+        return 2;
+    }
+
+    ServiceHostDemoState state;
+    state.logger.SetStderrSink();
+    optimizer::service::ServiceHost::Options options;
+    options.identity.name = kServiceName;
+    options.identity.displayName = kServiceDisplayName;
+    options.identity.description = kServiceDescription;
+    optimizer::service::ServiceHost host(
+        [&state] { return ServiceWorkloadTick(state); }, std::move(options),
+        optimizer::service::CreateWin32ScmBackend());
+
+    std::wostringstream header;
+    header << L"Service host (console mode, R0 workload, " << seconds
+           << L" s)";
+    optimizer::common::WriteConsoleLine(header.str());
+    optimizer::common::WriteConsoleLine(
+        L"  workload : memory snapshot + info log (read-only)");
+    optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
+    const auto result = host.RunConsole(std::chrono::seconds(seconds));
+    if (!result) {
+        const auto& error = result.ErrorValue();
+        std::wostringstream err;
+        err << L"  service host failed ["
+            << optimizer::common::ToString(error.domain) << L":"
+            << error.code << L"] " << error.message;
+        optimizer::common::WriteConsoleLine(err.str());
+        return 2;
+    }
+    std::wostringstream ticksLine;
+    ticksLine << L"  ticks    : " << state.tickCount;
+    optimizer::common::WriteConsoleLine(ticksLine.str());
+    std::wostringstream stoppedLine;
+    stoppedLine << L"  stopped  : "
+                << (host.IsStopRequested() ? L"user (Ctrl+C)" : L"timeout");
+    optimizer::common::WriteConsoleLine(stoppedLine.str());
+    return 0;
+}
+
+int RunServiceAsServiceCommand() {
+    // --service service（或 SCM 以服务名启动）：进入 SCM 分发循环，
+    // 直到 SCM 发送停止/关机控制码。
+    ServiceHostDemoState state;
+    SetupServiceLogger(state.logger);
+    optimizer::service::ServiceHost::Options options;
+    options.identity.name = kServiceName;
+    options.identity.displayName = kServiceDisplayName;
+    options.identity.description = kServiceDescription;
+    optimizer::service::ServiceHost host(
+        [&state] { return ServiceWorkloadTick(state); }, std::move(options),
+        optimizer::service::CreateWin32ScmBackend());
+    const auto result = host.RunService();
+    if (!result) {
+        const auto& error = result.ErrorValue();
+        std::wostringstream err;
+        err << L"  service run failed ["
+            << optimizer::common::ToString(error.domain) << L":"
+            << error.code << L"] " << error.message;
+        if (error.domain == optimizer::common::ErrorDomain::Win32 &&
+            error.code == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) {
+            err << L" (服务模式必须由 SCM 启动；普通命令行请用 --service console)";
+        }
+        optimizer::common::WriteConsoleLine(err.str());
+        // 服务模式无控制台：同步留一份诊断到调试输出。
+        ::OutputDebugStringW(err.str().c_str());
+        return 2;
+    }
+    return 0;
+}
+
+int RunServiceInstallCommand(int argc, wchar_t* argv[]) {
+    // --service install [exe-path]：注册服务（需要管理员；demand start 保守默认）。
+    optimizer::service::ServiceIdentity identity;
+    identity.name = kServiceName;
+    identity.displayName = kServiceDisplayName;
+    identity.description = kServiceDescription;
+    if (argc >= 4) {
+        identity.executablePath = argv[3];
+    }
+    const auto result = optimizer::service::InstallService(identity);
+    if (!result) {
+        const auto& error = result.ErrorValue();
+        std::wostringstream err;
+        err << L"  service install failed ["
+            << optimizer::common::ToString(error.domain) << L":"
+            << error.code << L"] " << error.message;
+        if (error.domain == optimizer::common::ErrorDomain::Win32 &&
+            error.code == ERROR_ACCESS_DENIED) {
+            err << L" (需要管理员权限)";
+        } else if (error.domain == optimizer::common::ErrorDomain::Win32 &&
+                   error.code == ERROR_SERVICE_EXISTS) {
+            err << L" (服务已存在，请先卸载)";
+        }
+        optimizer::common::WriteConsoleLine(err.str());
+        return 2;
+    }
+    std::wostringstream done;
+    done << L"Service installed: " << kServiceName
+         << L" (demand start, requires SCM start)";
+    optimizer::common::WriteConsoleLine(done.str());
+    optimizer::common::WriteConsoleLine(L"  start : sc start CppOptimizerService");
+    optimizer::common::WriteConsoleLine(
+        L"  test  : CppOptimizer.exe --service console 10");
+    return 0;
+}
+
+int RunServiceUninstallCommand() {
+    // --service uninstall：移除服务（需要管理员）。
+    const auto result = optimizer::service::UninstallService(kServiceName);
+    if (!result) {
+        const auto& error = result.ErrorValue();
+        std::wostringstream err;
+        err << L"  service uninstall failed ["
+            << optimizer::common::ToString(error.domain) << L":"
+            << error.code << L"] " << error.message;
+        if (error.domain == optimizer::common::ErrorDomain::Win32 &&
+            error.code == ERROR_ACCESS_DENIED) {
+            err << L" (需要管理员权限)";
+        } else if (error.domain == optimizer::common::ErrorDomain::Win32 &&
+                   error.code == ERROR_SERVICE_DOES_NOT_EXIST) {
+            err << L" (服务未安装)";
+        }
+        optimizer::common::WriteConsoleLine(err.str());
+        return 2;
+    }
+    std::wostringstream done;
+    done << L"Service uninstalled: " << kServiceName;
+    optimizer::common::WriteConsoleLine(done.str());
+    return 0;
+}
+
 void PrintUsage() {
     std::wcout
         << L"CppOptimizer (engineering baseline)\n\n"
@@ -1188,6 +1375,16 @@ void PrintUsage() {
         << L"                             Temporarily raise a process priority class\n"
         << L"                             for 1..60 s (R1, reversible; level from\n"
         << L"                             [priority].max_level)\n"
+        << L"  CppOptimizer.exe --service install [exe-path]  Register the Windows\n"
+        << L"                             service (SCM, requires administrator;\n"
+        << L"                             demand start, R0 workload)\n"
+        << L"  CppOptimizer.exe --service uninstall           Remove the Windows service\n"
+        << L"                             (SCM, requires administrator)\n"
+        << L"  CppOptimizer.exe --service console <s>  Host the R0 workload in console\n"
+        << L"                             mode for 1..60 s (foreground; Ctrl+C to\n"
+        << L"                             stop gracefully)\n"
+        << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
+        << L"                             equivalent to --service service)\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -1235,6 +1432,28 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 2 && std::wstring_view(argv[1]) == L"--add-game") {
             return RunAddGameCommand(argc, argv);
+        }
+        if (argc == 2 && std::wstring_view(argv[1]) == kServiceName) {
+            // SCM 启动入口：SCM 以服务名作为首个参数启动本进程。
+            return RunServiceAsServiceCommand();
+        }
+        if (argc >= 3 && std::wstring_view(argv[1]) == L"--service") {
+            const auto mode = optimizer::service::ParseRunMode(argv[2]);
+            if (!mode) {
+                std::wcerr
+                    << L"  --service requires console|service|install|uninstall\n";
+                return 2;
+            }
+            switch (*mode) {
+                case optimizer::service::RunMode::Console:
+                    return RunServiceConsoleCommand(argc, argv);
+                case optimizer::service::RunMode::Service:
+                    return RunServiceAsServiceCommand();
+                case optimizer::service::RunMode::Install:
+                    return RunServiceInstallCommand(argc, argv);
+                case optimizer::service::RunMode::Uninstall:
+                    return RunServiceUninstallCommand();
+            }
         }
         PrintUsage();
         return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;

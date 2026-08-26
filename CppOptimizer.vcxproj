@@ -61,7 +61,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -87,7 +87,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -112,6 +112,7 @@
     <ClInclude Include="include\power\power_locker.hpp" />
     <ClInclude Include="include\priority\priority_booster.hpp" />
     <ClInclude Include="include\process\process_watcher.hpp" />
+    <ClInclude Include="include\service\service_host.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp" />
@@ -128,6 +129,7 @@
     <ClCompile Include="source\power\power_locker.cpp" />
     <ClCompile Include="source\priority\priority_booster.cpp" />
     <ClCompile Include="source\process\process_watcher.cpp" />
+    <ClCompile Include="source\service\service_host.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="CppOptimizer.slnx" />
@@ -148,6 +150,7 @@
     <None Include="tests\policy_executor_tests.cpp" />
     <None Include="tests\power_tests.cpp" />
     <None Include="tests\priority_tests.cpp" />
+    <None Include="tests\service_tests.cpp" />
     <None Include="tests\process_tests.cpp" />
     <None Include="docs\00-project-ai-learning-harness.md" />
     <None Include="docs\01-help-documentation-guide.md" />
@@ -183,6 +186,7 @@
     <None Include="works\2026-08-13-MET-002-observe-low-load-share.md" />
     <None Include="works\README.md" />
     <None Include="works\work.md" />
+    <None Include="works\2026-08-26-SVC-001-service-host.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

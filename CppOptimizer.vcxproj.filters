@@ -51,6 +51,9 @@
     <ClInclude Include="include\process\process_watcher.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\service\service_host.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp">
@@ -95,6 +98,9 @@
     <ClCompile Include="source\process\process_watcher.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="source\service\service_host.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="CppOptimizer.slnx" />
@@ -116,6 +122,7 @@
     <None Include="tests\power_tests.cpp" />
     <None Include="tests\priority_tests.cpp" />
     <None Include="tests\process_tests.cpp" />
+    <None Include="tests\service_tests.cpp" />
     <None Include="docs\00-project-ai-learning-harness.md" />
     <None Include="docs\01-help-documentation-guide.md" />
     <None Include="docs\02-overall-architecture.md" />
@@ -148,6 +155,7 @@
     <None Include="works\2026-08-10-MEM-001-read-only-memory-status.md" />
     <None Include="works\2026-08-11-MEM-003-format-bytes-and-snapshot-freshness.md" />
     <None Include="works\work.md" />
+    <None Include="works\2026-08-26-SVC-001-service-host.md" />
     <None Include="works\2026-08-13-MET-001-observe-read-only-window.md" />
   </ItemGroup>
 </Project>

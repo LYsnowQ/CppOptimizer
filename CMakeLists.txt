@@ -43,6 +43,7 @@ add_executable(CppOptimizer
     source/power/power_locker.cpp
     source/priority/priority_booster.cpp
     source/process/process_watcher.cpp
+    source/service/service_host.cpp
 )
 
 target_include_directories(CppOptimizer PRIVATE include ${THIRDPARTY_DIR} ${SPDLOG_INCLUDE_DIR} ${TOMLPLUSPLUS_INCLUDE_DIR})
@@ -50,6 +51,7 @@ target_link_libraries(CppOptimizer PRIVATE
     pdh
     user32
     psapi
+    advapi32
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
 )
@@ -285,4 +287,23 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerPolicyExecutorTests PRIVATE -municode)
     endif()
     add_test(NAME PolicyExecutorTests COMMAND CppOptimizerPolicyExecutorTests)
+
+    add_executable(CppOptimizerServiceTests
+        tests/service_tests.cpp
+        source/common/error.cpp
+        source/service/service_host.cpp
+    )
+    target_include_directories(CppOptimizerServiceTests PRIVATE include)
+    target_link_libraries(CppOptimizerServiceTests PRIVATE advapi32)
+    target_compile_features(CppOptimizerServiceTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerServiceTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerServiceTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerServiceTests PRIVATE -municode)
+    endif()
+    add_test(NAME ServiceTests COMMAND CppOptimizerServiceTests)
 endif()
