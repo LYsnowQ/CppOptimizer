@@ -44,6 +44,9 @@ add_executable(CppOptimizer
     source/priority/priority_booster.cpp
     source/process/process_watcher.cpp
     source/service/service_host.cpp
+    source/ipc/ipc_protocol.cpp
+    source/ipc/ipc_transport.cpp
+    source/ipc/ipc_session.cpp
 )
 
 target_include_directories(CppOptimizer PRIVATE include ${THIRDPARTY_DIR} ${SPDLOG_INCLUDE_DIR} ${TOMLPLUSPLUS_INCLUDE_DIR})
@@ -306,4 +309,24 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerServiceTests PRIVATE -municode)
     endif()
     add_test(NAME ServiceTests COMMAND CppOptimizerServiceTests)
+
+    add_executable(CppOptimizerIpcTests
+        tests/ipc_tests.cpp
+        source/common/error.cpp
+        source/ipc/ipc_protocol.cpp
+        source/ipc/ipc_transport.cpp
+        source/ipc/ipc_session.cpp
+    )
+    target_include_directories(CppOptimizerIpcTests PRIVATE include)
+    target_compile_features(CppOptimizerIpcTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerIpcTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerIpcTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerIpcTests PRIVATE -municode)
+    endif()
+    add_test(NAME IpcTests COMMAND CppOptimizerIpcTests)
 endif()

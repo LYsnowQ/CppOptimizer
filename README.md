@@ -19,6 +19,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
 - **平台诊断**：`--diagnose` Native API 能力探测（只读）
 - **中文环境支持**：面向中文 Windows，内部宽字符（UTF-16）、日志/存储 UTF-8、控制台/日志/错误消息均可承载中文（见工程手册 8.1）
 - **工程基础**：统一错误域模型（`Result<T>` / `Error`）、RAII 资源所有权、C++20、CTest 单元测试
+- **受保护命名管道 IPC**（IPC-001，批次 4 运行形态续）：`--ipc-pipe server <s> [suffix]` 前台有界服务端——显式 SDDL 命名管道（仅 SYSTEM/管理员/交互用户）、固定 16 字节帧头（magic/版本/类型/长度/request ID）、载荷上限 4096 字节、读/写超时、未知版本/类型/超长载荷帧级拒绝（不做宽松转换）、记录客户端 PID + 会话；`--ipc-pipe client [suffix]` 客户端——连接后发送一帧 FactsSnapshot 并校验应答（requestId 配对、Error 应答不伪装成功）；单请求-应答握手（断开前服务端等待客户端关闭），Agent 应用层语义属后续切片
 
 ## 设计原则
 
@@ -95,6 +96,8 @@ CppOptimizer.exe --add-game [pid] [main.toml] [--dry-run]  从运行进程添加
 CppOptimizer.exe --policy <s> [config.toml]  决策窗口（1–60 秒；门禁开启时落地 R1 执行，门禁全关为纯咨询）
 CppOptimizer.exe --power-lock <s> [execution|display|both] [reason...]  持有电源请求（R1，前台有界 1–60 秒，退出自动释放）
 CppOptimizer.exe --priority-boost <s> <pid> [config.toml]  临时提升进程优先级类（R1，前台有界 1–60 秒，条件恢复；等级取自 [priority].max_level）
+CppOptimizer.exe --ipc-pipe server <s> [suffix]  受保护命名管道服务端（前台有界 1–60 秒，至多服务一个客户端一帧，严格校验 + Ack）
+CppOptimizer.exe --ipc-pipe client [suffix]  受保护命名管道客户端（发送 FactsSnapshot 帧并打印应答）
 CppOptimizer.exe --help         帮助信息
 ```
 
@@ -200,13 +203,28 @@ Service host (console mode, R0 workload, 3 s)
   service install failed [Win32:5] 拒绝访问。 (需要管理员权限)
 ```
 
+```text
+> 终端 A：CppOptimizer.exe --ipc-pipe server 30
+IPC pipe server (protected transport, single client, 30 s)
+  pipe     : \\.\pipe\CppOptimizerIpc
+  client   : pid 13384, session 1
+  request  : FactsSnapshot id=1 payload=21 bytes
+  reply    : ack sent (frame validated)
+
+> 终端 B：CppOptimizer.exe --ipc-pipe client
+IPC pipe client (protected transport)
+  pipe     : \\.\pipe\CppOptimizerIpc
+  request  : FactsSnapshot id=1 payload=21 bytes
+  reply    : Ack id=1 payload=17 bytes [received 21 bytes]
+```
+
 ## 测试
 
 ```powershell
 ctest --preset test-debug
 ```
 
-当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）、低负载占比（严格小于语义、阈值 0/100 边界、round-half-up）、结构化日志（级别过滤、格式化纯函数、文件 sink 与 RAII 关闭、失败降级不递归、并发写）、PDH 采样（warming-up、节奏契约）、进程生命周期（名称匹配、规则匹配、状态差分全状态机、PID 重用/重启、窗口/创建时间查询、轮询线程事件投递）、进程目录（详情查询、窗口过滤、子串匹配）、规则生成与配置写入（id 派生/去重、TOML 转义、原子写、main+local 合并）、宽字符控制台输出（UTF-8 往返）、策略决策（余量计算与分级边界、规则评估全分支含 prio_boost、防抖冷却语义、求值器组合、`[policy]` 配置校验）、电源请求（可注入 fake 的引用计数状态机：配对释放、幂等、失败路径、RAII 自动释放、类型解析）、优先级提升（可注入 fake 的租约状态机：最小权限、身份重验、条件恢复不覆盖外部修改、失败不伪装成功、目标退出视为取消、max_level 门禁）、策略执行器（可注入双 fake 的期望状态对账：门禁开关、幂等、目标变化替换、游戏退出自动释放、电源生命周期、失败路径、RAII）、服务宿主（运行模式解析、状态机合法/非法转移、上报构造与控制码、可注入 SCM fake 的服务状态序列、控制码分支、负载失败/上报失败不伪装、控制台生命周期、停止幂等粘性、安装/卸载参数校验、真实后端非 SCM 启动失败路径）。
+当前覆盖：错误模型与资源所有权、内存快照契约（输入校验、`used` 派生、`available == total` 边界）、字节显示与快照时效边界、观测窗口聚合（空窗口 / 越界错误路径、round-half-up、顺序无关、整数溢出安全）、低负载占比（严格小于语义、阈值 0/100 边界、round-half-up）、结构化日志（级别过滤、格式化纯函数、文件 sink 与 RAII 关闭、失败降级不递归、并发写）、PDH 采样（warming-up、节奏契约）、进程生命周期（名称匹配、规则匹配、状态差分全状态机、PID 重用/重启、窗口/创建时间查询、轮询线程事件投递）、进程目录（详情查询、窗口过滤、子串匹配）、规则生成与配置写入（id 派生/去重、TOML 转义、原子写、main+local 合并）、宽字符控制台输出（UTF-8 往返）、策略决策（余量计算与分级边界、规则评估全分支含 prio_boost、防抖冷却语义、求值器组合、`[policy]` 配置校验）、电源请求（可注入 fake 的引用计数状态机：配对释放、幂等、失败路径、RAII 自动释放、类型解析）、优先级提升（可注入 fake 的租约状态机：最小权限、身份重验、条件恢复不覆盖外部修改、失败不伪装成功、目标退出视为取消、max_level 门禁）、策略执行器（可注入双 fake 的期望状态对账：门禁开关、幂等、目标变化替换、游戏退出自动释放、电源生命周期、失败路径、RAII）、服务宿主（运行模式解析、状态机合法/非法转移、上报构造与控制码、可注入 SCM fake 的服务状态序列、控制码分支、负载失败/上报失败不伪装、控制台生命周期、停止幂等粘性、安装/卸载参数校验、真实后端非 SCM 启动失败路径）、受保护命名管道 IPC（帧头构造/严格解析与校验全项、长度边界、序列化往返、可注入双 fake 的单帧会话：Ping/Ack 与 FactsSnapshot 应答、自定义处理器、非法帧/未知版本/未知类型/超长载荷拒绝并回 Error、接受超时、创建/读写失败不伪装、处理器失败回 Error、默认处理器拒绝、客户端往返 requestId 配对与 Error 应答不伪装、连接/读写失败路径）。
 
 ## 项目状态与路线图
 

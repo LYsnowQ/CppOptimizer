@@ -113,6 +113,9 @@
     <ClInclude Include="include\priority\priority_booster.hpp" />
     <ClInclude Include="include\process\process_watcher.hpp" />
     <ClInclude Include="include\service\service_host.hpp" />
+    <ClInclude Include="include\ipc\ipc_protocol.hpp" />
+    <ClInclude Include="include\ipc\ipc_transport.hpp" />
+    <ClInclude Include="include\ipc\ipc_session.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp" />
@@ -130,6 +133,9 @@
     <ClCompile Include="source\priority\priority_booster.cpp" />
     <ClCompile Include="source\process\process_watcher.cpp" />
     <ClCompile Include="source\service\service_host.cpp" />
+    <ClCompile Include="source\ipc\ipc_protocol.cpp" />
+    <ClCompile Include="source\ipc\ipc_transport.cpp" />
+    <ClCompile Include="source\ipc\ipc_session.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="CppOptimizer.slnx" />

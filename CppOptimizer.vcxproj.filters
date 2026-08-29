@@ -54,6 +54,15 @@
     <ClInclude Include="include\service\service_host.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\ipc\ipc_protocol.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ipc\ipc_transport.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ipc\ipc_session.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp">
@@ -101,6 +110,15 @@
     <ClCompile Include="source\service\service_host.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="source\ipc\ipc_protocol.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\ipc\ipc_transport.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\ipc\ipc_session.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="CppOptimizer.slnx" />
@@ -123,6 +141,7 @@
     <None Include="tests\priority_tests.cpp" />
     <None Include="tests\process_tests.cpp" />
     <None Include="tests\service_tests.cpp" />
+    <None Include="tests\ipc_tests.cpp" />
     <None Include="docs\00-project-ai-learning-harness.md" />
     <None Include="docs\01-help-documentation-guide.md" />
     <None Include="docs\02-overall-architecture.md" />

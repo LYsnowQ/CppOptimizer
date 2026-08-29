@@ -1,6 +1,9 @@
 ﻿#include "common/console_output.hpp"
 #include "common/error.hpp"
 #include "config/config_manager.hpp"
+#include "ipc/ipc_protocol.hpp"
+#include "ipc/ipc_session.hpp"
+#include "ipc/ipc_transport.hpp"
 #include "logger/logger.hpp"
 #include "memory/memory_tuner.hpp"
 #include "metrics/memory_metrics.hpp"
@@ -1345,6 +1348,144 @@ int RunServiceUninstallCommand() {
     return 0;
 }
 
+// 命名管道基名：服务端与客户端必须使用同一名称（可选后缀区分实例）。
+constexpr wchar_t kIpcPipeBase[] = L"\\\\.\\pipe\\CppOptimizerIpc";
+
+// 组装管道名。后缀仅接受 ASCII 字母数字与 -_（非法后缀返回空串，拒绝生成）。
+std::wstring IpcPipeName(std::wstring_view suffix) noexcept {
+    std::wstring name = kIpcPipeBase;
+    for (const wchar_t ch : suffix) {
+        const bool allowed =
+            (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||
+            (ch >= L'0' && ch <= L'9') || ch == L'-' || ch == L'_';
+        if (!allowed) {
+            return {};
+        }
+    }
+    name.append(suffix);
+    return name;
+}
+
+int RunIpcServerCommand(int argc, wchar_t* argv[]) {
+    // --ipc-pipe server <s> [suffix]：受保护命名管道服务端演示（IPC-001）。
+    // 前台、有界（s 秒）：等待至多一个客户端连接，读取一帧并严格校验
+    // （未知版本/类型/超长载荷 -> Error 应答），默认处理器应答
+    // （Ping->Ack / FactsSnapshot->Ack），输出客户端身份（PID + 会话）与请求摘要。
+    constexpr std::uint32_t kMaxSeconds = 60;
+    std::uint32_t seconds = 0;
+    if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
+        seconds > kMaxSeconds) {
+        std::wcerr << L"  --ipc-pipe server seconds must be in 1.." << kMaxSeconds
+                   << L"\n";
+        return 2;
+    }
+    std::wstring suffix;
+    if (argc >= 5) {
+        suffix = argv[4];
+    }
+    const std::wstring pipeName = IpcPipeName(suffix);
+    if (pipeName.empty()) {
+        std::wcerr << L"  --ipc-pipe suffix must be ASCII letters/digits/-/_\n";
+        return 2;
+    }
+
+    optimizer::ipc::IpcSession::Options sessionOptions;
+    auto backend = optimizer::ipc::CreateWin32ServerBackend(pipeName);
+    optimizer::ipc::IpcSession session(backend, sessionOptions);
+
+    std::wcout << L"IPC pipe server (protected transport, single client, "
+               << seconds << L" s)\n";
+    std::wcout << L"  pipe     : " << pipeName << L"\n";
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(seconds);
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
+    auto served = session.ServeOne(nullptr, remaining);
+    if (!served) {
+        const auto& error = served.ErrorValue();
+        if (error.domain == optimizer::common::ErrorDomain::Win32 &&
+            error.code == ERROR_TIMEOUT) {
+            // 有界窗口内无客户端连接：正常结束（非失败）。
+            std::wcout << L"  no client connected within " << seconds
+                       << L" s (bounded window ended)\n";
+            return 0;
+        }
+        std::wcerr << L"  serve failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+
+    const auto& result = served.Value();
+    std::wcout << L"  client   : pid " << result.clientPid << L", session "
+               << result.clientSessionId << L"\n";
+    std::wcout << L"  request  : "
+               << optimizer::ipc::MessageTypeToString(result.requestType)
+               << L" id=" << result.requestId << L" payload="
+               << result.payloadBytes << L" bytes\n";
+    std::wcout << L"  reply    : ack sent (frame validated)\n";
+    return 0;
+}
+
+int RunIpcClientCommand(int argc, wchar_t* argv[]) {
+    // --ipc-pipe client [suffix]：受保护命名管道客户端演示（IPC-001）。
+    // 连接服务端，发送一帧 FactsSnapshot（载荷为客户端事实文本），
+    // 读取并校验应答帧（requestId 配对、Error 应答不伪装成功）。
+    std::wstring suffix;
+    if (argc >= 4) {
+        suffix = argv[3]; // argv[2] 为子命令 "client"
+    }
+    const std::wstring pipeName = IpcPipeName(suffix);
+    if (pipeName.empty()) {
+        std::wcerr << L"  --ipc-pipe suffix must be ASCII letters/digits/-/_\n";
+        return 2;
+    }
+
+    // 事实快照载荷（v1 演示为 ASCII 文本，应用层编码属后续切片）。
+    const std::string factsText =
+        "facts clientPid=" + std::to_string(::GetCurrentProcessId());
+    std::vector<std::byte> payload;
+    payload.reserve(factsText.size());
+    for (const char ch : factsText) {
+        payload.push_back(
+            static_cast<std::byte>(static_cast<unsigned char>(ch)));
+    }
+
+    std::wcout << L"IPC pipe client (protected transport)\n";
+    std::wcout << L"  pipe     : " << pipeName << L"\n";
+    std::wcout << L"  request  : FactsSnapshot id=1 payload=" << payload.size()
+               << L" bytes\n";
+
+    auto backend = optimizer::ipc::CreateWin32ClientBackend();
+    auto reply = optimizer::ipc::IpcRoundTrip(
+        backend, pipeName, optimizer::ipc::IpcMessageType::FactsSnapshot,
+        payload, 1, std::chrono::milliseconds(3000));
+    if (!reply) {
+        const auto& error = reply.ErrorValue();
+        std::wcerr << L"  round trip failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+    const auto& value = reply.Value();
+    std::wcout << L"  reply    : "
+               << optimizer::ipc::MessageTypeToString(value.type)
+               << L" id=1 payload=" << value.payload.size() << L" bytes";
+    if (value.type == optimizer::ipc::IpcMessageType::Ack &&
+        !value.payload.empty()) {
+        // 默认处理器应答载荷为 ASCII 文本（收到字节数说明），可直接显示。
+        std::string text;
+        text.reserve(value.payload.size());
+        for (const auto b : value.payload) {
+            text.push_back(static_cast<char>(static_cast<unsigned char>(b)));
+        }
+        std::wcout << L" [" << text.c_str() << L"]";
+    }
+    std::wcout << L"\n";
+    return 0;
+}
+
 void PrintUsage() {
     std::wcout
         << L"CppOptimizer (engineering baseline)\n\n"
@@ -1385,6 +1526,11 @@ void PrintUsage() {
         << L"                             stop gracefully)\n"
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
+        << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix]  Serve one protected\n"
+        << L"                             named-pipe client for 1..60 s (single\n"
+        << L"                             frame; strict validation; ack reply)\n"
+        << L"  CppOptimizer.exe --ipc-pipe client [suffix]  Send a facts snapshot\n"
+        << L"                             frame to the IPC server and print the reply\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -1454,6 +1600,16 @@ int wmain(int argc, wchar_t* argv[]) {
                 case optimizer::service::RunMode::Uninstall:
                     return RunServiceUninstallCommand();
             }
+        }
+        if (argc >= 3 && std::wstring_view(argv[1]) == L"--ipc-pipe") {
+            if (std::wstring_view(argv[2]) == L"server") {
+                return RunIpcServerCommand(argc, argv);
+            }
+            if (std::wstring_view(argv[2]) == L"client") {
+                return RunIpcClientCommand(argc, argv);
+            }
+            std::wcerr << L"  --ipc-pipe requires server|client\n";
+            return 2;
         }
         PrintUsage();
         return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;
