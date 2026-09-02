@@ -30,6 +30,11 @@ namespace optimizer::ipc {
 // 载荷信封（首行）。
 inline constexpr std::string_view kFactsEnvelopeV1 = "CPOPFACTS/1";
 
+// 会话凭据事实键（IPC-005）：ASCII 字母/数字/_/-，1..kMaxFactsTokenBytes 字节。
+// 属“内部凭据”，不进入 FormatFactsSummary 回显（防泄漏到日志/应答）。
+inline constexpr std::string_view kFactsTokenKey = "agent_token";
+inline constexpr std::size_t kMaxFactsTokenBytes = 64;
+
 // 单载荷最多事实条数。
 inline constexpr std::size_t kMaxFactsEntries = 64;
 // 键最大字节数（ASCII 可见子集）。
@@ -63,15 +68,19 @@ struct IpcFact {
 // 定义“哪些键被接受、值如何解释”。本层仍属应用语义，服务端据此把关；键的
 // 信任问题（会话校验/身份白名单）属后续切片。
 //
-// v1 已注册键（均可选，但整份载荷必须至少含一条已注册键）：
+// v1 已注册键（均可选，但整份载荷必须至少含一条已注册的**非凭据**事实）：
 //   - client_pid           无符号十进制整数（自报进程 ID，仅供参考，不替代服务端身份）
 //   - memory_total_mb      无符号十进制整数，>= 1
 //   - memory_available_mb  无符号十进制整数，>= 0；与 memory_total_mb 同现时须 <= total
 //   - memory_load_percent  无符号十进制整数，0..100（内存负载，GlobalMemoryStatusEx 口径）
 //   - observer             UTF-8 文本，非空（上报方自述，用于调试/审计）
+//   - agent_token          ASCII 会话凭据（IPC-005，1..kMaxFactsTokenBytes）；服务端
+//                          Options.expectedToken 配置时才校验（缺失/不匹配回
+//                          Error(AuthFailed)）；永不回显（见 FormatFactsSummary）
 //
-// 约束：未知键、键值非十进制整数、数值越界、observer 为空、整份为空均整体拒绝
-// （Validation，不宽松接受）。扩展 schema 必须同步更新本注册表与对应测试。
+// 约束：未知键、键值非十进制整数、数值越界、observer/agent_token 为空或超限、整份不含
+// 任何非凭据已注册键均整体拒绝（Validation，不宽松接受）。扩展 schema 必须同步更新本
+// 注册表与对应测试。
 [[nodiscard]] common::Result<void> ValidateFactsV1Schema(
     std::span<const IpcFact> facts);
 

@@ -45,6 +45,25 @@ std::vector<std::byte> BytesFromText(std::string_view text) noexcept {
     return bytes;
 }
 
+// agent_token 事实值与期望凭据逐字节比较。期望凭据仅支持 ASCII（<=0x7F），
+// 含非 ASCII 一律视为不匹配（CLI/供给层已约束 ASCII 字母数字/_/-）。
+bool TokenMatches(std::string_view token,
+                  std::wstring_view expected) noexcept {
+    if (token.size() != expected.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < token.size(); ++i) {
+        const wchar_t e = expected[i];
+        if (e > 0x7F) {
+            return false;
+        }
+        if (static_cast<unsigned char>(token[i]) != e) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 const wchar_t* IpcErrorCodeToString(IpcErrorCode code) noexcept {
@@ -61,6 +80,8 @@ const wchar_t* IpcErrorCodeToString(IpcErrorCode code) noexcept {
             return L"invalid facts payload";
         case IpcErrorCode::UnauthorizedClient:
             return L"unauthorized client";
+        case IpcErrorCode::AuthFailed:
+            return L"authentication failed";
     }
     return L"unknown error";
 }
@@ -156,8 +177,12 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
     }
 
     IpcReply reply;
+    // 无自定义处理器时使用默认处理器（可携带会话凭据要求 expectedToken）。
+    const bool customHandler = static_cast<bool>(handler);
     const common::Result<void> handled =
-        handler ? handler(request, reply) : DefaultHandler(request, reply);
+        customHandler
+            ? handler(request, reply)
+            : DefaultHandler(request, reply, options_.expectedToken);
     if (!handled) {
         SendErrorReply(backend, request.requestId,
                        handler ? IpcErrorCode::HandlerFailed
@@ -209,6 +234,13 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
 
 common::Result<void> IpcSession::DefaultHandler(const IpcRequest& request,
                                                 IpcReply& reply) {
+    // 两参版本＝不带会话凭据要求（等价 IPC-002/003 行为）。
+    return DefaultHandler(request, reply, std::wstring_view{});
+}
+
+common::Result<void> IpcSession::DefaultHandler(const IpcRequest& request,
+                                                IpcReply& reply,
+                                                std::wstring_view expectedToken) {
     switch (request.type) {
         case IpcMessageType::Ping:
             reply.type = IpcMessageType::Ack;
@@ -226,6 +258,25 @@ common::Result<void> IpcSession::DefaultHandler(const IpcRequest& request,
                 reply.payload.push_back(
                     static_cast<std::byte>(IpcErrorCode::InvalidFacts));
                 break;
+            }
+            // 会话凭据（IPC-005）：服务端配置 expectedToken 时，载荷必须携带完全
+            // 匹配的 agent_token 事实，否则回 Error(AuthFailed)（不伪装成功）。
+            if (!expectedToken.empty()) {
+                bool matched = false;
+                for (const IpcFact& fact : parsed.Value()) {
+                    if (fact.key == kFactsTokenKey &&
+                        TokenMatches(fact.value, expectedToken)) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    reply.type = IpcMessageType::Error;
+                    reply.payload.clear();
+                    reply.payload.push_back(
+                        static_cast<std::byte>(IpcErrorCode::AuthFailed));
+                    break;
+                }
             }
             reply.type = IpcMessageType::Ack;
             reply.payload = BytesFromText(FormatFactsSummary(parsed.Value()));

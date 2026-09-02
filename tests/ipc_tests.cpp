@@ -666,6 +666,42 @@ bool TestFactsSchemaRejectsEmptyObserver() {
     return !result && result.ErrorValue().domain == ErrorDomain::Validation;
 }
 
+bool TestFactsSchemaTokenRules() {
+    // 合法：凭据 + 至少一条非凭据事实。
+    const std::vector<IpcFact> valid = {{"agent_token", "secret123"},
+                                        {"client_pid", "5"}};
+    if (!ValidateFactsV1Schema(valid)) {
+        return false;
+    }
+    // 空凭据、超长凭据、非法字符凭据整体拒绝。
+    const std::vector<IpcFact> emptyToken = {{"agent_token", ""},
+                                              {"client_pid", "5"}};
+    if (ValidateFactsV1Schema(emptyToken)) {
+        return false;
+    }
+    const std::vector<IpcFact> longToken = {
+        {"agent_token", std::string(65, 'a')}, {"client_pid", "5"}};
+    if (ValidateFactsV1Schema(longToken)) {
+        return false;
+    }
+    const std::vector<IpcFact> badChars = {{"agent_token", "abc!1"},
+                                           {"client_pid", "5"}};
+    if (ValidateFactsV1Schema(badChars)) {
+        return false;
+    }
+    // 只有凭据、无非凭据事实：拒绝（凭据不满足“至少一条”）。
+    const std::vector<IpcFact> onlyToken = {{"agent_token", "secret123"}};
+    return !ValidateFactsV1Schema(onlyToken);
+}
+
+bool TestFactsTokenExcludedFromSummary() {
+    const std::vector<IpcFact> facts = {{"agent_token", "topsecret"},
+                                        {"client_pid", "7"},
+                                        {"observer", "x"}};
+    // 凭据不回显且不计入摘要条数（防泄漏）。
+    return FormatFactsSummary(facts) == "facts ok (2): client_pid=7 observer=x";
+}
+
 // ---------- 服务端会话（fake 后端） ----------
 
 bool TestServeOnePingAck() {
@@ -1035,6 +1071,105 @@ bool TestServeOneDefaultHandlerRejectsRequestType() {
 
 // ---------- 客户端往返（fake 后端） ----------
 
+bool TestServeTokenMatchingAck() {
+    // 配置 expectedToken 且载荷携带完全匹配的 agent_token：回 Ack（摘要不含凭据）。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    std::vector<IpcFact> facts = {{"agent_token", "secret123"},
+                                  {"observer", "demo"}};
+    auto encoded = SerializeFactsV1(facts);
+    if (!encoded) {
+        return false;
+    }
+    fake->incoming =
+        BuildFrame(IpcMessageType::FactsSnapshot, 3, encoded.Value());
+    IpcSession::Options options;
+    options.expectedToken = L"secret123";
+    IpcSession session(fake, options);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!served || served.Value().replyType != IpcMessageType::Ack) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Ack) &&
+           replyPayload == BytesFromText(FormatFactsSummary(facts));
+}
+
+bool TestServeTokenMissingRejected() {
+    // 服务端要求凭据但载荷缺失：回 Error(AuthFailed)（不伪装成功）。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto payload = BytesFromText("CPOPFACTS/1\nobserver=demo");
+    fake->incoming = BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
+    IpcSession::Options options;
+    options.expectedToken = L"secret123";
+    IpcSession session(fake, options);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!served || served.Value().replyType != IpcMessageType::Error ||
+        served.Value().payloadBytes != payload.size()) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           !replyPayload.empty() &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::AuthFailed;
+}
+
+bool TestServeTokenMismatchRejected() {
+    // 凭据不匹配：回 Error(AuthFailed)。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto payload = BytesFromText("CPOPFACTS/1\nagent_token=wrong\nobserver=demo");
+    fake->incoming = BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
+    IpcSession::Options options;
+    options.expectedToken = L"secret123";
+    IpcSession session(fake, options);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!served || served.Value().replyType != IpcMessageType::Error) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           !replyPayload.empty() &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::AuthFailed;
+}
+
+bool TestServeTokenIgnoredWhenNotConfigured() {
+    // 服务端未配置 expectedToken：载荷中的 agent_token 仅作 schema 合法项、被忽略。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto payload =
+        BytesFromText("CPOPFACTS/1\nagent_token=secret123\nobserver=demo");
+    fake->incoming = BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
+    IpcSession session(fake);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!served || served.Value().replyType != IpcMessageType::Ack) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Ack);
+}
+
+bool TestRoundTripAuthFailedReplyNotDisguised() {
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    const std::vector<std::byte> errorPayload{
+        static_cast<std::byte>(IpcErrorCode::AuthFailed)};
+    fake->incoming = BuildFrame(IpcMessageType::Error, 42, errorPayload);
+    const auto reply = IpcRoundTrip(fake, L"\\\\.\\pipe\\test",
+                                    IpcMessageType::FactsSnapshot, {}, 42,
+                                    std::chrono::milliseconds(100));
+    return !reply && reply.ErrorValue().domain == ErrorDomain::Validation &&
+           reply.ErrorValue().message.find(L"authentication failed") !=
+               std::wstring::npos;
+}
+
+
 bool TestRoundTripPingAck() {
     auto fake = std::make_shared<FakeIpcClientBackend>();
     fake->incoming = BuildFrame(IpcMessageType::Ack, 42, {});
@@ -1193,6 +1328,8 @@ int wmain() {
     run(L"facts schema rejects available gt total",
         &TestFactsSchemaRejectsAvailableGtTotal);
     run(L"facts schema rejects empty observer", &TestFactsSchemaRejectsEmptyObserver);
+    run(L"facts schema token rules", &TestFactsSchemaTokenRules);
+    run(L"facts token excluded from summary", &TestFactsTokenExcludedFromSummary);
     run(L"serve one ping -> ack", &TestServeOnePingAck);
     run(L"serve one facts snapshot -> ack", &TestServeOneFactsSnapshotAck);
     run(L"serve one invalid facts -> error reply", &TestServeOneInvalidFactsReply);
@@ -1203,6 +1340,11 @@ int wmain() {
     run(L"session gate rejects unknown pid", &TestSessionGateRejectsUnknownPid);
     run(L"session gate custom allow override", &TestSessionGateCustomAllowOverride);
     run(L"session gate custom reject", &TestSessionGateCustomReject);
+    run(L"serve token matching -> ack", &TestServeTokenMatchingAck);
+    run(L"serve token missing -> auth failed", &TestServeTokenMissingRejected);
+    run(L"serve token mismatch -> auth failed", &TestServeTokenMismatchRejected);
+    run(L"serve token ignored when not configured",
+        &TestServeTokenIgnoredWhenNotConfigured);
     run(L"serve one custom handler", &TestServeOneCustomHandler);
     run(L"serve one bad magic rejected", &TestServeOneBadMagicRejected);
     run(L"serve one unknown version rejected", &TestServeOneUnknownVersionRejected);
@@ -1224,6 +1366,8 @@ int wmain() {
         &TestRoundTripErrorReplyNotDisguised);
     run(L"round trip unauthorized error reply not disguised",
         &TestRoundTripUnauthorizedErrorReplyNotDisguised);
+    run(L"round trip auth failed error reply not disguised",
+        &TestRoundTripAuthFailedReplyNotDisguised);
     run(L"round trip request id mismatch", &TestRoundTripRequestIdMismatch);
     run(L"round trip connect failure", &TestRoundTripConnectFailure);
     run(L"round trip write failure", &TestRoundTripWriteFailure);

@@ -1367,13 +1367,65 @@ std::wstring IpcPipeName(std::wstring_view suffix) noexcept {
     return name;
 }
 
+// 在位置参数中取第一个“非选项”参数作后缀（跳过 --ipc-token 及其值），
+// 使 [suffix] 与 [--ipc-token <t>] 的顺序无关。
+std::wstring FindIpcSuffix(int argc, wchar_t* argv[], int start) noexcept {
+    std::wstring suffix;
+    bool skipNextValue = false;
+    for (int i = start; i < argc; ++i) {
+        const std::wstring_view arg(argv[i]);
+        if (!skipNextValue && arg == L"--ipc-token") {
+            skipNextValue = true;
+            continue;
+        }
+        if (skipNextValue) {
+            skipNextValue = false;
+            continue;
+        }
+        if (suffix.empty()) {
+            suffix = argv[i];
+        }
+    }
+    return suffix;
+}
+
+// 扫描 --ipc-token <值>（IPC-005 demo：共享会话凭据）。返回是否存在；
+// 值写入 out（调用方随后校验字符集/长度，且不打印明文）。
+bool FindIpcToken(int argc, wchar_t* argv[], int start,
+                  std::wstring& out) noexcept {
+    for (int i = start; i + 1 < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--ipc-token") {
+            out = argv[i + 1];
+            return true;
+        }
+    }
+    return false;
+}
+
+// 凭据字符集约束：ASCII 字母/数字/_/-，1..64（与 ipc_facts schema 一致）。
+bool IsValidIpcToken(const std::wstring& token) noexcept {
+    if (token.empty() || token.size() > 64) {
+        return false;
+    }
+    for (const wchar_t ch : token) {
+        const bool alnum =
+            (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||
+            (ch >= L'0' && ch <= L'9');
+        if (!alnum && ch != L'_' && ch != L'-') {
+            return false;
+        }
+    }
+    return true;
+}
+
 int RunIpcServerCommand(int argc, wchar_t* argv[]) {
-    // --ipc-pipe server <s> [suffix]：受保护命名管道服务端演示（IPC-003）。
-    // 前台、有界（s 秒）：等待至多一个客户端连接，读取一帧并严格校验
+    // --ipc-pipe server <s> [suffix] [--ipc-token <t>]：受保护命名管道服务端演示
+    // （IPC-005）。前台、有界（s 秒）：等待至多一个客户端连接，读取一帧并严格校验
     // （未知版本/类型/超长载荷 -> Error 应答），默认处理器应答
     // （Ping->Ack；FactsSnapshot 依次过 CPOPFACTS/1 语法解析与 v1 键语义白名单，
-    // 合法回 Ack 摘要、任一违反回 Error(InvalidFacts)），输出客户端身份
-    // （PID + 会话）与请求/应答摘要。
+    // 合法回 Ack 摘要、任一违反回 Error(InvalidFacts)；配置 --ipc-token 后还要求
+    // 载荷携带匹配的 agent_token 事实，缺失/不匹配回 Error(AuthFailed)），
+    // 输出客户端身份（PID + 会话）与请求/应答摘要。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
@@ -1382,10 +1434,7 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
                    << L"\n";
         return 2;
     }
-    std::wstring suffix;
-    if (argc >= 5) {
-        suffix = argv[4];
-    }
+    const std::wstring suffix = FindIpcSuffix(argc, argv, 4);
     const std::wstring pipeName = IpcPipeName(suffix);
     if (pipeName.empty()) {
         std::wcerr << L"  --ipc-pipe suffix must be ASCII letters/digits/-/_\n";
@@ -1393,12 +1442,24 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
     }
 
     optimizer::ipc::IpcSession::Options sessionOptions;
+    std::wstring token;
+    if (FindIpcToken(argc, argv, 4, token)) {
+        if (!IsValidIpcToken(token)) {
+            std::wcerr
+                << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
+            return 2;
+        }
+        sessionOptions.expectedToken = token; // 明文仅限 demo；真实供给属后续切片
+    }
     auto backend = optimizer::ipc::CreateWin32ServerBackend(pipeName);
     optimizer::ipc::IpcSession session(backend, sessionOptions);
 
     std::wcout << L"IPC pipe server (protected transport, single client, "
                << seconds << L" s)\n";
     std::wcout << L"  pipe     : " << pipeName << L"\n";
+    if (!sessionOptions.expectedToken.empty()) {
+        std::wcout << L"  auth     : session token required (hidden)\n";
+    }
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(seconds);
@@ -1428,8 +1489,8 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
                << L" id=" << result.requestId << L" payload="
                << result.payloadBytes << L" bytes\n";
     if (result.replyType == optimizer::ipc::IpcMessageType::Error) {
-        // 默认处理器对违反 CPOPFACTS/1 契约的 FactsSnapshot 回 Error(InvalidFacts)。
-        std::wcout << L"  reply    : error sent (invalid facts payload)\n";
+        // Error 回执可能来自 Facts 契约/白名单违反或凭据校验失败：原因在客户端输出。
+        std::wcout << L"  reply    : error sent (request rejected; see client)\n";
     } else if (result.requestType ==
                optimizer::ipc::IpcMessageType::FactsSnapshot) {
         std::wcout << L"  reply    : ack sent (facts parsed and summarized)\n";
@@ -1440,17 +1501,25 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
 }
 
 int RunIpcClientCommand(int argc, wchar_t* argv[]) {
-    // --ipc-pipe client [suffix]：受保护命名管道客户端演示（IPC-003）。
-    // 连接服务端，发送一帧 FactsSnapshot（CPOPFACTS/1 结构化事实：真实内存观测 +
-    // 自报身份），读取并校验应答帧（requestId 配对、Error 应答不伪装成功）。
-    std::wstring suffix;
-    if (argc >= 4) {
-        suffix = argv[3]; // argv[2] 为子命令 "client"
-    }
+    // --ipc-pipe client [suffix] [--ipc-token <t>]：受保护命名管道客户端演示
+    // （IPC-005）。连接服务端，发送一帧 FactsSnapshot（CPOPFACTS/1 结构化事实：
+    // 真实内存观测 + 自报身份；配置 --ipc-token 时附 agent_token 凭据事实），
+    // 读取并校验应答帧（requestId 配对、Error 应答不伪装成功）。
+    const std::wstring suffix = FindIpcSuffix(argc, argv, 3);
     const std::wstring pipeName = IpcPipeName(suffix);
     if (pipeName.empty()) {
         std::wcerr << L"  --ipc-pipe suffix must be ASCII letters/digits/-/_\n";
         return 2;
+    }
+    std::wstring token;
+    bool hasToken = false;
+    if (FindIpcToken(argc, argv, 3, token)) {
+        if (!IsValidIpcToken(token)) {
+            std::wcerr
+                << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
+            return 2;
+        }
+        hasToken = true;
     }
 
     // 结构化事实载荷（IPC-003 v1 schema：client_pid + 真实内存观测 + observer）。
@@ -1478,6 +1547,17 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
         std::to_string(memory.memoryLoadPercent)});
     facts.push_back(
         optimizer::ipc::IpcFact{"observer", "CppOptimizer ipc demo"});
+    if (hasToken) {
+        // 会话凭据事实（IPC-005）：ASCII 窄化（已在 IsValidIpcToken 约束）；
+        // 不打印明文（FormatFactsSummary 亦不回显凭据）。
+        std::string narrowToken;
+        narrowToken.reserve(token.size());
+        for (const wchar_t ch : token) {
+            narrowToken.push_back(static_cast<char>(ch));
+        }
+        facts.push_back(optimizer::ipc::IpcFact{
+            std::string(optimizer::ipc::kFactsTokenKey), narrowToken});
+    }
     auto payloadResult = optimizer::ipc::SerializeFactsV1(facts);
     if (!payloadResult) {
         std::wcerr << L"  serialize facts failed ["
@@ -1491,6 +1571,9 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
 
     std::wcout << L"IPC pipe client (protected transport)\n";
     std::wcout << L"  pipe     : " << pipeName << L"\n";
+    if (hasToken) {
+        std::wcout << L"  auth     : session token supplied (hidden)\n";
+    }
     std::wcout << L"  request  : FactsSnapshot id=1 payload=" << payload.size()
                << L" bytes (" << facts.size() << L" facts)\n";
     std::wcout << L"  facts    : "
@@ -1565,11 +1648,14 @@ void PrintUsage() {
         << L"                             stop gracefully)\n"
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
-        << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix]  Serve one protected\n"
-        << L"                             named-pipe client for 1..60 s (single\n"
-        << L"                             frame; strict validation; ack reply)\n"
-        << L"  CppOptimizer.exe --ipc-pipe client [suffix]  Send a facts snapshot\n"
-        << L"                             frame to the IPC server and print the reply\n"
+        << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix] [--ipc-token <t>]\n"
+        << L"                             Serve one protected named-pipe client for\n"
+        << L"                             1..60 s (single frame; strict validation;\n"
+        << L"                             facts parsed + v1 schema whitelist; optional\n"
+        << L"                             session token required; ack/error reply)\n"
+        << L"  CppOptimizer.exe --ipc-pipe client [suffix] [--ipc-token <t>]  Send a\n"
+        << L"                             real memory facts snapshot (CPOPFACTS/1;\n"
+        << L"                             optional agent_token) and print the reply\n"
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }

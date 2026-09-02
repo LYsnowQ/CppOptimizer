@@ -203,15 +203,25 @@ common::Result<std::vector<std::byte>> SerializeFactsV1(
 }
 
 std::string FormatFactsSummary(std::span<const IpcFact> facts) {
+    // 凭据键（agent_token）永不回显：防令牌泄漏到应答/日志。
+    std::size_t echoable = 0;
+    for (const IpcFact& fact : facts) {
+        if (fact.key != kFactsTokenKey) {
+            ++echoable;
+        }
+    }
     std::string out = "facts ok (";
-    out += std::to_string(facts.size());
+    out += std::to_string(echoable);
     out += ')';
-    if (facts.empty()) {
+    if (echoable == 0) {
         return out;
     }
     out += ':';
     // 逐条回显；无法容纳下一条（预留 " …" 3 字节）即截断并标记省略。
     for (std::size_t i = 0; i < facts.size(); ++i) {
+        if (facts[i].key == kFactsTokenKey) {
+            continue;
+        }
         std::string entry;
         entry.reserve(1 + facts[i].key.size() + 1 + facts[i].value.size());
         entry.push_back(' ');
@@ -231,20 +241,36 @@ std::string FormatFactsSummary(std::span<const IpcFact> facts) {
 }
 
 common::Result<void> ValidateFactsV1Schema(std::span<const IpcFact> facts) {
-    if (facts.empty()) {
-        return common::Result<void>::Failure(
-            FactsValidationError(L"Facts 为空（至少需要一条已注册事实）"));
-    }
+    bool hasNonCredential = false;
     bool hasTotal = false;
     bool hasAvailable = false;
     std::uint32_t totalMb = 0;
     std::uint32_t availableMb = 0;
     for (const IpcFact& fact : facts) {
+        if (fact.key == "agent_token") {
+            // 会话凭据：仅 ASCII 字母/数字/_/-，1..kMaxFactsTokenBytes。
+            if (fact.value.empty() ||
+                fact.value.size() > kMaxFactsTokenBytes) {
+                return common::Result<void>::Failure(FactsValidationError(
+                    L"agent_token 长度必须 1..64"));
+            }
+            for (const char ch : fact.value) {
+                const bool alnum =
+                    (ch >= 'a' && ch <= 'z') ||
+                    (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+                if (!alnum && ch != '_' && ch != '-') {
+                    return common::Result<void>::Failure(
+                        FactsValidationError(L"agent_token 含非法字符"));
+                }
+            }
+            continue; // 凭据不参与“至少一条事实”要求。
+        }
         if (fact.key == "observer") {
             if (fact.value.empty()) {
                 return common::Result<void>::Failure(
                     FactsValidationError(L"observer 值不能为空"));
             }
+            hasNonCredential = true;
             continue;
         }
         const bool knownNumeric =
@@ -256,6 +282,7 @@ common::Result<void> ValidateFactsV1Schema(std::span<const IpcFact> facts) {
                 L"未知事实键：" +
                 std::wstring(fact.key.begin(), fact.key.end())));
         }
+        hasNonCredential = true;
         std::uint32_t numeric = 0;
         if (!ParseUint32(fact.value, numeric)) {
             return common::Result<void>::Failure(FactsValidationError(
@@ -281,6 +308,10 @@ common::Result<void> ValidateFactsV1Schema(std::span<const IpcFact> facts) {
     if (hasTotal && hasAvailable && availableMb > totalMb) {
         return common::Result<void>::Failure(FactsValidationError(
             L"memory_available_mb 不能大于 memory_total_mb"));
+    }
+    if (!hasNonCredential) {
+        return common::Result<void>::Failure(FactsValidationError(
+            L"Facts 不含任何非凭据事实（至少一条已注册键）"));
     }
     return common::Result<void>::Success();
 }
