@@ -1367,14 +1367,16 @@ std::wstring IpcPipeName(std::wstring_view suffix) noexcept {
     return name;
 }
 
-// 在位置参数中取第一个“非选项”参数作后缀（跳过 --ipc-token 及其值），
-// 使 [suffix] 与 [--ipc-token <t>] 的顺序无关。
+// 在位置参数中取第一个“非选项”参数作后缀（跳过 --ipc-token / --ipc-allow-user
+// 及其值），使 [suffix] 与选项的顺序无关。
 std::wstring FindIpcSuffix(int argc, wchar_t* argv[], int start) noexcept {
     std::wstring suffix;
     bool skipNextValue = false;
     for (int i = start; i < argc; ++i) {
         const std::wstring_view arg(argv[i]);
-        if (!skipNextValue && arg == L"--ipc-token") {
+        const bool isOptionFlag =
+            arg == L"--ipc-token" || arg == L"--ipc-allow-user";
+        if (!skipNextValue && isOptionFlag) {
             skipNextValue = true;
             continue;
         }
@@ -1451,6 +1453,17 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
         }
         sessionOptions.expectedToken = token; // 明文仅限 demo；真实供给属后续切片
     }
+    // 客户端用户 SID 授权白名单（IPC-006，访问令牌只读查询）。
+    for (int i = 4; i + 1 < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--ipc-allow-user") {
+            const std::wstring sid = argv[i + 1];
+            if (sid.empty() || sid.size() > 192) {
+                std::wcerr << L"  --ipc-allow-user needs a valid SID string\n";
+                return 2;
+            }
+            sessionOptions.allowedClientSids.push_back(sid);
+        }
+    }
     auto backend = optimizer::ipc::CreateWin32ServerBackend(pipeName);
     optimizer::ipc::IpcSession session(backend, sessionOptions);
 
@@ -1459,6 +1472,10 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
     std::wcout << L"  pipe     : " << pipeName << L"\n";
     if (!sessionOptions.expectedToken.empty()) {
         std::wcout << L"  auth     : session token required (hidden)\n";
+    }
+    if (!sessionOptions.allowedClientSids.empty()) {
+        std::wcout << L"  auth     : client user SID allow-list: "
+                   << sessionOptions.allowedClientSids.front() << L"\n";
     }
 
     const auto deadline = std::chrono::steady_clock::now() +
@@ -1484,6 +1501,10 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
     const auto& result = served.Value();
     std::wcout << L"  client   : pid " << result.clientPid << L", session "
                << result.clientSessionId << L"\n";
+    if (!result.clientUserSid.empty()) {
+        std::wcout << L"  identity : user SID " << result.clientUserSid.c_str()
+                   << L"\n";
+    }
     std::wcout << L"  request  : "
                << optimizer::ipc::MessageTypeToString(result.requestType)
                << L" id=" << result.requestId << L" payload="
@@ -1652,7 +1673,8 @@ void PrintUsage() {
         << L"                             Serve one protected named-pipe client for\n"
         << L"                             1..60 s (single frame; strict validation;\n"
         << L"                             facts parsed + v1 schema whitelist; optional\n"
-        << L"                             session token required; ack/error reply)\n"
+        << L"                             session token / user SID allow-list;\n"
+        << L"                             ack/error reply)\n"
         << L"  CppOptimizer.exe --ipc-pipe client [suffix] [--ipc-token <t>]  Send a\n"
         << L"                             real memory facts snapshot (CPOPFACTS/1;\n"
         << L"                             optional agent_token) and print the reply\n"

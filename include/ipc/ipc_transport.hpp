@@ -49,6 +49,12 @@ public:
 
     // 当前客户端会话 ID（ProcessIdToSessionId；未知/未连接返回 0）。
     [[nodiscard]] virtual std::uint32_t ClientSessionId() const noexcept = 0;
+
+    // 当前客户端用户 SID（IPC-006，访问令牌只读查询：OpenProcess(
+    // PROCESS_QUERY_INFORMATION) -> OpenProcessToken(TOKEN_QUERY) ->
+    // GetTokenInformation(TokenUser) -> ConvertSidToStringSidW）。同用户进程可读，
+    // 无特权/跨用户不可读时返回空串（未知身份，由授权策略决定是否拒绝）。
+    [[nodiscard]] virtual std::wstring ClientUserSid() const = 0;
 };
 
 // 命名管道客户端传输后端（可注入 fake 单测）。

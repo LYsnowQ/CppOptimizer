@@ -3,6 +3,7 @@
 #include "ipc/ipc_facts.hpp"
 
 #include <array>
+#include <cwctype>
 #include <string>
 
 namespace optimizer::ipc {
@@ -64,6 +65,20 @@ bool TokenMatches(std::string_view token,
     return true;
 }
 
+// SID 字符串大小写不敏感比较（SID 十六进制段允许大小写混写）。
+bool SidEqualsIgnoreCase(std::wstring_view a,
+                         std::wstring_view b) noexcept {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (std::towlower(a[i]) != std::towlower(b[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 const wchar_t* IpcErrorCodeToString(IpcErrorCode code) noexcept {
@@ -111,6 +126,15 @@ common::Result<void> IpcSession::AllowAllClientGate(
 common::Result<IpcServeResult> IpcSession::ServeOne(
     Handler handler, std::chrono::milliseconds acceptTimeout) {
     auto& backend = *backend_;
+    // 错误应答路径统一收尾：写 Error 帧后先“排空读”等待对端读完（防
+    // DisconnectNamedPipe 竞态——对端读到 233 断管而非错误码），再断开关闭。
+    // 对端已关/超时均视为尽力而为，不阻断主错误上报。
+    const auto drainThenClose = [&backend, this]() {
+        std::array<std::byte, 1> drain{};
+        (void)backend.ReadAll(drain, options_.ioTimeout);
+        (void)backend.DisconnectClient();
+        backend.Close();
+    };
 
     if (auto created = backend.CreateAndListen(); !created) {
         return common::Result<IpcServeResult>::Failure(created.ErrorValue());
@@ -132,8 +156,7 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
     if (!parsedHeader) {
         SendErrorReply(backend, 0, IpcErrorCode::InvalidHeader,
                        options_.ioTimeout);
-(void)backend.DisconnectClient();
-        backend.Close();
+        drainThenClose();
         return common::Result<IpcServeResult>::Failure(
             parsedHeader.ErrorValue());
     }
@@ -162,17 +185,35 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
 
     // 会话级身份裁决：受理前按客户端身份决定是否放行。拒绝 -> Error 应答并断开。
     // Options 缺省启用 DefaultClientGate；置空 clientGate 视为放行（防误用）。
-    const IpcClientIdentity identity{request.clientPid,
-                                     request.clientSessionId};
+    const IpcClientIdentity identity{request.clientPid, request.clientSessionId,
+                                     backend.ClientUserSid()};
     if (options_.clientGate) {
         if (auto gated = options_.clientGate(identity); !gated) {
             SendErrorReply(backend, request.requestId,
                            IpcErrorCode::UnauthorizedClient,
                            options_.ioTimeout);
-            (void)backend.DisconnectClient();
-            backend.Close();
+            drainThenClose();
             return common::Result<IpcServeResult>::Failure(
                 gated.ErrorValue());
+        }
+    }
+    // SID 授权白名单（IPC-006）：配置后要求客户端用户 SID 命中其一（大小写不敏感）。
+    if (!options_.allowedClientSids.empty()) {
+        bool sidAllowed = false;
+        for (const std::wstring& sid : options_.allowedClientSids) {
+            if (SidEqualsIgnoreCase(identity.userSid, sid)) {
+                sidAllowed = true;
+                break;
+            }
+        }
+        if (!sidAllowed) {
+            SendErrorReply(backend, request.requestId,
+                           IpcErrorCode::UnauthorizedClient,
+                           options_.ioTimeout);
+            drainThenClose();
+            return common::Result<IpcServeResult>::Failure(
+                common::Error::Validation(
+                    "SessionSidGate", L"客户端用户不在授权白名单"));
         }
     }
 
@@ -188,8 +229,7 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
                        handler ? IpcErrorCode::HandlerFailed
                                : IpcErrorCode::UnsupportedType,
                        options_.ioTimeout);
-(void)backend.DisconnectClient();
-        backend.Close();
+        drainThenClose();
         return common::Result<IpcServeResult>::Failure(
             handled.ErrorValue());
     }
@@ -228,6 +268,7 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
     result.requestId = request.requestId;
     result.clientPid = request.clientPid;
     result.clientSessionId = request.clientSessionId;
+    result.clientUserSid = identity.userSid;
     result.payloadBytes = static_cast<std::uint32_t>(request.payload.size());
     return common::Result<IpcServeResult>::Success(std::move(result));
 }

@@ -50,6 +50,7 @@ struct IpcServeResult {
     std::uint32_t requestId = 0;
     std::uint32_t clientPid = 0;
     std::uint32_t clientSessionId = 0;
+    std::wstring clientUserSid; // 客户端用户 SID（未知为空串）
     std::uint32_t payloadBytes = 0;
 };
 
@@ -57,6 +58,8 @@ struct IpcServeResult {
 struct IpcClientIdentity {
     std::uint32_t pid = 0;       // 客户端进程 ID（查询失败为 0）
     std::uint32_t sessionId = 0; // 客户端会话 ID（查询失败为 0）
+    // 客户端用户 SID（IPC-006 访问令牌只读查询；未知/跨用户不可读为空串）。
+    std::wstring userSid;
 };
 
 // 单客户端会话服务端：创建/监听 -> 接受一个客户端 -> 读取一帧 ->
@@ -88,6 +91,10 @@ public:
         std::chrono::milliseconds ioTimeout =
             std::chrono::milliseconds(3000); // 单次读/写超时
         ClientGate clientGate = DefaultClientGate; // 身份裁决（默认启用）
+        // 客户端用户 SID 授权白名单（IPC-006）：非空时要求客户端 SID（传输层
+        // 访问令牌只读查询）大小写不敏感命中其一，否则回 Error(UnauthorizedClient)
+        // 并断开。为空表示不启用 SID 授权（兼容 IPC-004/005 行为）。
+        std::vector<std::wstring> allowedClientSids;
         // 会话凭据（IPC-005，demo 层共享秘密）：非空时默认处理器要求
         // FactsSnapshot 载荷携带匹配的 agent_token 事实，缺失/不匹配回
         // Error(AuthFailed)；为空表示不启用（沿用 IPC-002/003 行为）。

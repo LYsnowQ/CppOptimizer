@@ -120,6 +120,49 @@ std::uint32_t WriteAllOverlapped(HANDLE pipe, std::span<const std::byte> buffer,
     return ERROR_SUCCESS;
 }
 
+// 只读查询进程的用户 SID（IPC-006，访问令牌）：OpenProcess(PROCESS_QUERY_INFORMATION)
+// -> OpenProcessToken(TOKEN_QUERY) -> GetTokenInformation(TokenUser) ->
+// ConvertSidToStringSidW。同用户进程可读（无提权）；跨用户/受保护进程失败返回空串
+//（未知身份）。不请求任何额外权限。
+std::wstring QueryClientUserSid(std::uint32_t pid) noexcept {
+    if (pid == 0) {
+        return {};
+    }
+    common::UniqueHandle process(
+        ::OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid));
+    if (!process.IsValid()) {
+        return {};
+    }
+    HANDLE rawToken = nullptr;
+    if (!::OpenProcessToken(process.Get(), TOKEN_QUERY, &rawToken)) {
+        return {};
+    }
+    common::UniqueHandle token(rawToken);
+
+    DWORD needed = 0;
+    (void)::GetTokenInformation(token.Get(), TokenUser, nullptr, 0, &needed);
+    if (needed == 0) {
+        return {};
+    }
+    std::vector<std::byte> buffer(needed);
+    if (!::GetTokenInformation(token.Get(), TokenUser, buffer.data(), needed,
+                               &needed)) {
+        return {};
+    }
+    const auto& tokenUser =
+        *reinterpret_cast<const TOKEN_USER*>(buffer.data());
+    if (tokenUser.User.Sid == nullptr) {
+        return {};
+    }
+    LPWSTR sidText = nullptr;
+    if (!::ConvertSidToStringSidW(tokenUser.User.Sid, &sidText) ||
+        sidText == nullptr) {
+        return {};
+    }
+    std::unique_ptr<void, common::LocalFreeDeleter> sidGuard(sidText);
+    return sidText;
+}
+
 // 真实 Win32 服务端后端：CreateNamedPipeW（显式 SDDL + 重叠 I/O）。
 class Win32IpcServerBackend final : public IpcServerBackend {
 public:
@@ -159,6 +202,7 @@ public:
         pipe_.Reset(pipe);
         clientPid_ = 0;
         clientSessionId_ = 0;
+        clientUserSid_.clear();
         return common::Result<void>::Success();
     }
 
@@ -170,6 +214,7 @@ public:
         }
         clientPid_ = 0;
         clientSessionId_ = 0;
+        clientUserSid_.clear();
 
         OVERLAPPED ov{};
         ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -210,7 +255,7 @@ public:
             }
         }
 
-        // 客户端身份：PID + 会话（最小权限只读查询，失败按未知处理）。
+        // 客户端身份：PID + 会话 + 用户 SID（最小权限只读查询，失败按未知处理）。
         DWORD pid = 0;
         if (::GetNamedPipeClientProcessId(pipe_.Get(), &pid)) {
             clientPid_ = static_cast<std::uint32_t>(pid);
@@ -220,6 +265,7 @@ public:
             if (::ProcessIdToSessionId(clientPid_, &session)) {
                 clientSessionId_ = static_cast<std::uint32_t>(session);
             }
+            clientUserSid_ = QueryClientUserSid(clientPid_);
         }
         return common::Result<void>::Success();
     }
@@ -269,6 +315,7 @@ public:
         }
         clientPid_ = 0;
         clientSessionId_ = 0;
+        clientUserSid_.clear();
         return common::Result<void>::Success();
     }
 
@@ -279,6 +326,7 @@ public:
         pipe_.Reset();
         clientPid_ = 0;
         clientSessionId_ = 0;
+        clientUserSid_.clear();
     }
 
     std::uint32_t ClientPid() const noexcept override {
@@ -289,11 +337,16 @@ public:
         return clientSessionId_;
     }
 
+    std::wstring ClientUserSid() const override {
+        return clientUserSid_;
+    }
+
 private:
     std::wstring pipeName_;
     common::UniqueHandle pipe_;
     std::uint32_t clientPid_ = 0;
     std::uint32_t clientSessionId_ = 0;
+    std::wstring clientUserSid_;
 };
 
 // 真实 Win32 客户端后端：CreateFileW（重叠 I/O）+ 忙等待重试。

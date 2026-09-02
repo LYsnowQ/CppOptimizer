@@ -63,6 +63,7 @@ public:
 
     std::uint32_t clientPid = 1234;
     std::uint32_t clientSessionId = 2;
+    std::wstring clientSid; // 默认空 = 未知（未启用 SID 授权时不影响既有测试）
 
     std::vector<std::byte> incoming; // 模拟客户端注入的完整帧
     std::size_t readOffset = 0;
@@ -137,6 +138,10 @@ public:
 
     std::uint32_t ClientSessionId() const noexcept override {
         return clientSessionId;
+    }
+
+    std::wstring ClientUserSid() const override {
+        return clientSid;
     }
 };
 
@@ -1069,6 +1074,82 @@ bool TestServeOneDefaultHandlerRejectsRequestType() {
                IpcErrorCode::UnsupportedType;
 }
 
+bool TestSessionSidGateAllowsMatchingUser() {
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientPid = 1234;
+    fake->clientSessionId = 2;
+    fake->clientSid = L"S-1-5-21-111-222-333-1001";
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    IpcSession::Options options;
+    options.allowedClientSids.push_back(L"s-1-5-21-111-222-333-1001"); // 大小写不敏感
+    IpcSession session(fake, options);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!served || served.Value().replyType != IpcMessageType::Ack ||
+        served.Value().clientUserSid != L"S-1-5-21-111-222-333-1001") {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Ack);
+}
+
+bool TestSessionSidGateRejectsUnknownSid() {
+    // 启用授权但客户端 SID 查询失败（未知）：拒绝并回 Error(UnauthorizedClient)。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientPid = 1234;
+    fake->clientSessionId = 2;
+    fake->clientSid = L"";
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    IpcSession::Options options;
+    options.allowedClientSids.push_back(L"S-1-5-21-111-222-333-1001");
+    IpcSession session(fake, options);
+    const auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (served || served.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           !replyPayload.empty() &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::UnauthorizedClient;
+}
+
+bool TestSessionSidGateRejectsMismatch() {
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientPid = 1234;
+    fake->clientSessionId = 2;
+    fake->clientSid = L"S-1-5-21-111-222-333-9999";
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    IpcSession::Options options;
+    options.allowedClientSids.push_back(L"S-1-5-21-111-222-333-1001");
+    IpcSession session(fake, options);
+    const auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (served || served.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::UnauthorizedClient;
+}
+
+bool TestSessionSidGateDisabledWhenEmpty() {
+    // allowedClientSids 为空：SID 授权不启用（即使未知 SID 也放行，兼容 IPC-004/005）。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientPid = 1234;
+    fake->clientSessionId = 2;
+    fake->clientSid = L"";
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    IpcSession session(fake);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    return served && served.Value().replyType == IpcMessageType::Ack;
+}
+
 // ---------- 客户端往返（fake 后端） ----------
 
 bool TestServeTokenMatchingAck() {
@@ -1345,6 +1426,11 @@ int wmain() {
     run(L"serve token mismatch -> auth failed", &TestServeTokenMismatchRejected);
     run(L"serve token ignored when not configured",
         &TestServeTokenIgnoredWhenNotConfigured);
+    run(L"session sid gate allows matching user",
+        &TestSessionSidGateAllowsMatchingUser);
+    run(L"session sid gate rejects unknown sid", &TestSessionSidGateRejectsUnknownSid);
+    run(L"session sid gate rejects mismatch", &TestSessionSidGateRejectsMismatch);
+    run(L"session sid gate disabled when empty", &TestSessionSidGateDisabledWhenEmpty);
     run(L"serve one custom handler", &TestServeOneCustomHandler);
     run(L"serve one bad magic rejected", &TestServeOneBadMagicRejected);
     run(L"serve one unknown version rejected", &TestServeOneUnknownVersionRejected);
