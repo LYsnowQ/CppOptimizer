@@ -59,6 +59,8 @@ const wchar_t* IpcErrorCodeToString(IpcErrorCode code) noexcept {
             return L"internal error";
         case IpcErrorCode::InvalidFacts:
             return L"invalid facts payload";
+        case IpcErrorCode::UnauthorizedClient:
+            return L"unauthorized client";
     }
     return L"unknown error";
 }
@@ -66,6 +68,24 @@ const wchar_t* IpcErrorCodeToString(IpcErrorCode code) noexcept {
 IpcSession::IpcSession(std::shared_ptr<IpcServerBackend> backend,
                        Options options)
     : backend_(std::move(backend)), options_(options) {}
+
+common::Result<void> IpcSession::DefaultClientGate(
+    const IpcClientIdentity& client) noexcept {
+    if (client.pid == 0) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "DefaultClientGate", L"客户端 PID 不可识别（0），拒绝受理"));
+    }
+    if (client.sessionId == 0) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "DefaultClientGate", L"客户端位于会话 0（非交互），拒绝受理"));
+    }
+    return common::Result<void>::Success();
+}
+
+common::Result<void> IpcSession::AllowAllClientGate(
+    const IpcClientIdentity&) noexcept {
+    return common::Result<void>::Success();
+}
 
 common::Result<IpcServeResult> IpcSession::ServeOne(
     Handler handler, std::chrono::milliseconds acceptTimeout) {
@@ -111,13 +131,29 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
         }
     }
 
-    // 组装请求（帧头已校验，类型必然可解析）并调用处理器。
+    // 组装请求（帧头已校验，类型必然可解析）。
     IpcRequest request;
     request.type = ParseMessageType(header.type).value();
     request.requestId = header.requestId;
     request.payload = std::move(payload);
     request.clientPid = backend.ClientPid();
     request.clientSessionId = backend.ClientSessionId();
+
+    // 会话级身份裁决：受理前按客户端身份决定是否放行。拒绝 -> Error 应答并断开。
+    // Options 缺省启用 DefaultClientGate；置空 clientGate 视为放行（防误用）。
+    const IpcClientIdentity identity{request.clientPid,
+                                     request.clientSessionId};
+    if (options_.clientGate) {
+        if (auto gated = options_.clientGate(identity); !gated) {
+            SendErrorReply(backend, request.requestId,
+                           IpcErrorCode::UnauthorizedClient,
+                           options_.ioTimeout);
+            (void)backend.DisconnectClient();
+            backend.Close();
+            return common::Result<IpcServeResult>::Failure(
+                gated.ErrorValue());
+        }
+    }
 
     IpcReply reply;
     const common::Result<void> handled =

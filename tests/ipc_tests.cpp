@@ -19,6 +19,7 @@ using optimizer::common::Error;
 using optimizer::common::ErrorDomain;
 using optimizer::common::Result;
 using optimizer::ipc::IpcClientBackend;
+using optimizer::ipc::IpcClientIdentity;
 using optimizer::ipc::IpcErrorCode;
 using optimizer::ipc::IpcFact;
 using optimizer::ipc::IpcHeader;
@@ -778,6 +779,91 @@ bool TestServeOneEmptyFactsReply() {
                IpcErrorCode::InvalidFacts;
 }
 
+bool TestSessionGateRejectsSessionZero() {
+    // 会话 0（服务/非交互）不是合法 Agent：默认裁决拒绝并回 Error(UnauthorizedClient)。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientPid = 1234;
+    fake->clientSessionId = 0;
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    IpcSession session(fake);
+    const auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (served || served.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           !replyPayload.empty() &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::UnauthorizedClient;
+}
+
+bool TestSessionGateRejectsUnknownPid() {
+    // PID 不可识别（查询失败为 0）：默认裁决拒绝。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientPid = 0;
+    fake->clientSessionId = 2;
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    IpcSession session(fake);
+    const auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (served || served.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::UnauthorizedClient;
+}
+
+bool TestSessionGateCustomAllowOverride() {
+    // 显式放行裁决可覆盖默认（会话 0 也放行）——隔离/测试场景使用。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientPid = 1234;
+    fake->clientSessionId = 0;
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    IpcSession::Options options;
+    options.clientGate = IpcSession::AllowAllClientGate;
+    IpcSession session(fake, options);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!served || served.Value().replyType != IpcMessageType::Ack) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Ack);
+}
+
+bool TestSessionGateCustomReject() {
+    // 自定义裁决：可按任意身份规则拒绝（身份白名单扩展点）。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientPid = 4242;
+    fake->clientSessionId = 2;
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    IpcSession::Options options;
+    options.clientGate = [](const IpcClientIdentity& client) -> Result<void> {
+        if (client.pid == 4242) {
+            return Result<void>::Failure(
+                Error::Validation("gate", L"pid 不在白名单"));
+        }
+        return Result<void>::Success();
+    };
+    IpcSession session(fake, options);
+    const auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (served || served.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::UnauthorizedClient;
+}
+
 bool TestServeOneCustomHandler() {
     auto fake = std::make_shared<FakeIpcServerBackend>();
     fake->incoming = BuildFrame(IpcMessageType::Ping, 9, {});
@@ -997,6 +1083,21 @@ bool TestRoundTripErrorReplyNotDisguised() {
     return !reply && reply.ErrorValue().domain == ErrorDomain::Validation;
 }
 
+bool TestRoundTripUnauthorizedErrorReplyNotDisguised() {
+    // 服务端身份裁决拒绝 -> Error(UnauthorizedClient)：客户端解析为失败且可见原因。
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    const std::vector<std::byte> errorPayload{
+        static_cast<std::byte>(IpcErrorCode::UnauthorizedClient)};
+    fake->incoming = BuildFrame(IpcMessageType::Error, 42, errorPayload);
+    const auto reply = IpcRoundTrip(fake, L"\\\\.\\pipe\\test",
+                                    IpcMessageType::Ping, {}, 42,
+                                    std::chrono::milliseconds(100));
+    return !reply && reply.ErrorValue().domain == ErrorDomain::Validation &&
+           reply.ErrorValue().message.find(L"unauthorized client") !=
+               std::wstring::npos &&
+           fake->closed;
+}
+
 bool TestRoundTripRequestIdMismatch() {
     auto fake = std::make_shared<FakeIpcClientBackend>();
     fake->incoming = BuildFrame(IpcMessageType::Ack, 99, {}); // 应答 id 不匹配
@@ -1098,6 +1199,10 @@ int wmain() {
     run(L"serve one unknown facts key -> error reply",
         &TestServeOneUnknownFactsKeyReply);
     run(L"serve one empty facts -> error reply", &TestServeOneEmptyFactsReply);
+    run(L"session gate rejects session zero", &TestSessionGateRejectsSessionZero);
+    run(L"session gate rejects unknown pid", &TestSessionGateRejectsUnknownPid);
+    run(L"session gate custom allow override", &TestSessionGateCustomAllowOverride);
+    run(L"session gate custom reject", &TestSessionGateCustomReject);
     run(L"serve one custom handler", &TestServeOneCustomHandler);
     run(L"serve one bad magic rejected", &TestServeOneBadMagicRejected);
     run(L"serve one unknown version rejected", &TestServeOneUnknownVersionRejected);
@@ -1117,6 +1222,8 @@ int wmain() {
     run(L"round trip facts payload", &TestRoundTripFactsPayload);
     run(L"round trip error reply not disguised",
         &TestRoundTripErrorReplyNotDisguised);
+    run(L"round trip unauthorized error reply not disguised",
+        &TestRoundTripUnauthorizedErrorReplyNotDisguised);
     run(L"round trip request id mismatch", &TestRoundTripRequestIdMismatch);
     run(L"round trip connect failure", &TestRoundTripConnectFailure);
     run(L"round trip write failure", &TestRoundTripWriteFailure);
