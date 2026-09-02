@@ -2,6 +2,7 @@
 #include "common/error.hpp"
 #include "config/config_manager.hpp"
 #include "ipc/ipc_facts.hpp"
+#include "ipc/ipc_credentials.hpp"
 #include "ipc/ipc_protocol.hpp"
 #include "ipc/ipc_session.hpp"
 #include "ipc/ipc_transport.hpp"
@@ -1488,8 +1489,9 @@ std::wstring FindIpcSuffix(int argc, wchar_t* argv[], int start) noexcept {
     bool skipNextValue = false;
     for (int i = start; i < argc; ++i) {
         const std::wstring_view arg(argv[i]);
-        const bool isOptionFlag =
-            arg == L"--ipc-token" || arg == L"--ipc-allow-user";
+        const bool isOptionFlag = arg == L"--ipc-token" ||
+                                  arg == L"--ipc-token-file" ||
+                                  arg == L"--ipc-allow-user";
         if (!skipNextValue && isOptionFlag) {
             skipNextValue = true;
             continue;
@@ -1534,6 +1536,77 @@ bool IsValidIpcToken(const std::wstring& token) noexcept {
     return true;
 }
 
+// 解析 --ipc-token-file：无该标志返回 nullopt；有则返回存储路径（显式值或默认
+// 用户私有路径，见 ipc_credentials.hpp）。值以下划线外的“-”开头视为非法省略。
+std::optional<std::filesystem::path> FindIpcTokenFile(
+    int argc, wchar_t* argv[], int start) noexcept {
+    for (int i = start; i < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--ipc-token-file") {
+            if (i + 1 < argc && argv[i + 1][0] != L'-') {
+                return std::filesystem::path(argv[i + 1]);
+            }
+            return optimizer::ipc::DefaultAgentTokenFilePath();
+        }
+    }
+    return std::nullopt;
+}
+
+int RunIpcCredentialCommand(int argc, wchar_t* argv[]) {
+    // --ipc-credential provision [path] [--force] / status [path]（IPC-007 真实供给）。
+    // token 永不打印；path 缺省用用户私有默认路径（LOCALAPPDATA\CppOptimizer）。
+    const std::wstring_view action(argv[2]);
+    std::filesystem::path path;
+    bool havePath = false;
+    bool force = false;
+    for (int i = 3; i < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--force") {
+            force = true;
+            continue;
+        }
+        if (!havePath && argv[i][0] != L'-') {
+            path = argv[i];
+            havePath = true;
+        }
+    }
+    if (!havePath) {
+        path = optimizer::ipc::DefaultAgentTokenFilePath();
+    }
+    if (path.empty()) {
+        std::wcerr
+            << L"  cannot locate LOCALAPPDATA; provide an explicit <path>\n";
+        return 2;
+    }
+    if (action == L"provision") {
+        if (auto result = optimizer::ipc::ProvisionAgentTokenFile(path, force);
+            !result) {
+            const auto& error = result.ErrorValue();
+            std::wcerr << L"  provision failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        optimizer::common::WriteConsoleLine(
+            (force ? L"  token store rotated (hidden): "
+                   : L"  token store provisioned (hidden): ") +
+            path.wstring());
+        return 0;
+    }
+    if (action == L"status") {
+        if (optimizer::ipc::IsAgentTokenProvisioned(path)) {
+            optimizer::common::WriteConsoleLine(
+                L"  token store OK (provisioned, hidden): " + path.wstring());
+        } else {
+            optimizer::common::WriteConsoleLine(
+                L"  token store NOT provisioned: " + path.wstring());
+            optimizer::common::WriteConsoleLine(
+                L"  -> run: CppOptimizer.exe --ipc-credential provision");
+        }
+        return 0;
+    }
+    std::wcerr << L"  --ipc-credential requires provision|status\n";
+    return 2;
+}
+
 int RunIpcServerCommand(int argc, wchar_t* argv[]) {
     // --ipc-pipe server <s> [suffix] [--ipc-token <t>]：受保护命名管道服务端演示
     // （IPC-005）。前台、有界（s 秒）：等待至多一个客户端连接，读取一帧并严格校验
@@ -1566,6 +1639,16 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
             return 2;
         }
         sessionOptions.expectedToken = token; // 明文仅限 demo；真实供给属后续切片
+    }
+    // IPC-007 真实供给：--ipc-token-file 优先（私有 ACL 存储），替代/覆盖内联明文。
+    if (auto tokenFile = FindIpcTokenFile(argc, argv, 4)) {
+        auto stored = optimizer::ipc::ReadAgentTokenFile(*tokenFile);
+        if (!stored) {
+            std::wcerr << L"  --ipc-token-file unreadable; run "
+                          L"--ipc-credential provision first\n";
+            return 2;
+        }
+        sessionOptions.expectedToken = stored.Value();
     }
     // 客户端用户 SID 授权白名单（IPC-006，访问令牌只读查询）。
     for (int i = 4; i + 1 < argc; ++i) {
@@ -1654,6 +1737,17 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
                 << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
             return 2;
         }
+        hasToken = true;
+    }
+    // IPC-007 真实供给：--ipc-token-file 优先（私有 ACL 存储），替代/覆盖内联明文。
+    if (auto tokenFile = FindIpcTokenFile(argc, argv, 3)) {
+        auto stored = optimizer::ipc::ReadAgentTokenFile(*tokenFile);
+        if (!stored) {
+            std::wcerr << L"  --ipc-token-file unreadable; run "
+                          L"--ipc-credential provision first\n";
+            return 2;
+        }
+        token = stored.Value();
         hasToken = true;
     }
 
@@ -1794,6 +1888,14 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --ipc-pipe client [suffix] [--ipc-token <t>]  Send a\n"
         << L"                             real memory facts snapshot (CPOPFACTS/1;\n"
         << L"                             optional agent_token) and print the reply\n"
+        << L"  CppOptimizer.exe --ipc-credential provision [path] [--force]\n"
+        << L"                             Create/rotate the per-user private agent\n"
+        << L"                             token store (IPC-007; ACL: SYSTEM + user;\n"
+        << L"                             token never printed)\n"
+        << L"  CppOptimizer.exe --ipc-credential status [path]  Show whether the\n"
+        << L"                             token store is provisioned (hidden)\n"
+        << L"  (server/client also accept --ipc-token-file [<path>] to use the store)\n"
+
         << L"  CppOptimizer.exe --help       Show this message\n\n"
         << L"No optimization action is enabled in this build entry point.\n";
 }
@@ -1873,6 +1975,9 @@ int wmain(int argc, wchar_t* argv[]) {
             }
             std::wcerr << L"  --ipc-pipe requires server|client\n";
             return 2;
+        }
+        if (argc >= 3 && std::wstring_view(argv[1]) == L"--ipc-credential") {
+            return RunIpcCredentialCommand(argc, argv);
         }
         PrintUsage();
         return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;

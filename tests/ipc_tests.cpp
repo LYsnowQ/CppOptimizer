@@ -2,15 +2,22 @@
 #include "ipc/ipc_session.hpp"
 #include "ipc/ipc_transport.hpp"
 #include "ipc/ipc_facts.hpp"
+#include "ipc/ipc_credentials.hpp"
+
+#include "common/unique_resource.hpp"
 
 #include <windows.h>
+#include <sddl.h>
 
 #include <array>
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace {
@@ -705,6 +712,135 @@ bool TestFactsTokenExcludedFromSummary() {
                                         {"observer", "x"}};
     // 凭据不回显且不计入摘要条数（防泄漏）。
     return FormatFactsSummary(facts) == "facts ok (2): client_pid=7 observer=x";
+}
+
+// ---------- 凭据存储（IPC-007 真实供给） ----------
+
+// 临时 token 文件路径（先清理再使用）。
+std::filesystem::path TempTokenFile(std::wstring_view name) noexcept {
+    auto path = std::filesystem::temp_directory_path();
+    path /= std::wstring(L"cpo_token_") + std::wstring(name) + L".bin";
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    return path;
+}
+
+bool TestCredentialsProvisionReadRoundTrip() {
+    const auto path = TempTokenFile(L"roundtrip");
+    auto provisioned = optimizer::ipc::ProvisionAgentTokenFile(path, false);
+    if (!provisioned) {
+        return false;
+    }
+    if (!optimizer::ipc::IsAgentTokenProvisioned(path)) {
+        return false;
+    }
+    auto token = optimizer::ipc::ReadAgentTokenFile(path);
+    if (!token || token.Value().size() != 32) {
+        return false;
+    }
+    // 字符集合法（ASCII 字母/数字）。
+    for (const wchar_t ch : token.Value()) {
+        const bool alnum =
+            (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||
+            (ch >= L'0' && ch <= L'9');
+        if (!alnum) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestCredentialsProvisionIdempotent() {
+    const auto path = TempTokenFile(L"idempotent");
+    if (!optimizer::ipc::ProvisionAgentTokenFile(path, false)) {
+        return false;
+    }
+    auto first = optimizer::ipc::ReadAgentTokenFile(path);
+    if (!first) {
+        return false;
+    }
+    // 已存在且未 force：拒绝且不覆盖。
+    const auto again = optimizer::ipc::ProvisionAgentTokenFile(path, false);
+    if (again || again.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    auto second = optimizer::ipc::ReadAgentTokenFile(path);
+    return second && second.Value() == first.Value();
+}
+
+bool TestCredentialsForceRotationChangesToken() {
+    const auto path = TempTokenFile(L"rotate");
+    if (!optimizer::ipc::ProvisionAgentTokenFile(path, false)) {
+        return false;
+    }
+    auto before = optimizer::ipc::ReadAgentTokenFile(path);
+    if (!before) {
+        return false;
+    }
+    if (!optimizer::ipc::ProvisionAgentTokenFile(path, true)) {
+        return false;
+    }
+    auto after = optimizer::ipc::ReadAgentTokenFile(path);
+    return after && after.Value() != before.Value() &&
+           after.Value().size() == before.Value().size();
+}
+
+bool TestCredentialsRejectsInvalidContent() {
+    const auto path = TempTokenFile(L"invalid");
+    // 直接写入非法内容（非字母数字）。
+    {
+        HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+        const char junk[] = "not-a-valid-token!";
+        DWORD written = 0;
+        const BOOL ok =
+            ::WriteFile(file, junk, static_cast<DWORD>(sizeof(junk) - 1),
+                        &written, nullptr);
+        ::CloseHandle(file);
+        if (!ok) {
+            return false;
+        }
+    }
+    if (optimizer::ipc::IsAgentTokenProvisioned(path)) {
+        return false;
+    }
+    const auto token = optimizer::ipc::ReadAgentTokenFile(path);
+    return !token && token.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestCredentialsDaclRestrictedToSystemAndUser() {
+    const auto path = TempTokenFile(L"dacl");
+    if (!optimizer::ipc::ProvisionAgentTokenFile(path, false)) {
+        return false;
+    }
+    // 读取 DACL 的 SDDL 文本并断言：保护 + SYSTEM + 当前用户；无 Everyone。
+    DWORD needed = 0;
+    (void)::GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, nullptr,
+                             0, &needed);
+    if (needed == 0) {
+        return false;
+    }
+    std::vector<std::byte> buffer(needed);
+    if (!::GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION,
+                            buffer.data(), static_cast<DWORD>(buffer.size()),
+                            &needed)) {
+        return false;
+    }
+    LPWSTR text = nullptr;
+    if (!::ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            buffer.data(), SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &text,
+            nullptr)) {
+        return false;
+    }
+    const std::wstring sddl = text;
+    ::LocalFree(text);
+    return sddl.find(L"D:P") == 0 && sddl.find(L";SY)") != std::wstring::npos &&
+           sddl.find(L";WD)") == std::wstring::npos &&
+           sddl.find(L"S-1-") != std::wstring::npos;
 }
 
 // ---------- 服务端会话（fake 后端） ----------
@@ -1473,6 +1609,14 @@ int wmain() {
     run(L"facts schema rejects empty observer", &TestFactsSchemaRejectsEmptyObserver);
     run(L"facts schema token rules", &TestFactsSchemaTokenRules);
     run(L"facts token excluded from summary", &TestFactsTokenExcludedFromSummary);
+    run(L"credentials provision read round trip",
+        &TestCredentialsProvisionReadRoundTrip);
+    run(L"credentials provision idempotent", &TestCredentialsProvisionIdempotent);
+    run(L"credentials force rotation changes token",
+        &TestCredentialsForceRotationChangesToken);
+    run(L"credentials rejects invalid content", &TestCredentialsRejectsInvalidContent);
+    run(L"credentials dacl restricted to system and user",
+        &TestCredentialsDaclRestrictedToSystemAndUser);
     run(L"serve one ping -> ack", &TestServeOnePingAck);
     run(L"serve one facts snapshot -> ack", &TestServeOneFactsSnapshotAck);
     run(L"serve one invalid facts -> error reply", &TestServeOneInvalidFactsReply);

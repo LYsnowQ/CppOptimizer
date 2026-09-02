@@ -105,11 +105,10 @@ public:
         // 访问令牌只读查询）大小写不敏感命中其一，否则回 Error(UnauthorizedClient)
         // 并断开。为空表示不启用 SID 授权（兼容 IPC-004/005 行为）。
         std::vector<std::wstring> allowedClientSids;
-        // 会话凭据（IPC-005，demo 层共享秘密）：非空时默认处理器要求
-        // FactsSnapshot 载荷携带匹配的 agent_token 事实，缺失/不匹配回
-        // Error(AuthFailed)；为空表示不启用（沿用 IPC-002/003 行为）。
-        // [OPT-FUTURE][MOD-IPC-001] token 真实供给（按用户派生/ACL 注入/轮换）
-        // 未动工：现为 demo 明文传参；Service/Agent 集成（docs/23 第 5 节）时消费
+        // 会话凭据（IPC-005）：非空时默认处理器要求 FactsSnapshot 载荷携带匹配
+        // 的 agent_token 事实，缺失/不匹配回 Error(AuthFailed)；为空表示不启用
+        // （沿用 IPC-002/003 行为）。真实供给见 ipc_credentials.hpp（IPC-007：
+        // 每用户私有 ACL 存储 + 轮换），此处为程序内注入点（CLI/宿主从存储加载）。
         std::wstring expectedToken;
     };
 

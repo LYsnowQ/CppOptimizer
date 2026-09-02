@@ -66,6 +66,9 @@
     <ClInclude Include="include\ipc\ipc_facts.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\ipc\ipc_credentials.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp">
@@ -123,6 +126,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\ipc\ipc_facts.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\ipc\ipc_credentials.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

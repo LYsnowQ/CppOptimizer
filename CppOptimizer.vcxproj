@@ -117,6 +117,7 @@
     <ClInclude Include="include\ipc\ipc_transport.hpp" />
     <ClInclude Include="include\ipc\ipc_session.hpp" />
     <ClInclude Include="include\ipc\ipc_facts.hpp" />
+    <ClInclude Include="include\ipc\ipc_credentials.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp" />
@@ -138,6 +139,7 @@
     <ClCompile Include="source\ipc\ipc_transport.cpp" />
     <ClCompile Include="source\ipc\ipc_session.cpp" />
     <ClCompile Include="source\ipc\ipc_facts.cpp" />
+    <ClCompile Include="source\ipc\ipc_credentials.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="CppOptimizer.slnx" />

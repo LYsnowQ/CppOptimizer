@@ -48,6 +48,7 @@ add_executable(CppOptimizer
     source/ipc/ipc_transport.cpp
     source/ipc/ipc_session.cpp
     source/ipc/ipc_facts.cpp
+    source/ipc/ipc_credentials.cpp
 )
 
 target_include_directories(CppOptimizer PRIVATE include ${THIRDPARTY_DIR} ${SPDLOG_INCLUDE_DIR} ${TOMLPLUSPLUS_INCLUDE_DIR})
@@ -318,6 +319,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         source/ipc/ipc_transport.cpp
         source/ipc/ipc_session.cpp
         source/ipc/ipc_facts.cpp
+        source/ipc/ipc_credentials.cpp
     )
     target_include_directories(CppOptimizerIpcTests PRIVATE include)
     target_compile_features(CppOptimizerIpcTests PRIVATE cxx_std_20)
