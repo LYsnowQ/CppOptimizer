@@ -116,6 +116,7 @@
     <ClInclude Include="include\ipc\ipc_protocol.hpp" />
     <ClInclude Include="include\ipc\ipc_transport.hpp" />
     <ClInclude Include="include\ipc\ipc_session.hpp" />
+    <ClInclude Include="include\ipc\ipc_facts.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\common\error.cpp" />
@@ -136,6 +137,7 @@
     <ClCompile Include="source\ipc\ipc_protocol.cpp" />
     <ClCompile Include="source\ipc\ipc_transport.cpp" />
     <ClCompile Include="source\ipc\ipc_session.cpp" />
+    <ClCompile Include="source\ipc\ipc_facts.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="CppOptimizer.slnx" />

@@ -19,7 +19,8 @@ enum class IpcErrorCode : std::uint8_t {
     InvalidHeader = 0x01,   // 帧头魔数/版本/类型/预留/长度非法
     UnsupportedType = 0x03, // 处理器不支持该消息类型
     HandlerFailed = 0x04,   // 应用层处理器失败
-    Internal = 0x05
+    Internal = 0x05,        // 内部错误
+    InvalidFacts = 0x06     // FactsSnapshot 载荷违反 CPOPFACTS/1 契约
 };
 
 // 错误码名（纯查询，恒成功）。
@@ -43,6 +44,7 @@ struct IpcReply {
 // 一次会话结果摘要。
 struct IpcServeResult {
     IpcMessageType requestType = IpcMessageType::Ping;
+    IpcMessageType replyType = IpcMessageType::Ack; // 实际写出的应答类型（Ack/Error）
     std::uint32_t requestId = 0;
     std::uint32_t clientPid = 0;
     std::uint32_t clientSessionId = 0;
@@ -72,8 +74,10 @@ public:
     [[nodiscard]] common::Result<IpcServeResult> ServeOne(
         Handler handler, std::chrono::milliseconds acceptTimeout);
 
-    // 默认处理器：Ping -> Ack；FactsSnapshot -> Ack（载荷为收到的字节数说明，
-    // UTF-8 文本，应用层语义属后续切片）；其余类型 -> 拒绝（UnsupportedType）。
+    // 默认处理器：Ping -> Ack；FactsSnapshot -> 解析 CPOPFACTS/1 结构化载荷
+    // （ipc_facts.hpp），合法则 Ack（载荷为紧凑摘要文本），载荷违反契约则
+    // Error(InvalidFacts) 应答（不宽松接受）；其余请求类型 -> 拒绝
+    // （UnsupportedType）。处理器只应答，不执行任何客户端请求的系统动作。
     [[nodiscard]] static common::Result<void> DefaultHandler(
         const IpcRequest& request, IpcReply& reply);
 

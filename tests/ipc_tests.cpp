@@ -1,6 +1,7 @@
 ﻿#include "ipc/ipc_protocol.hpp"
 #include "ipc/ipc_session.hpp"
 #include "ipc/ipc_transport.hpp"
+#include "ipc/ipc_facts.hpp"
 
 #include <windows.h>
 
@@ -19,6 +20,7 @@ using optimizer::common::ErrorDomain;
 using optimizer::common::Result;
 using optimizer::ipc::IpcClientBackend;
 using optimizer::ipc::IpcErrorCode;
+using optimizer::ipc::IpcFact;
 using optimizer::ipc::IpcHeader;
 using optimizer::ipc::IpcMessageType;
 using optimizer::ipc::IpcReply;
@@ -36,6 +38,13 @@ using optimizer::ipc::MessageTypeToString;
 using optimizer::ipc::ParseHeader;
 using optimizer::ipc::ParseMessageType;
 using optimizer::ipc::SerializeHeader;
+using optimizer::ipc::SerializeFactsV1;
+using optimizer::ipc::ParseFactsV1;
+using optimizer::ipc::FormatFactsSummary;
+using optimizer::ipc::kFactsSummaryMaxBytes;
+using optimizer::ipc::kMaxFactsEntries;
+using optimizer::ipc::kMaxFactsKeyBytes;
+using optimizer::ipc::kMaxFactsValueBytes;
 using optimizer::ipc::ValidateIpcHeader;
 
 // ---------- fake 服务端后端（记录调用序列，可注入帧与失败） ----------
@@ -335,6 +344,246 @@ bool TestParseHeaderRejectsCorruptBytes() {
     return !ParseHeader(std::span<const std::byte>(corrupted));
 }
 
+// ---------- Facts 载荷契约（CPOPFACTS/1，IPC-002） ----------
+
+// 事实列表逐项相等（顺序敏感）。
+bool FactsEqual(const std::vector<IpcFact>& a, const std::vector<IpcFact>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i].key != b[i].key || a[i].value != b[i].value) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestFactsSerializeParseRoundTrip() {
+    std::vector<IpcFact> facts;
+    facts.push_back({"client_pid", "12345"});
+    facts.push_back({"observer", "CppOptimizer ipc demo"});
+    facts.push_back({"note", "hello world"});
+    facts.push_back({"empty", ""});
+    auto encoded = SerializeFactsV1(facts);
+    if (!encoded) {
+        return false;
+    }
+    const auto& bytes = encoded.Value();
+    // 首行必须是信封 + LF。
+    const std::string prefix = "CPOPFACTS/1\n";
+    if (bytes.size() < prefix.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        if (bytes[i] !=
+            static_cast<std::byte>(static_cast<unsigned char>(prefix[i]))) {
+            return false;
+        }
+    }
+    auto parsed = ParseFactsV1(bytes);
+    return parsed && FactsEqual(parsed.Value(), facts);
+}
+
+bool TestFactsUnicodeValueRoundTrip() {
+    // 值允许多字节 UTF-8（内存 = 0xE5 0x86 0x85 0xE5 0xAD 0x98）。
+    std::vector<IpcFact> facts;
+    facts.push_back({"module", "\xE5\x86\x85\xE5\xAD\x98"});
+    auto encoded = SerializeFactsV1(facts);
+    if (!encoded) {
+        return false;
+    }
+    auto parsed = ParseFactsV1(encoded.Value());
+    return parsed && parsed.Value().size() == 1 &&
+           parsed.Value()[0].key == "module" &&
+           parsed.Value()[0].value ==
+               std::string("\xE5\x86\x85\xE5\xAD\x98", 6);
+}
+
+bool TestFactsEnvelopeOnlyIsEmptyFacts() {
+    auto parsed = ParseFactsV1(BytesFromText("CPOPFACTS/1"));
+    return parsed && parsed.Value().empty();
+}
+
+bool TestFactsRejectsEmptyPayload() {
+    const auto parsed = ParseFactsV1(std::span<const std::byte>());
+    return !parsed && parsed.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestFactsRejectsMissingOrWrongEnvelope() {
+    const char* cases[] = {
+        "a=1",                   // 首行不是信封
+        "facts clientPid=12345", // IPC-001 旧演示载荷：无信封，整体拒绝
+        "CPOPFACTS/2\na=1",      // 载荷版本不匹配
+        "CPOPFACTS\na=1",        // 非完整信封
+        "NOTFACTS/1\na=1",
+    };
+    for (const char* text : cases) {
+        const auto parsed = ParseFactsV1(BytesFromText(text));
+        if (parsed || parsed.ErrorValue().domain != ErrorDomain::Validation) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestFactsRejectsTrailingNewlineOrBlankLine() {
+    const char* cases[] = {
+        "CPOPFACTS/1\n",        // 尾随换行
+        "CPOPFACTS/1\na=1\n",   // 尾随换行
+        "CPOPFACTS/1\n\na=1",   // 空行
+        "\nCPOPFACTS/1\na=1",   // 前导空行
+    };
+    for (const char* text : cases) {
+        const auto parsed = ParseFactsV1(BytesFromText(text));
+        if (parsed || parsed.ErrorValue().domain != ErrorDomain::Validation) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestFactsRejectsCarriageReturn() {
+    const char* cases[] = {
+        "CPOPFACTS/1\r\na=1", // CRLF
+        "CPOPFACTS/1\na=1\rb=2", // 孤立 CR
+    };
+    for (const char* text : cases) {
+        const auto parsed = ParseFactsV1(BytesFromText(text));
+        if (parsed || parsed.ErrorValue().domain != ErrorDomain::Validation) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestFactsRejectsMissingEquals() {
+    const auto parsed = ParseFactsV1(BytesFromText("CPOPFACTS/1\nab"));
+    return !parsed && parsed.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestFactsRejectsEmptyKey() {
+    const auto parsed = ParseFactsV1(BytesFromText("CPOPFACTS/1\n=1"));
+    return !parsed && parsed.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestFactsRejectsIllegalKeyCharacters() {
+    // 点、空格与多字节字符都不属于键字符集。
+    const std::string cases[] = {
+        "CPOPFACTS/1\ndot.key=1",
+        "CPOPFACTS/1\na b=1",
+        "CPOPFACTS/1\n\xE4\xBD\xA0\xE5\xA5\xBD=1", // 你好=1
+    };
+    for (const std::string& text : cases) {
+        const auto parsed = ParseFactsV1(BytesFromText(text));
+        if (parsed || parsed.ErrorValue().domain != ErrorDomain::Validation) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestFactsRejectsDuplicateKey() {
+    const auto parsed = ParseFactsV1(BytesFromText("CPOPFACTS/1\na=1\na=2"));
+    return !parsed && parsed.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestFactsRejectsControlBytes() {
+    // 控制字节（\x01、\t、\x7F DEL）与值格式冲突，整体拒绝。
+    const std::string cases[] = {
+        std::string("CPOPFACTS/1\na=") + "\x01",
+        std::string("CPOPFACTS/1\na=1\t"),
+        std::string("CPOPFACTS/1\na=") + "\x7F",
+    };
+    for (const std::string& text : cases) {
+        const auto parsed = ParseFactsV1(BytesFromText(text));
+        if (parsed || parsed.ErrorValue().domain != ErrorDomain::Validation) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestFactsRejectsOversizedKeyOrValue() {
+    // 键超上限字节拒绝。
+    std::string longKeyText = "CPOPFACTS/1\n";
+    longKeyText += std::string(kMaxFactsKeyBytes + 1, 'k');
+    longKeyText += "=1";
+    const auto longKey = ParseFactsV1(BytesFromText(longKeyText));
+    if (longKey || longKey.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    // 值超上限字节拒绝。
+    std::string longValueText = "CPOPFACTS/1\na=";
+    longValueText += std::string(kMaxFactsValueBytes + 1, 'v');
+    const auto longValue = ParseFactsV1(BytesFromText(longValueText));
+    return !longValue &&
+           longValue.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestFactsRejectsTooManyEntries() {
+    // 超过 kMaxFactsEntries 条拒绝。
+    std::string text = "CPOPFACTS/1";
+    for (std::size_t i = 0; i <= kMaxFactsEntries; ++i) {
+        text += "\nk" + std::to_string(i) + "=1";
+    }
+    const auto parsed = ParseFactsV1(BytesFromText(text));
+    if (parsed || parsed.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    // 编码同样拒绝。
+    std::vector<IpcFact> facts;
+    for (std::size_t i = 0; i <= kMaxFactsEntries; ++i) {
+        facts.push_back({"k" + std::to_string(i), "1"});
+    }
+    const auto encoded = SerializeFactsV1(facts);
+    return !encoded &&
+           encoded.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestFactsSerializeRejectsInvalidInput() {
+    std::vector<IpcFact> badKey = {{"bad!key", "1"}};
+    if (SerializeFactsV1(badKey)) {
+        return false;
+    }
+    std::vector<IpcFact> badValue = {{"a", "line1\nline2"}};
+    if (SerializeFactsV1(badValue)) {
+        return false;
+    }
+    std::vector<IpcFact> controlValue = {{"a", "\x01"}};
+    if (SerializeFactsV1(controlValue)) {
+        return false;
+    }
+    std::vector<IpcFact> dup = {{"a", "1"}, {"a", "2"}};
+    if (SerializeFactsV1(dup)) {
+        return false;
+    }
+    std::vector<IpcFact> oversized = {{"a", std::string(kMaxFactsValueBytes + 1, 'v')}};
+    return !SerializeFactsV1(oversized);
+}
+
+bool TestFactsSummaryEmptyAndBasic() {
+    if (FormatFactsSummary({}) != "facts ok (0)") {
+        return false;
+    }
+    const std::vector<IpcFact> facts = {{"a", "1"}, {"b", "hello world"}};
+    return FormatFactsSummary(facts) == "facts ok (2): a=1 b=hello world";
+}
+
+bool TestFactsSummaryTruncationBounded() {
+    std::vector<IpcFact> many;
+    for (int i = 0; i < 30; ++i) {
+        many.push_back({"k" + std::to_string(i), std::string(100, 'x')});
+    }
+    const std::string summary = FormatFactsSummary(many);
+    const std::string suffix = " …";
+    return summary.rfind("facts ok (30):", 0) == 0 &&
+           summary.size() <= kFactsSummaryMaxBytes &&
+           summary.size() >= suffix.size() &&
+           summary.compare(summary.size() - suffix.size(), suffix.size(),
+                           suffix) == 0;
+}
+
 // ---------- 服务端会话（fake 后端） ----------
 
 bool TestServeOnePingAck() {
@@ -361,18 +610,51 @@ bool TestServeOnePingAck() {
 
 bool TestServeOneFactsSnapshotAck() {
     auto fake = std::make_shared<FakeIpcServerBackend>();
-    const auto payload = BytesFromText("hello");
+    // 结构化事实载荷（CPOPFACTS/1）。
+    std::vector<IpcFact> facts;
+    facts.push_back({"client_pid", "12345"});
+    facts.push_back({"observer", "demo"});
+    auto encoded = SerializeFactsV1(facts);
+    if (!encoded) {
+        return false;
+    }
+    const auto payload = encoded.Value();
     fake->incoming = BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
     IpcSession session(fake);
     auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
-    if (!served || served.Value().payloadBytes != 5) {
+    if (!served || served.Value().requestType !=
+                       IpcMessageType::FactsSnapshot ||
+        served.Value().replyType != IpcMessageType::Ack ||
+        served.Value().payloadBytes != payload.size()) {
+        return false;
+    }
+    // 应答必须是 Ack，载荷为紧凑摘要文本（与服务端解析结果一致）。
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    const auto expected = BytesFromText(FormatFactsSummary(facts));
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Ack) &&
+           header.requestId == 3 && replyPayload == expected;
+}
+
+bool TestServeOneInvalidFactsReply() {
+    // 载荷违反 CPOPFACTS/1（旧演示文本、无信封）：默认处理器回 Error(InvalidFacts)。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto payload = BytesFromText("facts clientPid=12345");
+    fake->incoming = BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
+    IpcSession session(fake);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!served || served.Value().replyType != IpcMessageType::Error ||
+        served.Value().payloadBytes != payload.size()) {
         return false;
     }
     IpcHeader header;
     std::vector<std::byte> replyPayload;
     return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
-           header.type == static_cast<std::uint8_t>(IpcMessageType::Ack) &&
-           header.requestId == 3 && !replyPayload.empty();
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           !replyPayload.empty() &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::InvalidFacts;
 }
 
 bool TestServeOneCustomHandler() {
@@ -658,8 +940,31 @@ int wmain() {
     run(L"serialize/parse header round trip", &TestSerializeParseRoundTrip);
     run(L"parse header rejects wrong size", &TestParseHeaderRejectsWrongSize);
     run(L"parse header rejects corrupt bytes", &TestParseHeaderRejectsCorruptBytes);
+    run(L"facts serialize/parse round trip", &TestFactsSerializeParseRoundTrip);
+    run(L"facts unicode value round trip", &TestFactsUnicodeValueRoundTrip);
+    run(L"facts envelope only is empty facts", &TestFactsEnvelopeOnlyIsEmptyFacts);
+    run(L"facts rejects empty payload", &TestFactsRejectsEmptyPayload);
+    run(L"facts rejects missing or wrong envelope",
+        &TestFactsRejectsMissingOrWrongEnvelope);
+    run(L"facts rejects trailing newline or blank line",
+        &TestFactsRejectsTrailingNewlineOrBlankLine);
+    run(L"facts rejects carriage return", &TestFactsRejectsCarriageReturn);
+    run(L"facts rejects missing equals", &TestFactsRejectsMissingEquals);
+    run(L"facts rejects empty key", &TestFactsRejectsEmptyKey);
+    run(L"facts rejects illegal key characters",
+        &TestFactsRejectsIllegalKeyCharacters);
+    run(L"facts rejects duplicate key", &TestFactsRejectsDuplicateKey);
+    run(L"facts rejects control bytes", &TestFactsRejectsControlBytes);
+    run(L"facts rejects oversized key or value",
+        &TestFactsRejectsOversizedKeyOrValue);
+    run(L"facts rejects too many entries", &TestFactsRejectsTooManyEntries);
+    run(L"facts serialize rejects invalid input",
+        &TestFactsSerializeRejectsInvalidInput);
+    run(L"facts summary empty and basic", &TestFactsSummaryEmptyAndBasic);
+    run(L"facts summary truncation bounded", &TestFactsSummaryTruncationBounded);
     run(L"serve one ping -> ack", &TestServeOnePingAck);
     run(L"serve one facts snapshot -> ack", &TestServeOneFactsSnapshotAck);
+    run(L"serve one invalid facts -> error reply", &TestServeOneInvalidFactsReply);
     run(L"serve one custom handler", &TestServeOneCustomHandler);
     run(L"serve one bad magic rejected", &TestServeOneBadMagicRejected);
     run(L"serve one unknown version rejected", &TestServeOneUnknownVersionRejected);

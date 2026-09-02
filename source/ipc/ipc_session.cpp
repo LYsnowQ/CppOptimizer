@@ -1,5 +1,7 @@
 ﻿#include "ipc/ipc_session.hpp"
 
+#include "ipc/ipc_facts.hpp"
+
 #include <array>
 #include <string>
 
@@ -55,6 +57,8 @@ const wchar_t* IpcErrorCodeToString(IpcErrorCode code) noexcept {
             return L"handler failed";
         case IpcErrorCode::Internal:
             return L"internal error";
+        case IpcErrorCode::InvalidFacts:
+            return L"invalid facts payload";
     }
     return L"unknown error";
 }
@@ -159,6 +163,7 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
 
     IpcServeResult result;
     result.requestType = request.type;
+    result.replyType = reply.type;
     result.requestId = request.requestId;
     result.clientPid = request.clientPid;
     result.clientSessionId = request.clientSessionId;
@@ -173,10 +178,17 @@ common::Result<void> IpcSession::DefaultHandler(const IpcRequest& request,
             reply.type = IpcMessageType::Ack;
             break;
         case IpcMessageType::FactsSnapshot: {
+            auto parsed = ParseFactsV1(request.payload);
+            if (!parsed) {
+                // 载荷违反 CPOPFACTS/1 契约：回 Error(InvalidFacts)（不宽松接受）。
+                reply.type = IpcMessageType::Error;
+                reply.payload.clear();
+                reply.payload.push_back(
+                    static_cast<std::byte>(IpcErrorCode::InvalidFacts));
+                break;
+            }
             reply.type = IpcMessageType::Ack;
-            reply.payload = BytesFromText(
-                "received " + std::to_string(request.payload.size()) +
-                " bytes");
+            reply.payload = BytesFromText(FormatFactsSummary(parsed.Value()));
             break;
         }
         default:

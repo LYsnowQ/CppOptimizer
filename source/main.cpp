@@ -1,6 +1,7 @@
 ﻿#include "common/console_output.hpp"
 #include "common/error.hpp"
 #include "config/config_manager.hpp"
+#include "ipc/ipc_facts.hpp"
 #include "ipc/ipc_protocol.hpp"
 #include "ipc/ipc_session.hpp"
 #include "ipc/ipc_transport.hpp"
@@ -1367,10 +1368,12 @@ std::wstring IpcPipeName(std::wstring_view suffix) noexcept {
 }
 
 int RunIpcServerCommand(int argc, wchar_t* argv[]) {
-    // --ipc-pipe server <s> [suffix]：受保护命名管道服务端演示（IPC-001）。
+    // --ipc-pipe server <s> [suffix]：受保护命名管道服务端演示（IPC-002）。
     // 前台、有界（s 秒）：等待至多一个客户端连接，读取一帧并严格校验
     // （未知版本/类型/超长载荷 -> Error 应答），默认处理器应答
-    // （Ping->Ack / FactsSnapshot->Ack），输出客户端身份（PID + 会话）与请求摘要。
+    // （Ping->Ack；FactsSnapshot 解析 CPOPFACTS/1 结构化载荷，合法回 Ack
+    // 摘要、违反契约回 Error(InvalidFacts)），输出客户端身份（PID + 会话）
+    // 与请求/应答摘要。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
@@ -1424,13 +1427,21 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
                << optimizer::ipc::MessageTypeToString(result.requestType)
                << L" id=" << result.requestId << L" payload="
                << result.payloadBytes << L" bytes\n";
-    std::wcout << L"  reply    : ack sent (frame validated)\n";
+    if (result.replyType == optimizer::ipc::IpcMessageType::Error) {
+        // 默认处理器对违反 CPOPFACTS/1 契约的 FactsSnapshot 回 Error(InvalidFacts)。
+        std::wcout << L"  reply    : error sent (invalid facts payload)\n";
+    } else if (result.requestType ==
+               optimizer::ipc::IpcMessageType::FactsSnapshot) {
+        std::wcout << L"  reply    : ack sent (facts parsed and summarized)\n";
+    } else {
+        std::wcout << L"  reply    : ack sent (frame validated)\n";
+    }
     return 0;
 }
 
 int RunIpcClientCommand(int argc, wchar_t* argv[]) {
-    // --ipc-pipe client [suffix]：受保护命名管道客户端演示（IPC-001）。
-    // 连接服务端，发送一帧 FactsSnapshot（载荷为客户端事实文本），
+    // --ipc-pipe client [suffix]：受保护命名管道客户端演示（IPC-002）。
+    // 连接服务端，发送一帧 FactsSnapshot（载荷为 CPOPFACTS/1 结构化事实），
     // 读取并校验应答帧（requestId 配对、Error 应答不伪装成功）。
     std::wstring suffix;
     if (argc >= 4) {
@@ -1442,20 +1453,30 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
         return 2;
     }
 
-    // 事实快照载荷（v1 演示为 ASCII 文本，应用层编码属后续切片）。
-    const std::string factsText =
-        "facts clientPid=" + std::to_string(::GetCurrentProcessId());
-    std::vector<std::byte> payload;
-    payload.reserve(factsText.size());
-    for (const char ch : factsText) {
-        payload.push_back(
-            static_cast<std::byte>(static_cast<unsigned char>(ch)));
+    // 结构化事实载荷（IPC-002 v1：CPOPFACTS/1 信封 + key=value 行）。
+    // client_pid 真实；其余为演示条目（语义键白名单属后续 Agent 切片）。
+    std::vector<optimizer::ipc::IpcFact> facts;
+    facts.push_back(optimizer::ipc::IpcFact{
+        "client_pid", std::to_string(::GetCurrentProcessId())});
+    facts.push_back(
+        optimizer::ipc::IpcFact{"observer", "CppOptimizer ipc demo"});
+    auto payloadResult = optimizer::ipc::SerializeFactsV1(facts);
+    if (!payloadResult) {
+        std::wcerr << L"  serialize facts failed ["
+                   << optimizer::common::ToString(
+                          payloadResult.ErrorValue().domain)
+                   << L"] " << payloadResult.ErrorValue().message << L"\n";
+        return 2;
     }
+    const std::vector<std::byte> payload =
+        std::move(payloadResult).Value();
 
     std::wcout << L"IPC pipe client (protected transport)\n";
     std::wcout << L"  pipe     : " << pipeName << L"\n";
     std::wcout << L"  request  : FactsSnapshot id=1 payload=" << payload.size()
-               << L" bytes\n";
+               << L" bytes (" << facts.size() << L" facts)\n";
+    std::wcout << L"  facts    : "
+               << optimizer::ipc::FormatFactsSummary(facts).c_str() << L"\n";
 
     auto backend = optimizer::ipc::CreateWin32ClientBackend();
     auto reply = optimizer::ipc::IpcRoundTrip(
