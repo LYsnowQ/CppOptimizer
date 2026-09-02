@@ -17,12 +17,13 @@
 namespace optimizer::process {
 
 // 进程生命周期状态。
-// v1 只读观测阶段由 Toolhelp 轮询差分产生 NotRunning/Starting/Running/Exiting；
-// Suspended 预留（线程挂起检测属 R2 高风险区），当前不会产生。
+// v1 只读观测阶段由 Toolhelp 轮询差分产生 NotRunning/Starting/Running/Exiting。
 enum class ProcessState {
     NotRunning,
     Starting,
     Running,
+    // [OPT-RESERVE][MOD-PRC-001] Suspended 预留：线程挂起检测属 R2 高风险区，
+    // 当前不会产生（docs/design/guides/14 7.2）
     Suspended,
     Exiting
 };

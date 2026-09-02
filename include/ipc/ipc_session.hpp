@@ -65,8 +65,12 @@ struct IpcClientIdentity {
 // 单客户端会话服务端：创建/监听 -> 接受一个客户端 -> 读取一帧 ->
 // 严格校验（未知版本/类型/超长载荷 -> Error 应答并断开，不做宽松转换）
 // -> 会话级身份裁决（默认要求可识别 PID 与交互会话；拒绝 -> Error(UnauthorizedClient)
-//    并断开）-> 调用处理器 -> 写回应答 -> 断开。处理器失败 -> Error 应答
-// （失败不伪装成功）。实例可复用（每轮重新 CreateAndListen/AcceptClient）。
+//    并断开）-> 用户 SID 授权白名单（配置时）-> 调用处理器 -> 写回应答 -> 断开。
+// 处理器失败 -> Error 应答（失败不伪装成功）。
+// 实例可复用（每轮重新 CreateAndListen/AcceptClient）。
+// [OPT-RESERVE][MOD-IPC-001] 会话仍为“单客户端单帧”：每连接一帧、服务后即断开；
+// 多帧/连续受理/多实例并发（PIPE_UNLIMITED_INSTANCES 已保留）为服务运行形态扩展点
+// （docs/design/modules/10 7.2、Service 端消费切片）
 class IpcSession {
 public:
     // 应用层处理器：根据请求填写应答；返回失败表示拒绝（应答 Error）。
@@ -98,7 +102,8 @@ public:
         // 会话凭据（IPC-005，demo 层共享秘密）：非空时默认处理器要求
         // FactsSnapshot 载荷携带匹配的 agent_token 事实，缺失/不匹配回
         // Error(AuthFailed)；为空表示不启用（沿用 IPC-002/003 行为）。
-        // 真实供给（按用户派生/ACL 注入）属 Service/Agent 切片。
+        // [OPT-FUTURE][MOD-IPC-001] token 真实供给（按用户派生/ACL 注入/轮换）
+        // 未动工：现为 demo 明文传参；Service/Agent 集成（docs/23 第 5 节）时消费
         std::wstring expectedToken;
     };
 
@@ -132,6 +137,8 @@ private:
 
 // 客户端往返：连接 -> 发送一帧 -> 读取应答帧 -> 关闭。
 // 应答为 Error 类型或 requestId 与请求不配对时返回失败（失败不伪装成功）。
+// [OPT-RESERVE][MOD-IPC-001] 单次往返单帧：同一连接内多帧/心跳复用为服务形态
+// 扩展点（与 IpcSession 多帧切片配套）
 [[nodiscard]] common::Result<IpcReply> IpcRoundTrip(
     std::shared_ptr<IpcClientBackend> backend, std::wstring_view pipePath,
     IpcMessageType type, std::span<const std::byte> payload,

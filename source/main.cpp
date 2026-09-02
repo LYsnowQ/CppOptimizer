@@ -1171,11 +1171,23 @@ constexpr wchar_t kServiceDisplayName[] = L"CppOptimizer Service";
 constexpr wchar_t kServiceDescription[] =
     L"CppOptimizer 只读观测与受控优化宿主（R0 负载）";
 
-// 服务宿主负载状态：R0 只读观测（每 tick 一次内存快照 + Info 日志）。
+// 服务宿主负载状态：R0 只读观测（每 tick 一次内存快照 + Info 日志），可选
+// “受保护管道事实消费”（SVC-002，仅 console demo 启用）：在负载窗口内作为 IPC
+// 服务端至多受理一个客户端一帧 FactsSnapshot 并记录身份/摘要。
 // 服务模式不接受临时危险命令（docs/23 第 3 节），本负载不产生任何系统修改。
 struct ServiceHostDemoState {
     optimizer::logger::Logger logger;
     std::size_t tickCount = 0;
+
+    // IPC 事实消费（SVC-002）：
+    bool ipcEnabled = false;       // console demo 经 --ipc-facts 开启
+    std::wstring ipcPipeName;      // 受保护管道名
+    bool ipcServedOnce = false;    // 窗口内至多消费一次
+    std::wstring ipcClientIdentity; // 已受理客户端“pid/session”文本（供窗口汇总输出）
+    std::size_t ipcPayloadBytes = 0;
+    std::size_t ipcFactCount = 0;   // 已受理 FactsSnapshot 解析出的事实条数
+    bool ipcReplyAck = false;       // 是否回 Ack（false = Error 回执）
+    std::string ipcFactSummary;     // 解析后摘要（ASCII；由服务端日志记录）
 };
 
 optimizer::common::Result<void> ServiceWorkloadTick(
@@ -1191,6 +1203,67 @@ optimizer::common::Result<void> ServiceWorkloadTick(
         optimizer::memory::FormatBytes(s.availablePhysicalBytes) + L", load " +
         std::to_wstring(s.memoryLoadPercent) + L"%";
     state.logger.Write(optimizer::logger::LogLevel::Info, L"service", message);
+
+    // SVC-002：受保护管道事实消费（--ipc-facts；窗口内至多受理一帧）。
+    if (state.ipcEnabled && !state.ipcServedOnce) {
+        auto ipcBackend =
+            optimizer::ipc::CreateWin32ServerBackend(state.ipcPipeName);
+        optimizer::ipc::IpcSession ipcSession(ipcBackend);
+        auto served = ipcSession.ServeOne(
+            [&state](const optimizer::ipc::IpcRequest& request,
+                     optimizer::ipc::IpcReply& reply) {
+                // 默认处理语义；另在受理侧记录解析摘要（R0 只读，不执行任何动作）。
+                auto handled =
+                    optimizer::ipc::IpcSession::DefaultHandler(request, reply);
+                if (request.type ==
+                    optimizer::ipc::IpcMessageType::FactsSnapshot) {
+                    if (auto parsed =
+                            optimizer::ipc::ParseFactsV1(request.payload);
+                        parsed) {
+                        state.ipcFactSummary =
+                            optimizer::ipc::FormatFactsSummary(parsed.Value());
+                        state.ipcFactCount = parsed.Value().size();
+                    } else {
+                        state.ipcFactSummary.clear();
+                        state.ipcFactCount = 0;
+                    }
+                }
+                return handled;
+            },
+            std::chrono::milliseconds(900));
+        if (!served) {
+            const auto& error = served.ErrorValue();
+            // 接受超时 = 暂无 Agent 连接：继续下一 tick；其余失败如实上报。
+            if (error.domain == optimizer::common::ErrorDomain::Win32 &&
+                error.code == ERROR_TIMEOUT) {
+                return optimizer::common::Result<void>::Success();
+            }
+            return optimizer::common::Result<void>::Failure(error);
+        }
+        const auto& result = served.Value();
+        state.ipcServedOnce = true;
+        state.ipcPayloadBytes = result.payloadBytes;
+        state.ipcReplyAck =
+            result.replyType == optimizer::ipc::IpcMessageType::Ack;
+        std::wstring identity =
+            L"pid " + std::to_wstring(result.clientPid) + L", session " +
+            std::to_wstring(result.clientSessionId);
+        if (!result.clientUserSid.empty()) {
+            identity += L", user " + result.clientUserSid;
+        }
+        state.ipcClientIdentity = identity;
+        std::wstring servedMessage =
+            L"ipc  : consumed 1 frame from " + identity +
+            (result.replyType == optimizer::ipc::IpcMessageType::Ack
+                 ? L" (ack)"
+                 : L" (error reply)");
+        if (state.ipcFactCount > 0) {
+            servedMessage +=
+                L" facts=" + std::to_wstring(state.ipcFactCount);
+        }
+        state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
+                           servedMessage);
+    }
     return optimizer::common::Result<void>::Success();
 }
 
@@ -1210,7 +1283,9 @@ void SetupServiceLogger(optimizer::logger::Logger& logger) noexcept {
 }
 
 int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
-    // --service console <s>：控制台托管演示（前台、有界、Ctrl+C 优雅停止）。
+    // --service console <s> [--ipc-facts]：控制台托管演示（前台、有界、Ctrl+C
+    // 优雅停止）。可选 --ipc-facts 在负载窗口内同时作为受保护管道服务端受理一个
+    // 客户端的一帧 FactsSnapshot（SVC-002：Service 端消费真实 Agent 事实，R0）。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
@@ -1219,9 +1294,21 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                    << kMaxSeconds << L"\n";
         return 2;
     }
+    bool ipcFacts = false;
+    for (int i = 4; i < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--ipc-facts") {
+            ipcFacts = true;
+            break;
+        }
+    }
 
     ServiceHostDemoState state;
     state.logger.SetStderrSink();
+    if (ipcFacts) {
+        state.ipcEnabled = true;
+        state.ipcPipeName =
+            L"\\\\.\\pipe\\CppOptimizerIpc"; // 与 --ipc-pipe 默认管道同名
+    }
     optimizer::service::ServiceHost::Options options;
     options.identity.name = kServiceName;
     options.identity.displayName = kServiceDisplayName;
@@ -1236,6 +1323,11 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     optimizer::common::WriteConsoleLine(header.str());
     optimizer::common::WriteConsoleLine(
         L"  workload : memory snapshot + info log (read-only)");
+    if (ipcFacts) {
+        optimizer::common::WriteConsoleLine(
+            L"             + protected-pipe facts consume (one Agent frame)");
+        optimizer::common::WriteConsoleLine(L"  ipc      : pipe \\\\.\\pipe\\CppOptimizerIpc");
+    }
     optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
     const auto result = host.RunConsole(std::chrono::seconds(seconds));
     if (!result) {
@@ -1250,6 +1342,19 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     std::wostringstream ticksLine;
     ticksLine << L"  ticks    : " << state.tickCount;
     optimizer::common::WriteConsoleLine(ticksLine.str());
+    if (state.ipcEnabled) {
+        std::wostringstream ipcLine;
+        if (state.ipcServedOnce) {
+            ipcLine << L"  ipc      : served 1 frame from "
+                    << state.ipcClientIdentity << L", payload "
+                    << state.ipcPayloadBytes << L" bytes, "
+                    << state.ipcFactCount << L" facts, reply "
+                    << (state.ipcReplyAck ? L"ack" : L"error");
+        } else {
+            ipcLine << L"  ipc      : no Agent connected within window";
+        }
+        optimizer::common::WriteConsoleLine(ipcLine.str());
+    }
     std::wostringstream stoppedLine;
     stoppedLine << L"  stopped  : "
                 << (host.IsStopRequested() ? L"user (Ctrl+C)" : L"timeout");
@@ -1664,9 +1769,11 @@ void PrintUsage() {
         << L"                             demand start, R0 workload)\n"
         << L"  CppOptimizer.exe --service uninstall           Remove the Windows service\n"
         << L"                             (SCM, requires administrator)\n"
-        << L"  CppOptimizer.exe --service console <s>  Host the R0 workload in console\n"
-        << L"                             mode for 1..60 s (foreground; Ctrl+C to\n"
-        << L"                             stop gracefully)\n"
+        << L"  CppOptimizer.exe --service console <s> [--ipc-facts]  Host the R0\n"
+        << L"                             workload in console mode for 1..60 s\n"
+        << L"                             (foreground; Ctrl+C to stop; --ipc-facts\n"
+        << L"                             also consumes one Agent facts frame via\n"
+        << L"                             the protected pipe, SVC-002)\n"
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
         << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix] [--ipc-token <t>]\n"
