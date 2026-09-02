@@ -1368,12 +1368,12 @@ std::wstring IpcPipeName(std::wstring_view suffix) noexcept {
 }
 
 int RunIpcServerCommand(int argc, wchar_t* argv[]) {
-    // --ipc-pipe server <s> [suffix]：受保护命名管道服务端演示（IPC-002）。
+    // --ipc-pipe server <s> [suffix]：受保护命名管道服务端演示（IPC-003）。
     // 前台、有界（s 秒）：等待至多一个客户端连接，读取一帧并严格校验
     // （未知版本/类型/超长载荷 -> Error 应答），默认处理器应答
-    // （Ping->Ack；FactsSnapshot 解析 CPOPFACTS/1 结构化载荷，合法回 Ack
-    // 摘要、违反契约回 Error(InvalidFacts)），输出客户端身份（PID + 会话）
-    // 与请求/应答摘要。
+    // （Ping->Ack；FactsSnapshot 依次过 CPOPFACTS/1 语法解析与 v1 键语义白名单，
+    // 合法回 Ack 摘要、任一违反回 Error(InvalidFacts)），输出客户端身份
+    // （PID + 会话）与请求/应答摘要。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
@@ -1440,9 +1440,9 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
 }
 
 int RunIpcClientCommand(int argc, wchar_t* argv[]) {
-    // --ipc-pipe client [suffix]：受保护命名管道客户端演示（IPC-002）。
-    // 连接服务端，发送一帧 FactsSnapshot（载荷为 CPOPFACTS/1 结构化事实），
-    // 读取并校验应答帧（requestId 配对、Error 应答不伪装成功）。
+    // --ipc-pipe client [suffix]：受保护命名管道客户端演示（IPC-003）。
+    // 连接服务端，发送一帧 FactsSnapshot（CPOPFACTS/1 结构化事实：真实内存观测 +
+    // 自报身份），读取并校验应答帧（requestId 配对、Error 应答不伪装成功）。
     std::wstring suffix;
     if (argc >= 4) {
         suffix = argv[3]; // argv[2] 为子命令 "client"
@@ -1453,11 +1453,29 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
         return 2;
     }
 
-    // 结构化事实载荷（IPC-002 v1：CPOPFACTS/1 信封 + key=value 行）。
-    // client_pid 真实；其余为演示条目（语义键白名单属后续 Agent 切片）。
+    // 结构化事实载荷（IPC-003 v1 schema：client_pid + 真实内存观测 + observer）。
+    // 内存字段来自 QueryMemoryStatus（只读、无副作用）；v1 键白名单见 ipc_facts.hpp。
+    auto memoryStatus = optimizer::memory::QueryMemoryStatus();
+    if (!memoryStatus) {
+        std::wcerr << L"  memory query failed ["
+                   << optimizer::common::ToString(
+                          memoryStatus.ErrorValue().domain)
+                   << L"] " << memoryStatus.ErrorValue().message << L"\n";
+        return 2;
+    }
+    const auto& memory = memoryStatus.Value();
     std::vector<optimizer::ipc::IpcFact> facts;
     facts.push_back(optimizer::ipc::IpcFact{
         "client_pid", std::to_string(::GetCurrentProcessId())});
+    facts.push_back(optimizer::ipc::IpcFact{
+        "memory_total_mb",
+        std::to_string(memory.totalPhysicalBytes / (1024 * 1024))});
+    facts.push_back(optimizer::ipc::IpcFact{
+        "memory_available_mb",
+        std::to_string(memory.availablePhysicalBytes / (1024 * 1024))});
+    facts.push_back(optimizer::ipc::IpcFact{
+        "memory_load_percent",
+        std::to_string(memory.memoryLoadPercent)});
     facts.push_back(
         optimizer::ipc::IpcFact{"observer", "CppOptimizer ipc demo"});
     auto payloadResult = optimizer::ipc::SerializeFactsV1(facts);

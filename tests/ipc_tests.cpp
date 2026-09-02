@@ -40,6 +40,7 @@ using optimizer::ipc::ParseMessageType;
 using optimizer::ipc::SerializeHeader;
 using optimizer::ipc::SerializeFactsV1;
 using optimizer::ipc::ParseFactsV1;
+using optimizer::ipc::ValidateFactsV1Schema;
 using optimizer::ipc::FormatFactsSummary;
 using optimizer::ipc::kFactsSummaryMaxBytes;
 using optimizer::ipc::kMaxFactsEntries;
@@ -584,6 +585,86 @@ bool TestFactsSummaryTruncationBounded() {
                            suffix) == 0;
 }
 
+bool TestFactsSchemaAcceptsValidSets() {
+    const std::vector<IpcFact> singlePid = {{"client_pid", "12345"}};
+    if (!ValidateFactsV1Schema(singlePid)) {
+        return false;
+    }
+    const std::vector<IpcFact> memorySet = {
+        {"memory_total_mb", "16384"},
+        {"memory_available_mb", "8192"},
+        {"memory_load_percent", "50"},
+        {"observer", "demo"}};
+    if (!ValidateFactsV1Schema(memorySet)) {
+        return false;
+    }
+    // 边界合法：total=1、available==total、load=100。
+    const std::vector<IpcFact> boundary = {
+        {"memory_total_mb", "1"}, {"memory_available_mb", "1"},
+        {"memory_load_percent", "100"}};
+    if (!ValidateFactsV1Schema(boundary)) {
+        return false;
+    }
+    // 前导零可接受（数值语义）。
+    const std::vector<IpcFact> leadingZero = {{"client_pid", "007"}};
+    return static_cast<bool>(ValidateFactsV1Schema(leadingZero));
+}
+
+bool TestFactsSchemaRejectsEmpty() {
+    const auto result = ValidateFactsV1Schema({});
+    return !result && result.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestFactsSchemaRejectsUnknownKey() {
+    // 未知键与尚未注册的真实候选键（cpu_percent 不在 v1 白名单）整体拒绝。
+    const std::vector<IpcFact> unknown = {{"hacker_key", "1"}};
+    if (ValidateFactsV1Schema(unknown)) {
+        return false;
+    }
+    const std::vector<IpcFact> unregistered = {{"cpu_percent", "50"}};
+    return !ValidateFactsV1Schema(unregistered);
+}
+
+bool TestFactsSchemaRejectsNonNumericValue() {
+    const std::vector<IpcFact> cases[] = {
+        {{"client_pid", "abc"}}, {{"memory_total_mb", "-1"}},
+        {{"memory_total_mb", "12.5"}}, {{"client_pid", ""}},
+        {{"memory_available_mb", " 100"}}};
+    for (const auto& facts : cases) {
+        if (ValidateFactsV1Schema(facts)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestFactsSchemaRejectsOutOfRange() {
+    const std::vector<IpcFact> zeroTotal = {{"memory_total_mb", "0"}};
+    if (ValidateFactsV1Schema(zeroTotal)) {
+        return false;
+    }
+    const std::vector<IpcFact> load101 = {{"memory_load_percent", "101"}};
+    if (ValidateFactsV1Schema(load101)) {
+        return false;
+    }
+    const std::vector<IpcFact> overflowPid = {{"client_pid", "4294967296"}};
+    // 4294967296 超出 uint32。
+    return !ValidateFactsV1Schema(overflowPid);
+}
+
+bool TestFactsSchemaRejectsAvailableGtTotal() {
+    const std::vector<IpcFact> facts = {{"memory_total_mb", "1000"},
+                                        {"memory_available_mb", "1001"}};
+    const auto result = ValidateFactsV1Schema(facts);
+    return !result && result.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestFactsSchemaRejectsEmptyObserver() {
+    const std::vector<IpcFact> facts = {{"observer", ""}};
+    const auto result = ValidateFactsV1Schema(facts);
+    return !result && result.ErrorValue().domain == ErrorDomain::Validation;
+}
+
 // ---------- 服务端会话（fake 后端） ----------
 
 bool TestServeOnePingAck() {
@@ -641,6 +722,46 @@ bool TestServeOneInvalidFactsReply() {
     // 载荷违反 CPOPFACTS/1（旧演示文本、无信封）：默认处理器回 Error(InvalidFacts)。
     auto fake = std::make_shared<FakeIpcServerBackend>();
     const auto payload = BytesFromText("facts clientPid=12345");
+    fake->incoming = BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
+    IpcSession session(fake);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!served || served.Value().replyType != IpcMessageType::Error ||
+        served.Value().payloadBytes != payload.size()) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           !replyPayload.empty() &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::InvalidFacts;
+}
+
+bool TestServeOneUnknownFactsKeyReply() {
+    // 语法合法但含白名单外键（hacker_key）：键语义校验拒绝 -> Error(InvalidFacts)。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto payload = BytesFromText("CPOPFACTS/1\nhacker_key=1");
+    fake->incoming = BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
+    IpcSession session(fake);
+    auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!served || served.Value().replyType != IpcMessageType::Error ||
+        served.Value().payloadBytes != payload.size()) {
+        return false;
+    }
+    IpcHeader header;
+    std::vector<std::byte> replyPayload;
+    return ParseWrittenFrame(fake->outgoing, header, replyPayload) &&
+           header.type == static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           !replyPayload.empty() &&
+           static_cast<IpcErrorCode>(replyPayload[0]) ==
+               IpcErrorCode::InvalidFacts;
+}
+
+bool TestServeOneEmptyFactsReply() {
+    // 语法合法（仅信封行）但 schema 要求至少一条已注册事实：拒绝。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto payload = BytesFromText("CPOPFACTS/1");
     fake->incoming = BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
     IpcSession session(fake);
     auto served = session.ServeOne(nullptr, std::chrono::milliseconds(100));
@@ -962,9 +1083,21 @@ int wmain() {
         &TestFactsSerializeRejectsInvalidInput);
     run(L"facts summary empty and basic", &TestFactsSummaryEmptyAndBasic);
     run(L"facts summary truncation bounded", &TestFactsSummaryTruncationBounded);
+    run(L"facts schema accepts valid sets", &TestFactsSchemaAcceptsValidSets);
+    run(L"facts schema rejects empty", &TestFactsSchemaRejectsEmpty);
+    run(L"facts schema rejects unknown key", &TestFactsSchemaRejectsUnknownKey);
+    run(L"facts schema rejects non numeric value",
+        &TestFactsSchemaRejectsNonNumericValue);
+    run(L"facts schema rejects out of range", &TestFactsSchemaRejectsOutOfRange);
+    run(L"facts schema rejects available gt total",
+        &TestFactsSchemaRejectsAvailableGtTotal);
+    run(L"facts schema rejects empty observer", &TestFactsSchemaRejectsEmptyObserver);
     run(L"serve one ping -> ack", &TestServeOnePingAck);
     run(L"serve one facts snapshot -> ack", &TestServeOneFactsSnapshotAck);
     run(L"serve one invalid facts -> error reply", &TestServeOneInvalidFactsReply);
+    run(L"serve one unknown facts key -> error reply",
+        &TestServeOneUnknownFactsKeyReply);
+    run(L"serve one empty facts -> error reply", &TestServeOneEmptyFactsReply);
     run(L"serve one custom handler", &TestServeOneCustomHandler);
     run(L"serve one bad magic rejected", &TestServeOneBadMagicRejected);
     run(L"serve one unknown version rejected", &TestServeOneUnknownVersionRejected);

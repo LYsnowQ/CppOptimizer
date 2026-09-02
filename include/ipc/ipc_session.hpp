@@ -74,10 +74,10 @@ public:
     [[nodiscard]] common::Result<IpcServeResult> ServeOne(
         Handler handler, std::chrono::milliseconds acceptTimeout);
 
-    // 默认处理器：Ping -> Ack；FactsSnapshot -> 解析 CPOPFACTS/1 结构化载荷
-    // （ipc_facts.hpp），合法则 Ack（载荷为紧凑摘要文本），载荷违反契约则
-    // Error(InvalidFacts) 应答（不宽松接受）；其余请求类型 -> 拒绝
-    // （UnsupportedType）。处理器只应答，不执行任何客户端请求的系统动作。
+    // 默认处理器：Ping -> Ack；FactsSnapshot -> 解析 CPOPFACTS/1 载荷并过 v1
+    // 键语义白名单（ipc_facts.hpp），合法则 Ack（载荷为紧凑摘要文本），语法或
+    // schema 任一违反则 Error(InvalidFacts) 应答（不宽松接受）；其余请求类型 ->
+    // 拒绝（UnsupportedType）。处理器只应答，不执行任何客户端请求的系统动作。
     [[nodiscard]] static common::Result<void> DefaultHandler(
         const IpcRequest& request, IpcReply& reply);
 

@@ -179,7 +179,11 @@ common::Result<void> IpcSession::DefaultHandler(const IpcRequest& request,
             break;
         case IpcMessageType::FactsSnapshot: {
             auto parsed = ParseFactsV1(request.payload);
-            if (!parsed) {
+            // 语法契约（Parse）与 v1 键语义白名单（schema）任一违反都整体拒绝。
+            const bool valid =
+                parsed &&
+                static_cast<bool>(ValidateFactsV1Schema(parsed.Value()));
+            if (!valid) {
                 // 载荷违反 CPOPFACTS/1 契约：回 Error(InvalidFacts)（不宽松接受）。
                 reply.type = IpcMessageType::Error;
                 reply.payload.clear();

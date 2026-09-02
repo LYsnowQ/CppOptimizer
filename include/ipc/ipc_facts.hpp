@@ -58,4 +58,21 @@ struct IpcFact {
 // Parse/Serialize 校验（无控制字节）。
 [[nodiscard]] std::string FormatFactsSummary(std::span<const IpcFact> facts);
 
+// ---------------------------------------------------------------------------
+// Facts v1 键语义白名单（schema）。IPC-003：在语法契约（Parse/Serialize）之上
+// 定义“哪些键被接受、值如何解释”。本层仍属应用语义，服务端据此把关；键的
+// 信任问题（会话校验/身份白名单）属后续切片。
+//
+// v1 已注册键（均可选，但整份载荷必须至少含一条已注册键）：
+//   - client_pid           无符号十进制整数（自报进程 ID，仅供参考，不替代服务端身份）
+//   - memory_total_mb      无符号十进制整数，>= 1
+//   - memory_available_mb  无符号十进制整数，>= 0；与 memory_total_mb 同现时须 <= total
+//   - memory_load_percent  无符号十进制整数，0..100（内存负载，GlobalMemoryStatusEx 口径）
+//   - observer             UTF-8 文本，非空（上报方自述，用于调试/审计）
+//
+// 约束：未知键、键值非十进制整数、数值越界、observer 为空、整份为空均整体拒绝
+// （Validation，不宽松接受）。扩展 schema 必须同步更新本注册表与对应测试。
+[[nodiscard]] common::Result<void> ValidateFactsV1Schema(
+    std::span<const IpcFact> facts);
+
 } // namespace optimizer::ipc

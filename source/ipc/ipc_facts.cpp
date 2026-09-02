@@ -1,5 +1,6 @@
 #include "ipc/ipc_facts.hpp"
 
+#include <cstdint>
 #include <optional>
 
 namespace optimizer::ipc {
@@ -83,6 +84,25 @@ std::optional<std::wstring> ValidateFacts(std::span<const IpcFact> facts) {
         }
     }
     return std::nullopt;
+}
+
+// 严格十进制无符号整数解析（仅 ASCII 数字，可含前导零），成功写回 value。
+bool ParseUint32(std::string_view text, std::uint32_t& value) noexcept {
+    if (text.empty()) {
+        return false;
+    }
+    std::uint64_t acc = 0;
+    for (const char ch : text) {
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+        acc = acc * 10 + static_cast<std::uint32_t>(ch - '0');
+        if (acc > UINT32_MAX) {
+            return false;
+        }
+    }
+    value = static_cast<std::uint32_t>(acc);
+    return true;
 }
 
 common::Error FactsValidationError(std::wstring message) {
@@ -208,6 +228,61 @@ std::string FormatFactsSummary(std::span<const IpcFact> facts) {
         }
     }
     return out; // 防御：不可达（facts 非空时末尾已返回）。
+}
+
+common::Result<void> ValidateFactsV1Schema(std::span<const IpcFact> facts) {
+    if (facts.empty()) {
+        return common::Result<void>::Failure(
+            FactsValidationError(L"Facts 为空（至少需要一条已注册事实）"));
+    }
+    bool hasTotal = false;
+    bool hasAvailable = false;
+    std::uint32_t totalMb = 0;
+    std::uint32_t availableMb = 0;
+    for (const IpcFact& fact : facts) {
+        if (fact.key == "observer") {
+            if (fact.value.empty()) {
+                return common::Result<void>::Failure(
+                    FactsValidationError(L"observer 值不能为空"));
+            }
+            continue;
+        }
+        const bool knownNumeric =
+            fact.key == "client_pid" || fact.key == "memory_total_mb" ||
+            fact.key == "memory_available_mb" ||
+            fact.key == "memory_load_percent";
+        if (!knownNumeric) {
+            return common::Result<void>::Failure(FactsValidationError(
+                L"未知事实键：" +
+                std::wstring(fact.key.begin(), fact.key.end())));
+        }
+        std::uint32_t numeric = 0;
+        if (!ParseUint32(fact.value, numeric)) {
+            return common::Result<void>::Failure(FactsValidationError(
+                L"键 " + std::wstring(fact.key.begin(), fact.key.end()) +
+                L" 的值必须是十进制无符号整数"));
+        }
+        if (fact.key == "memory_total_mb") {
+            if (numeric == 0) {
+                return common::Result<void>::Failure(FactsValidationError(
+                    L"memory_total_mb 必须 >= 1"));
+            }
+            hasTotal = true;
+            totalMb = numeric;
+        } else if (fact.key == "memory_available_mb") {
+            hasAvailable = true;
+            availableMb = numeric;
+        } else if (fact.key == "memory_load_percent" && numeric > 100) {
+            return common::Result<void>::Failure(FactsValidationError(
+                L"memory_load_percent 必须 0..100"));
+        }
+        // client_pid：任意十进制无符号整数（自报仅供参考）。
+    }
+    if (hasTotal && hasAvailable && availableMb > totalMb) {
+        return common::Result<void>::Failure(FactsValidationError(
+            L"memory_available_mb 不能大于 memory_total_mb"));
+    }
+    return common::Result<void>::Success();
 }
 
 } // namespace optimizer::ipc
