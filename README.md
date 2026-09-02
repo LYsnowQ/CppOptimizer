@@ -16,7 +16,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
 - **只读策略决策 + 门禁执行**：`--policy <s> [config.toml]` 消费内存余量与游戏焦点（ProcessWatcher 前台轮询），按 `[policy]` 阈值分级（Comfortable/Adequate/Tight/Critical）并评估规则（无游戏 no_game / 危急仅提示 mem_critical / 后台暂停不优化 game_background / 紧张建议内存维护 mem_tight / 前台余量充足建议优先级提升 prio_boost），附防抖冷却抑制抖动；PWR-002 起，决策经配置门禁落地为 R1 动作（`[priority].enabled` -> 前台游戏提升优先级；`[power].execution_required` -> 游戏运行期持有电源请求），游戏退出自动释放；无配置或门禁关闭时保持纯咨询不产生任何系统修改
 - **R1 局部可逆电源请求**：`--power-lock <s> [execution|display|both] [reason...]` 前台有界持有 Windows Power Request（`execution` 阻止睡眠 / `display` 阻止熄屏），到点自动释放，进程退出时句柄随句柄表关闭、系统侧请求自动取消；Power Request 表达睡眠/显示需求，不承诺锁定 CPU/GPU 频率
 - **R1 局部可逆优先级提升**：`--priority-boost <s> <pid> [config.toml]` 对指定进程临时提升优先级类（等级取自 `[priority].max_level`，默认 AboveNormal，High 需显式配置；realtime 在配置层拒绝），到点条件恢复——仅当进程仍同实例且当前优先级未被外部改动时才恢复原值（不覆盖外部修改）；目标退出视为正常取消
-- **受控优化宿主控制台消费**（SVC-002，批次 4 配套）：`--service console <s> --ipc-facts` 在宿主负载窗口内作为**受保护管道服务端**受理一帧 Agent FactsSnapshot（复用 IPC-001~006 全部契约与裁决），记录客户端身份（pid/会话/用户 SID）与事实摘要并回 Ack（R0 只读、至多一次）；双进程实测（宿主受理 + `--ipc-pipe client` 上报）；服务模式连续受理与跨会话验证属后续切片
+- **受控优化宿主控制台消费**（SVC-002/003，批次 4 配套）：`--service console <s> --ipc-facts` 在宿主负载窗口内作为**受保护管道服务端常驻监听**（`IpcSession.persistentAccept`，实例跨 tick 保持、无监听空窗）连续受理到达的 Agent 客户端（复用 IPC-001~006 全部契约与裁决），逐客户端记录身份（pid/会话/用户 SID）与事实摘要并回 Ack（R0 只读）；实测连续受理两个客户端且均无需重连；同一连接多帧/多实例并发仍属扩展点（[OPT-RESERVE]）
 - **平台诊断**：`--diagnose` Native API 能力探测（只读）
 - **中文环境支持**：面向中文 Windows，内部宽字符（UTF-16）、日志/存储 UTF-8、控制台/日志/错误消息均可承载中文（见工程手册 8.1）
 - **工程基础**：统一错误域模型（`Result<T>` / `Error`）、RAII 资源所有权、C++20、CTest 单元测试
@@ -233,7 +233,7 @@ ctest --preset test-debug
 **当前阶段**：工程基线与只读观测。
 
 - 已完成：统一错误模型、RAII 资源封装、Native API 只读能力探测、内存只读快照与字节格式化、`--observe` 观测窗口聚合与低负载占比、结构化日志器（同步 sink、级别过滤、降级路径）、配置解析与校验（`--config`，toml++）、PDH 只读采样（`--cpu`）、进程生命周期观测（`--watch`，Toolhelp 轮询 + 窗口检测 + PID/创建时间身份）、进程目录（`--list-processes`，路径/窗口/内存详情）、自选进程添加游戏闭环（`--add-game`，规则自动生成 + `config.local.toml` 原子写 + main/local 合并加载）、PolicyEngine 只读决策（`--policy`，压力分级 + 规则评估 + 防抖，`[policy]` 配置节）、PowerLocker 首切片（`--power-lock`，电源请求引用计数状态机 + 可注入后端 + R1 可逆演示）、PriorityBooster 首切片（`--priority-boost`，租约状态机 + 条件恢复 + 可注入后端 + R1 可逆演示）、PolicyEngine 接入执行器（`--policy` 决策经 `[priority]`/`[power]` 门禁落地 R1 动作：前台游戏提升 + 游戏运行期电源请求，游戏退出自动释放，无配置或门禁全关纯咨询）、ServiceHost 首切片（`--service console/install/uninstall` + SCM 入口：控制台/服务双模式宿主、SCM 状态机与安装卸载、可注入后端、R0 只读负载）；
-- 规划中：Agent/Service 运行形态（控制台宿主 -> ServiceHost / Per-user Agent）；ServiceHost 首切片（SVC-001）、受保护 IPC（IPC-001~IPC-006）与 ServiceHost 消费真实 Facts console 首切片（SVC-002，`--service console --ipc-facts`）已落地，token 真实供给、服务模式连续受理（扩展点已标记 [OPT-RESERVE]）与 Agent 实体属后续切片；
+- 规划中：Agent/Service 运行形态（控制台宿主 -> ServiceHost / Per-user Agent）；ServiceHost 首切片（SVC-001）、受保护 IPC（IPC-001~IPC-006）与 ServiceHost 消费真实 Facts（SVC-002 首切片 + SVC-003 连续受理 `--service console --ipc-facts`）已落地，token 真实供给、同一连接多帧/多实例（[OPT-RESERVE]）与 Agent 实体属后续切片；
 - 实验性：内存清理、GPU 心跳、调度调整等模块默认关闭，仅在门禁、测试与审计就绪后评估。
 
 ## 目录结构

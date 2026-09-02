@@ -1150,6 +1150,68 @@ bool TestSessionSidGateDisabledWhenEmpty() {
     return served && served.Value().replyType == IpcMessageType::Ack;
 }
 
+bool TestServePersistentReusesInstanceAcrossClients() {
+    // 持续受理：同一实例连续服务两个客户端，ServeOne 之间不关闭（无监听空窗）。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    IpcSession::Options options;
+    options.persistentAccept = true;
+    IpcSession session(fake, options);
+
+    auto first = session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!first || first.Value().replyType != IpcMessageType::Ack) {
+        return false;
+    }
+    if (fake->closeCount != 0 || fake->disconnectCount != 1) {
+        return false; // 服务结束应断开当前客户端但保留实例
+    }
+    // 第二个客户端（追加帧模拟新连接，fake 以读偏移+断管边界区分）。
+    const auto payload = BytesFromText("CPOPFACTS/1\nobserver=demo");
+    const auto secondFrame =
+        BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
+    fake->incoming.insert(fake->incoming.end(), secondFrame.begin(),
+                          secondFrame.end());
+    auto second =
+        session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    if (!second || second.Value().replyType != IpcMessageType::Ack) {
+        return false;
+    }
+    if (fake->acceptCount != 2 || fake->closeCount != 0) {
+        return false;
+    }
+    session.Close(); // 调用方结束持续会话
+    return fake->closeCount == 1;
+}
+
+bool TestServePersistentAcceptTimeoutKeepsInstance() {
+    // 持续模式接受超时：保留监听实例（返回 ERROR_TIMEOUT，不关闭）。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->failAccept = true;
+    fake->acceptErrorCode = ERROR_TIMEOUT;
+    IpcSession::Options options;
+    options.persistentAccept = true;
+    IpcSession session(fake, options);
+    const auto served =
+        session.ServeOne(nullptr, std::chrono::milliseconds(0));
+    if (served || served.ErrorValue().domain != ErrorDomain::Win32 ||
+        served.ErrorValue().code != ERROR_TIMEOUT || fake->closeCount != 0) {
+        return false;
+    }
+    session.Close();
+    return fake->closeCount == 1;
+}
+
+bool TestServeNonPersistentAcceptTimeoutCloses() {
+    // 默认（非持续）语义不回归：接受超时关闭实例。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->failAccept = true;
+    fake->acceptErrorCode = ERROR_TIMEOUT;
+    IpcSession session(fake);
+    const auto served =
+        session.ServeOne(nullptr, std::chrono::milliseconds(0));
+    return !served && fake->closeCount == 1;
+}
+
 // ---------- 客户端往返（fake 后端） ----------
 
 bool TestServeTokenMatchingAck() {
@@ -1431,6 +1493,12 @@ int wmain() {
     run(L"session sid gate rejects unknown sid", &TestSessionSidGateRejectsUnknownSid);
     run(L"session sid gate rejects mismatch", &TestSessionSidGateRejectsMismatch);
     run(L"session sid gate disabled when empty", &TestSessionSidGateDisabledWhenEmpty);
+    run(L"serve persistent reuses instance across clients",
+        &TestServePersistentReusesInstanceAcrossClients);
+    run(L"serve persistent accept timeout keeps instance",
+        &TestServePersistentAcceptTimeoutKeepsInstance);
+    run(L"serve non persistent accept timeout closes",
+        &TestServeNonPersistentAcceptTimeoutCloses);
     run(L"serve one custom handler", &TestServeOneCustomHandler);
     run(L"serve one bad magic rejected", &TestServeOneBadMagicRejected);
     run(L"serve one unknown version rejected", &TestServeOneUnknownVersionRejected);

@@ -170,6 +170,10 @@ public:
         : pipeName_(std::move(pipeName)) {}
 
     common::Result<void> CreateAndListen() noexcept override {
+        // 幂等：持续受理（SVC-003）下实例已存在则复用，避免关闭重建造成监听空窗。
+        if (pipe_.IsValid()) {
+            return common::Result<void>::Success();
+        }
         Close(); // 防御：清理上次残留
 
         SECURITY_ATTRIBUTES sa{};

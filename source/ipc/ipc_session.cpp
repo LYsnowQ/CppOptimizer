@@ -105,6 +105,10 @@ IpcSession::IpcSession(std::shared_ptr<IpcServerBackend> backend,
                        Options options)
     : backend_(std::move(backend)), options_(options) {}
 
+void IpcSession::Close() noexcept {
+    backend_->Close();
+}
+
 common::Result<void> IpcSession::DefaultClientGate(
     const IpcClientIdentity& client) noexcept {
     if (client.pid == 0) {
@@ -126,21 +130,27 @@ common::Result<void> IpcSession::AllowAllClientGate(
 common::Result<IpcServeResult> IpcSession::ServeOne(
     Handler handler, std::chrono::milliseconds acceptTimeout) {
     auto& backend = *backend_;
-    // 错误应答路径统一收尾：写 Error 帧后先“排空读”等待对端读完（防
-    // DisconnectNamedPipe 竞态——对端读到 233 断管而非错误码），再断开关闭。
-    // 对端已关/超时均视为尽力而为，不阻断主错误上报。
-    const auto drainThenClose = [&backend, this]() {
+    // 统一收尾：错误应答路径先“排空读”等待对端读完 Error 帧（防 Disconnect
+    // 竞态——对端读到 233 断管而非错误码），再断开；最后按 persistentAccept 决定
+    // 是否保留监听实例（SVC-003 连续受理：实例在 ServeOne 调用间隙保持监听，
+    // 消除“每轮重建+空窗”问题）。对端已关/超时均视为尽力而为，不阻断主错误上报。
+    const auto drainAndDisconnect = [&backend, this]() {
         std::array<std::byte, 1> drain{};
         (void)backend.ReadAll(drain, options_.ioTimeout);
         (void)backend.DisconnectClient();
-        backend.Close();
+    };
+    const auto closeUnlessPersistent = [&backend, this]() {
+        if (!options_.persistentAccept) {
+            backend.Close();
+        }
     };
 
     if (auto created = backend.CreateAndListen(); !created) {
         return common::Result<IpcServeResult>::Failure(created.ErrorValue());
     }
     if (auto accepted = backend.AcceptClient(acceptTimeout); !accepted) {
-        backend.Close();
+        // 持续模式接受超时：保留监听实例返回 ERROR_TIMEOUT，由调用方决定继续/结束。
+        closeUnlessPersistent();
         return common::Result<IpcServeResult>::Failure(accepted.ErrorValue());
     }
 
@@ -148,7 +158,9 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
     std::array<std::byte, kIpcHeaderSize> headerBytes{};
     if (auto readHeader = backend.ReadAll(headerBytes, options_.ioTimeout);
         !readHeader) {
-        backend.Close();
+        // 客户端连上即断开/读失败：断开本次连接；持续模式保留监听实例。
+        (void)backend.DisconnectClient();
+        closeUnlessPersistent();
         return common::Result<IpcServeResult>::Failure(
             readHeader.ErrorValue());
     }
@@ -156,7 +168,8 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
     if (!parsedHeader) {
         SendErrorReply(backend, 0, IpcErrorCode::InvalidHeader,
                        options_.ioTimeout);
-        drainThenClose();
+        drainAndDisconnect();
+        closeUnlessPersistent();
         return common::Result<IpcServeResult>::Failure(
             parsedHeader.ErrorValue());
     }
@@ -169,7 +182,7 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
         if (auto readPayload = backend.ReadAll(payload, options_.ioTimeout);
             !readPayload) {
             (void)backend.DisconnectClient();
-            backend.Close();
+            closeUnlessPersistent();
             return common::Result<IpcServeResult>::Failure(
                 readPayload.ErrorValue());
         }
@@ -192,7 +205,8 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
             SendErrorReply(backend, request.requestId,
                            IpcErrorCode::UnauthorizedClient,
                            options_.ioTimeout);
-            drainThenClose();
+            drainAndDisconnect();
+            closeUnlessPersistent();
             return common::Result<IpcServeResult>::Failure(
                 gated.ErrorValue());
         }
@@ -210,7 +224,8 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
             SendErrorReply(backend, request.requestId,
                            IpcErrorCode::UnauthorizedClient,
                            options_.ioTimeout);
-            drainThenClose();
+            drainAndDisconnect();
+            closeUnlessPersistent();
             return common::Result<IpcServeResult>::Failure(
                 common::Error::Validation(
                     "SessionSidGate", L"客户端用户不在授权白名单"));
@@ -229,7 +244,8 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
                        handler ? IpcErrorCode::HandlerFailed
                                : IpcErrorCode::UnsupportedType,
                        options_.ioTimeout);
-        drainThenClose();
+        drainAndDisconnect();
+        closeUnlessPersistent();
         return common::Result<IpcServeResult>::Failure(
             handled.ErrorValue());
     }
@@ -240,7 +256,7 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
             request.requestId));
         !valid) {
         (void)backend.DisconnectClient();
-        backend.Close();
+        closeUnlessPersistent();
         return common::Result<IpcServeResult>::Failure(valid.ErrorValue());
     }
 
@@ -249,18 +265,15 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
             options_.ioTimeout);
         !written) {
         (void)backend.DisconnectClient();
-        backend.Close();
+        closeUnlessPersistent();
         return common::Result<IpcServeResult>::Failure(written.ErrorValue());
     }
 
     // 等待客户端关闭（经典命名管道握手：断开前先确认对端已读完应答，
     // 避免 DisconnectNamedPipe 竞态导致客户端读应答失败）。
     // 0 字节/对端关闭/超时均视为可安全断开（尽力而为，不阻断结果）。
-    std::array<std::byte, 1> drain{};
-    (void)backend.ReadAll(drain, options_.ioTimeout);
-
-    (void)backend.DisconnectClient();
-    backend.Close();
+    drainAndDisconnect();
+    closeUnlessPersistent();
 
     IpcServeResult result;
     result.requestType = request.type;

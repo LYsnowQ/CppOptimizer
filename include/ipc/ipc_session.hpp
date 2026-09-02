@@ -68,9 +68,10 @@ struct IpcClientIdentity {
 //    并断开）-> 用户 SID 授权白名单（配置时）-> 调用处理器 -> 写回应答 -> 断开。
 // 处理器失败 -> Error 应答（失败不伪装成功）。
 // 实例可复用（每轮重新 CreateAndListen/AcceptClient）。
-// [OPT-RESERVE][MOD-IPC-001] 会话仍为“单客户端单帧”：每连接一帧、服务后即断开；
-// 多帧/连续受理/多实例并发（PIPE_UNLIMITED_INSTANCES 已保留）为服务运行形态扩展点
-// （docs/design/modules/10 7.2、Service 端消费切片）
+// persistentAccept（SVC-003 连续受理）：同一管道实例在 ServeOne 之间保持监听，
+// 可连续服务多个客户端（每客户端一帧），由 Close() 结束。
+// [OPT-RESERVE][MOD-IPC-001] 仍剩扩展点：同一连接内多帧/心跳复用、多实例并发
+// （PIPE_UNLIMITED_INSTANCES 已保留）为服务运行形态后续切片
 class IpcSession {
 public:
     // 应用层处理器：根据请求填写应答；返回失败表示拒绝（应答 Error）。
@@ -95,6 +96,11 @@ public:
         std::chrono::milliseconds ioTimeout =
             std::chrono::milliseconds(3000); // 单次读/写超时
         ClientGate clientGate = DefaultClientGate; // 身份裁决（默认启用）
+        // 连续受理（SVC-003）：开启后同一管道实例跨 ServeOne 保持监听——上一客户端
+        // 服务完仅断开不释放，下一次 ServeOne 直接等待新客户端，调用间隙无监听空窗；
+        // 接受超时返回 ERROR_TIMEOUT 且不关闭实例；结束由调用方调 Close()。
+        // 默认 false 保持 IPC-001~006 的“单次服务即释放”语义。
+        bool persistentAccept = false;
         // 客户端用户 SID 授权白名单（IPC-006）：非空时要求客户端 SID（传输层
         // 访问令牌只读查询）大小写不敏感命中其一，否则回 Error(UnauthorizedClient)
         // 并断开。为空表示不启用 SID 授权（兼容 IPC-004/005 行为）。
@@ -110,9 +116,13 @@ public:
     explicit IpcSession(std::shared_ptr<IpcServerBackend> backend,
                         Options options = {});
 
+    // 释放管道实例（幂等）。persistentAccept 会话结束（窗口到期/停止）时调用；
+    // 非持续模式每次 ServeOne 已自行释放，此处为空操作（防御性）。
+    void Close() noexcept;
+
     // 服务至多一个客户端的一帧。acceptTimeout 到期无客户端 -> ERROR_TIMEOUT；
     // 帧非法/身份裁决拒绝/处理器失败/传输失败 -> 对应错误（已发出 Error 应答的
-    // 路径一并上报）。
+    // 路径一并上报）。persistentAccept 时实例跨调用保持，可反复调用以服务多个客户端。
     [[nodiscard]] common::Result<IpcServeResult> ServeOne(
         Handler handler, std::chrono::milliseconds acceptTimeout);
 

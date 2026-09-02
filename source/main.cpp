@@ -1172,22 +1172,24 @@ constexpr wchar_t kServiceDescription[] =
     L"CppOptimizer 只读观测与受控优化宿主（R0 负载）";
 
 // 服务宿主负载状态：R0 只读观测（每 tick 一次内存快照 + Info 日志），可选
-// “受保护管道事实消费”（SVC-002，仅 console demo 启用）：在负载窗口内作为 IPC
-// 服务端至多受理一个客户端一帧 FactsSnapshot 并记录身份/摘要。
+// “受保护管道事实消费”（SVC-002/003，仅 console demo 启用）：作为 IPC 服务端
+// 常驻监听（persistentAccept），窗口内连续受理到达的 Agent 客户端（每客户端一帧
+// FactsSnapshot）并记录身份/摘要。
 // 服务模式不接受临时危险命令（docs/23 第 3 节），本负载不产生任何系统修改。
 struct ServiceHostDemoState {
     optimizer::logger::Logger logger;
     std::size_t tickCount = 0;
 
-    // IPC 事实消费（SVC-002）：
-    bool ipcEnabled = false;       // console demo 经 --ipc-facts 开启
-    std::wstring ipcPipeName;      // 受保护管道名
-    bool ipcServedOnce = false;    // 窗口内至多消费一次
-    std::wstring ipcClientIdentity; // 已受理客户端“pid/session”文本（供窗口汇总输出）
-    std::size_t ipcPayloadBytes = 0;
-    std::size_t ipcFactCount = 0;   // 已受理 FactsSnapshot 解析出的事实条数
-    bool ipcReplyAck = false;       // 是否回 Ack（false = Error 回执）
-    std::string ipcFactSummary;     // 解析后摘要（ASCII；由服务端日志记录）
+    // IPC 事实消费（SVC-002/003）：
+    bool ipcEnabled = false;                      // console demo 经 --ipc-facts 开启
+    std::wstring ipcPipeName;                     // 受保护管道名
+    std::shared_ptr<optimizer::ipc::IpcSession> ipcSession; // 常驻监听会话
+    std::size_t ipcClientsServed = 0;             // 窗口内已受理客户端数
+    std::wstring ipcLastIdentity;                 // 最近受理客户端“pid/session/user”
+    std::size_t ipcLastPayloadBytes = 0;
+    std::size_t ipcLastFactCount = 0;
+    bool ipcLastReplyAck = false;                 // 最近一次是否回 Ack
+    std::string ipcLastFactSummary;               // 最近受理解析摘要（ASCII）
 };
 
 optimizer::common::Result<void> ServiceWorkloadTick(
@@ -1204,12 +1206,9 @@ optimizer::common::Result<void> ServiceWorkloadTick(
         std::to_wstring(s.memoryLoadPercent) + L"%";
     state.logger.Write(optimizer::logger::LogLevel::Info, L"service", message);
 
-    // SVC-002：受保护管道事实消费（--ipc-facts；窗口内至多受理一帧）。
-    if (state.ipcEnabled && !state.ipcServedOnce) {
-        auto ipcBackend =
-            optimizer::ipc::CreateWin32ServerBackend(state.ipcPipeName);
-        optimizer::ipc::IpcSession ipcSession(ipcBackend);
-        auto served = ipcSession.ServeOne(
+    // SVC-002/003：受保护管道事实消费（--ipc-facts；常驻监听连续受理多客户端）。
+    if (state.ipcEnabled && state.ipcSession) {
+        auto served = state.ipcSession->ServeOne(
             [&state](const optimizer::ipc::IpcRequest& request,
                      optimizer::ipc::IpcReply& reply) {
                 // 默认处理语义；另在受理侧记录解析摘要（R0 只读，不执行任何动作）。
@@ -1220,12 +1219,12 @@ optimizer::common::Result<void> ServiceWorkloadTick(
                     if (auto parsed =
                             optimizer::ipc::ParseFactsV1(request.payload);
                         parsed) {
-                        state.ipcFactSummary =
+                        state.ipcLastFactSummary =
                             optimizer::ipc::FormatFactsSummary(parsed.Value());
-                        state.ipcFactCount = parsed.Value().size();
+                        state.ipcLastFactCount = parsed.Value().size();
                     } else {
-                        state.ipcFactSummary.clear();
-                        state.ipcFactCount = 0;
+                        state.ipcLastFactSummary.clear();
+                        state.ipcLastFactCount = 0;
                     }
                 }
                 return handled;
@@ -1241,9 +1240,9 @@ optimizer::common::Result<void> ServiceWorkloadTick(
             return optimizer::common::Result<void>::Failure(error);
         }
         const auto& result = served.Value();
-        state.ipcServedOnce = true;
-        state.ipcPayloadBytes = result.payloadBytes;
-        state.ipcReplyAck =
+        ++state.ipcClientsServed;
+        state.ipcLastPayloadBytes = result.payloadBytes;
+        state.ipcLastReplyAck =
             result.replyType == optimizer::ipc::IpcMessageType::Ack;
         std::wstring identity =
             L"pid " + std::to_wstring(result.clientPid) + L", session " +
@@ -1251,15 +1250,16 @@ optimizer::common::Result<void> ServiceWorkloadTick(
         if (!result.clientUserSid.empty()) {
             identity += L", user " + result.clientUserSid;
         }
-        state.ipcClientIdentity = identity;
+        state.ipcLastIdentity = identity;
         std::wstring servedMessage =
-            L"ipc  : consumed 1 frame from " + identity +
+            L"ipc  : client #" +
+            std::to_wstring(state.ipcClientsServed) + L" from " + identity +
             (result.replyType == optimizer::ipc::IpcMessageType::Ack
                  ? L" (ack)"
                  : L" (error reply)");
-        if (state.ipcFactCount > 0) {
+        if (state.ipcLastFactCount > 0) {
             servedMessage +=
-                L" facts=" + std::to_wstring(state.ipcFactCount);
+                L" facts=" + std::to_wstring(state.ipcLastFactCount);
         }
         state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
                            servedMessage);
@@ -1308,6 +1308,11 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         state.ipcEnabled = true;
         state.ipcPipeName =
             L"\\\\.\\pipe\\CppOptimizerIpc"; // 与 --ipc-pipe 默认管道同名
+        optimizer::ipc::IpcSession::Options ipcOptions;
+        ipcOptions.persistentAccept = true; // 常驻监听：窗口内连续受理多客户端
+        state.ipcSession = std::make_shared<optimizer::ipc::IpcSession>(
+            optimizer::ipc::CreateWin32ServerBackend(state.ipcPipeName),
+            ipcOptions);
     }
     optimizer::service::ServiceHost::Options options;
     options.identity.name = kServiceName;
@@ -1325,11 +1330,14 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         L"  workload : memory snapshot + info log (read-only)");
     if (ipcFacts) {
         optimizer::common::WriteConsoleLine(
-            L"             + protected-pipe facts consume (one Agent frame)");
+            L"             + protected-pipe facts consume (continuous, R0)");
         optimizer::common::WriteConsoleLine(L"  ipc      : pipe \\\\.\\pipe\\CppOptimizerIpc");
     }
     optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
     const auto result = host.RunConsole(std::chrono::seconds(seconds));
+    if (state.ipcSession) {
+        state.ipcSession->Close(); // 结束常驻监听会话（幂等）
+    }
     if (!result) {
         const auto& error = result.ErrorValue();
         std::wostringstream err;
@@ -1344,12 +1352,13 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     optimizer::common::WriteConsoleLine(ticksLine.str());
     if (state.ipcEnabled) {
         std::wostringstream ipcLine;
-        if (state.ipcServedOnce) {
-            ipcLine << L"  ipc      : served 1 frame from "
-                    << state.ipcClientIdentity << L", payload "
-                    << state.ipcPayloadBytes << L" bytes, "
-                    << state.ipcFactCount << L" facts, reply "
-                    << (state.ipcReplyAck ? L"ack" : L"error");
+        if (state.ipcClientsServed > 0) {
+            ipcLine << L"  ipc      : served " << state.ipcClientsServed
+                    << L" client(s); last from " << state.ipcLastIdentity
+                    << L", payload " << state.ipcLastPayloadBytes
+                    << L" bytes, " << state.ipcLastFactCount
+                    << L" facts, reply "
+                    << (state.ipcLastReplyAck ? L"ack" : L"error");
         } else {
             ipcLine << L"  ipc      : no Agent connected within window";
         }
