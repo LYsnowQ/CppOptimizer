@@ -717,4 +717,77 @@ common::Result<IpcConcurrentSummary> RunConcurrentServer(
         std::move(shared->summary));
 }
 
+common::Result<IpcPeriodicReportSummary> RunPeriodicReporter(
+    std::shared_ptr<IpcClientBackend> backend,
+    const IpcPeriodicReportOptions& options,
+    const std::function<common::Result<IpcFrameRequest>()>& requestFactory) {
+    if (options.window.count() <= 0 || options.interval.count() <= 0 ||
+        options.ioTimeout.count() <= 0 || options.maxConnectAttempts == 0) {
+        return common::Result<IpcPeriodicReportSummary>::Failure(
+            common::Error::Validation(
+                "RunPeriodicReporter",
+                L"window/interval/ioTimeout 必须为正且 maxConnectAttempts>0"));
+    }
+    if (!requestFactory) {
+        return common::Result<IpcPeriodicReportSummary>::Failure(
+            common::Error::Validation(
+                "RunPeriodicReporter", L"requestFactory 不能为空"));
+    }
+
+    IpcPeriodicReportSummary summary;
+    const auto deadline = std::chrono::steady_clock::now() + options.window;
+    auto nextSlot = std::chrono::steady_clock::now();
+    for (;;) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            break; // 窗口到期必然返回（有界）
+        }
+        if (now < nextSlot) {
+            std::this_thread::sleep_for(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    nextSlot - now));
+            continue;
+        }
+        // 生成本次上报帧（每帧独立真实观测；requestId 由调用方递增）。
+        auto request = requestFactory();
+        if (!request) {
+            return common::Result<IpcPeriodicReportSummary>::Failure(
+                request.ErrorValue()); // 采样失败：致命，原样上报
+        }
+        bool delivered = false;
+        for (std::size_t attempt = 0; attempt < options.maxConnectAttempts;
+             ++attempt) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+            auto reply = IpcRoundTrip(
+                backend, options.pipePath, request.Value().type,
+                request.Value().payload, request.Value().requestId,
+                options.ioTimeout);
+            if (reply) {
+                ++summary.reportsSent;
+                summary.lastReplyAck =
+                    reply.Value().type == IpcMessageType::Ack;
+                delivered = true;
+                break;
+            }
+            // 连接/传输失败（宿主离线/Safe Mode 暂停/被拒）：退避后重试本周期。
+            if (attempt + 1 < options.maxConnectAttempts) {
+                std::this_thread::sleep_for(options.reconnectBackoff);
+            }
+        }
+        if (!delivered) {
+            ++summary.connectFailures; // 可恢复失败：继续下一周期
+        }
+        nextSlot += options.interval;
+        // 追赶保护：周期执行过慢时以“当前 + interval”对齐，避免突发密集上报。
+        if (nextSlot <= std::chrono::steady_clock::now()) {
+            nextSlot = std::chrono::steady_clock::now() + options.interval;
+        }
+    }
+    backend->Close();
+    return common::Result<IpcPeriodicReportSummary>::Success(
+        std::move(summary));
+}
+
 } // namespace optimizer::ipc

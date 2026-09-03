@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -43,6 +44,8 @@ using optimizer::ipc::IpcSession;
 using optimizer::ipc::IpcSessionEndReason;
 using optimizer::ipc::IpcClientVerdict;
 using optimizer::ipc::IpcFrameRequest;
+using optimizer::ipc::IpcPeriodicReportOptions;
+using optimizer::ipc::RunPeriodicReporter;
 using optimizer::ipc::RunConcurrentServer;
 using optimizer::ipc::kIpcHeaderSize;
 using optimizer::ipc::kIpcMagic;
@@ -176,6 +179,8 @@ public:
     bool failWrite = false;
     bool failRead = false;
     std::uint32_t failCode = ERROR_ACCESS_DENIED;
+    std::size_t connectCount = 0;          // 已调用 Connect 的次数（含失败尝试）
+    std::size_t failConnectCountdown = 0;  // 前 N 次 Connect 强制失败（随后恢复）
 
     std::wstring connectedPath;
     std::vector<std::byte> incoming; // 应答帧
@@ -185,6 +190,12 @@ public:
 
     Result<void> Connect(std::wstring_view pipePath,
                          std::chrono::milliseconds) override {
+        ++connectCount;
+        if (failConnectCountdown != 0) {
+            --failConnectCountdown;
+            return Result<void>::Failure(
+                Error::FromWin32(failCode, "Connect"));
+        }
         if (failConnect) {
             return Result<void>::Failure(Error::FromWin32(failCode, "Connect"));
         }
@@ -2077,6 +2088,107 @@ bool TestConcurrentInstancesServeTwoClients() {
     return clientA && clientB && firstOk && secondOk;
 }
 
+// ---------- 周期上报客户端（IPC-011，RunPeriodicReporter） ----------
+
+// 构造一个“递增 requestId 的 Ping 帧”工厂（与运行器解耦的纯调用方）。
+std::function<Result<IpcFrameRequest>()> PingRequestFactory(
+    std::uint32_t& nextId) {
+    return [&nextId]() -> Result<IpcFrameRequest> {
+        IpcFrameRequest request;
+        request.type = IpcMessageType::Ping;
+        request.requestId = ++nextId;
+        return Result<IpcFrameRequest>::Success(std::move(request));
+    };
+}
+
+bool TestPeriodicReporterHappyAcks() {
+    // 宿主在线：窗口内多个周期全部收到配对应答（每周期独立连接）。
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    for (int i = 1; i <= 12; ++i) {
+        const auto ack = BuildFrame(IpcMessageType::Ack, i, {});
+        fake->incoming.insert(fake->incoming.end(), ack.begin(), ack.end());
+    }
+    std::uint32_t nextId = 0;
+    IpcPeriodicReportOptions options;
+    options.pipePath = L"\\.\\pipe\\test";
+    options.window = std::chrono::milliseconds(150);
+    options.interval = std::chrono::milliseconds(15);
+    options.ioTimeout = std::chrono::milliseconds(100);
+    options.maxConnectAttempts = 2;
+    options.reconnectBackoff = std::chrono::milliseconds(1);
+    const auto result = RunPeriodicReporter(
+        fake, options, PingRequestFactory(nextId));
+    if (!result || result.Value().reportsSent < 1 ||
+        result.Value().connectFailures != 0 ||
+        !result.Value().lastReplyAck) {
+        return false;
+    }
+    return fake->closed; // 窗口结束关闭连接
+}
+
+bool TestPeriodicReporterHostOffline() {
+    // 宿主不可达（连接失败）：可恢复失败计数、0 上报，窗口到期正常返回。
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    fake->failConnect = true;
+    fake->failCode = ERROR_FILE_NOT_FOUND;
+    std::uint32_t nextId = 0;
+    IpcPeriodicReportOptions options;
+    options.pipePath = L"\\.\\pipe\\test";
+    options.window = std::chrono::milliseconds(120);
+    options.interval = std::chrono::milliseconds(15);
+    options.ioTimeout = std::chrono::milliseconds(100);
+    options.maxConnectAttempts = 2;
+    options.reconnectBackoff = std::chrono::milliseconds(1);
+    const auto result = RunPeriodicReporter(
+        fake, options, PingRequestFactory(nextId));
+    return result && result.Value().reportsSent == 0 &&
+           result.Value().connectFailures >= 1;
+}
+
+bool TestPeriodicReporterSampleFailureIsFatal() {
+    // 采样失败（requestFactory 失败）为致命：原样上报并停止，不发起连接。
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    std::uint32_t calls = 0;
+    const auto badFactory = [&calls]() -> Result<IpcFrameRequest> {
+        ++calls;
+        return Result<IpcFrameRequest>::Failure(
+            Error::Validation("agent", L"采样失败"));
+    };
+    IpcPeriodicReportOptions options;
+    options.pipePath = L"\\.\\pipe\\test";
+    options.window = std::chrono::milliseconds(5000);
+    options.interval = std::chrono::milliseconds(1000);
+    const auto result = RunPeriodicReporter(fake, options, badFactory);
+    return !result && result.ErrorValue().domain == ErrorDomain::Validation &&
+           calls == 1 && fake->connectCount == 0;
+}
+
+bool TestPeriodicReporterBoundedRetryRecovers() {
+    // 单次上报的前 N 次连接失败后按上限重试成功：0 connect failures、有上报。
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    fake->failConnectCountdown = 2; // 头两次连接失败（宿主暂不可达），随后恢复
+    for (int i = 1; i <= 20; ++i) {
+        const auto ack = BuildFrame(IpcMessageType::Ack, i, {});
+        fake->incoming.insert(fake->incoming.end(), ack.begin(), ack.end());
+    }
+    std::uint32_t nextId = 0;
+    IpcPeriodicReportOptions options;
+    options.pipePath = L"\\.\\pipe\\test";
+    options.window = std::chrono::milliseconds(150);
+    options.interval = std::chrono::milliseconds(15);
+    options.ioTimeout = std::chrono::milliseconds(100);
+    options.maxConnectAttempts = 3;
+    options.reconnectBackoff = std::chrono::milliseconds(1);
+    const auto result = RunPeriodicReporter(
+        fake, options, PingRequestFactory(nextId));
+    if (!result || result.Value().reportsSent < 1 ||
+        result.Value().connectFailures != 0) {
+        return false;
+    }
+    // 有界重试：发生过多次连接尝试（首周期两次失败 + 第三次成功）。
+    return fake->connectCount >= 3;
+}
+
 } // namespace
 
 int wmain() {
@@ -2229,5 +2341,11 @@ int wmain() {
         &TestRunConcurrentServesClientSession);
     run(L"concurrent instances serve two clients",
         &TestConcurrentInstancesServeTwoClients);
+    run(L"periodic reporter happy acks", &TestPeriodicReporterHappyAcks);
+    run(L"periodic reporter host offline", &TestPeriodicReporterHostOffline);
+    run(L"periodic reporter sample failure is fatal",
+        &TestPeriodicReporterSampleFailureIsFatal);
+    run(L"periodic reporter bounded retry recovers",
+        &TestPeriodicReporterBoundedRetryRecovers);
     return failed == 0 ? 0 : 1;
 }

@@ -1587,7 +1587,8 @@ std::wstring FindIpcSuffix(int argc, wchar_t* argv[], int start) noexcept {
                                   arg == L"--ipc-allow-user" ||
                                   arg == L"--session" ||
                                   arg == L"--frames" ||
-                                  arg == L"--instances";
+                                  arg == L"--instances" ||
+                                  arg == L"--interval-ms";
         if (!skipNextValue && isOptionFlag) {
             skipNextValue = true;
             continue;
@@ -1613,7 +1614,8 @@ bool HasIpcSessionFlag(int argc, wchar_t* argv[], int start) noexcept {
                                      arg == L"--ipc-token-file" ||
                                      arg == L"--ipc-allow-user" ||
                                      arg == L"--frames" ||
-                                     arg == L"--instances";
+                                     arg == L"--instances" ||
+                                     arg == L"--interval-ms";
         if (!skipNextValue && optionWithValue) {
             skipNextValue = true;
             continue;
@@ -1659,6 +1661,20 @@ std::uint32_t FindIpcInstances(int argc, wchar_t* argv[], int start) noexcept {
     return 1;
 }
 
+// 读取 --interval-ms <n>（Agent 上报周期毫秒）；缺省 1000。解析失败返回 0（调用方校验）。
+std::uint32_t FindIpcIntervalMs(int argc, wchar_t* argv[], int start) noexcept {
+    for (int i = start; i + 1 < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--interval-ms") {
+            std::uint32_t interval = 0;
+            if (!ParseUint32(argv[i + 1], interval)) {
+                return 0;
+            }
+            return interval;
+        }
+    }
+    return 1000;
+}
+
 // 扫描 --ipc-token <值>（IPC-005 demo：共享会话凭据）。返回是否存在；
 // 值写入 out（调用方随后校验字符集/长度，且不打印明文）。
 bool FindIpcToken(int argc, wchar_t* argv[], int start,
@@ -1701,6 +1717,142 @@ std::optional<std::filesystem::path> FindIpcTokenFile(
         }
     }
     return std::nullopt;
+}
+
+int RunAgentCommand(int argc, wchar_t* argv[]) {
+    // --agent run <s> [suffix] [--interval-ms <n>] [--ipc-token <t>]
+    //   [--ipc-token-file [<path>]]：Agent 运行实体演示（IPC-011，前台有界、周期上报）。
+    // 在 s 秒窗口内每 interval 毫秒采集一次真实内存观测并经受保护命名管道上报
+    // FactsSnapshot（每次独立连接：请求-应答配对；宿主离线/Safe Mode 暂停等连接失败
+    // 有界重试与退避，计入 connect failures 后继续；窗口到期返回汇总）。
+    constexpr std::uint32_t kMaxSeconds = 60;
+    std::uint32_t seconds = 0;
+    if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
+        seconds > kMaxSeconds) {
+        std::wcerr << L"  --agent run seconds must be in 1.." << kMaxSeconds
+                   << L"\n";
+        return 2;
+    }
+    const std::wstring suffix = FindIpcSuffix(argc, argv, 4);
+    const std::wstring pipeName = IpcPipeName(suffix);
+    if (pipeName.empty()) {
+        std::wcerr << L"  --agent suffix must be ASCII letters/digits/-/_\n";
+        return 2;
+    }
+    const std::uint32_t intervalMs = FindIpcIntervalMs(argc, argv, 4);
+    if (intervalMs == 0 || intervalMs < 50 || intervalMs > 10000) {
+        std::wcerr << L"  --interval-ms must be in 50..10000\n";
+        return 2;
+    }
+    std::wstring token;
+    bool hasToken = false;
+    if (FindIpcToken(argc, argv, 4, token)) {
+        if (!IsValidIpcToken(token)) {
+            std::wcerr
+                << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
+            return 2;
+        }
+        hasToken = true;
+    }
+    if (auto tokenFile = FindIpcTokenFile(argc, argv, 4)) {
+        auto stored = optimizer::ipc::ReadAgentTokenFile(*tokenFile);
+        if (!stored) {
+            std::wcerr << L"  --ipc-token-file unreadable; run "
+                          L"--ipc-credential provision first\n";
+            return 2;
+        }
+        token = stored.Value();
+        hasToken = true;
+    }
+
+    // 每周期构造一帧真实内存事实（QueryMemoryStatus 只读；可选 agent_token 凭据，
+    // 不回显明文）。requestId 单调递增，重试沿用当次 id（与应答配对）。
+    std::uint32_t nextRequestId = 0;
+    const auto buildRequest =
+        [&]() -> optimizer::common::Result<optimizer::ipc::IpcFrameRequest> {
+        auto memoryStatus = optimizer::memory::QueryMemoryStatus();
+        if (!memoryStatus) {
+            return optimizer::common::Result<
+                optimizer::ipc::IpcFrameRequest>::Failure(
+                memoryStatus.ErrorValue());
+        }
+        const auto& memory = memoryStatus.Value();
+        std::vector<optimizer::ipc::IpcFact> facts;
+        facts.push_back(optimizer::ipc::IpcFact{
+            "client_pid", std::to_string(::GetCurrentProcessId())});
+        facts.push_back(optimizer::ipc::IpcFact{
+            "memory_total_mb",
+            std::to_string(memory.totalPhysicalBytes / (1024 * 1024))});
+        facts.push_back(optimizer::ipc::IpcFact{
+            "memory_available_mb",
+            std::to_string(memory.availablePhysicalBytes / (1024 * 1024))});
+        facts.push_back(optimizer::ipc::IpcFact{
+            "memory_load_percent",
+            std::to_string(memory.memoryLoadPercent)});
+        facts.push_back(
+            optimizer::ipc::IpcFact{"observer", "CppOptimizer agent demo"});
+        if (hasToken) {
+            std::string narrowToken;
+            narrowToken.reserve(token.size());
+            for (const wchar_t ch : token) {
+                narrowToken.push_back(static_cast<char>(ch));
+            }
+            facts.push_back(optimizer::ipc::IpcFact{
+                std::string(optimizer::ipc::kFactsTokenKey), narrowToken});
+        }
+        auto encoded = optimizer::ipc::SerializeFactsV1(facts);
+        if (!encoded) {
+            return optimizer::common::Result<
+                optimizer::ipc::IpcFrameRequest>::Failure(
+                encoded.ErrorValue());
+        }
+        optimizer::ipc::IpcFrameRequest request;
+        request.type = optimizer::ipc::IpcMessageType::FactsSnapshot;
+        request.requestId = ++nextRequestId;
+        request.payload = std::move(encoded).Value();
+        return optimizer::common::Result<
+            optimizer::ipc::IpcFrameRequest>::Success(std::move(request));
+    };
+
+    optimizer::ipc::IpcPeriodicReportOptions reportOptions;
+    reportOptions.pipePath = pipeName;
+    reportOptions.window = std::chrono::milliseconds(seconds) * 1000;
+    reportOptions.interval = std::chrono::milliseconds(intervalMs);
+    reportOptions.ioTimeout = std::chrono::milliseconds(3000);
+    reportOptions.maxConnectAttempts = 3;
+    reportOptions.reconnectBackoff = std::chrono::milliseconds(300);
+
+    std::wcout << L"Agent (periodic reporter, foreground bounded, " << seconds
+               << L" s)\n";
+    std::wcout << L"  pipe     : " << pipeName << L"\n";
+    std::wcout << L"  report   : every " << intervalMs
+               << L" ms, up to 3 connect attempts per report\n";
+    if (hasToken) {
+        std::wcout << L"  auth     : session token supplied (hidden)\n";
+    }
+
+    auto backend = optimizer::ipc::CreateWin32ClientBackend();
+    auto result = optimizer::ipc::RunPeriodicReporter(backend, reportOptions,
+                                                      buildRequest);
+    if (!result) {
+        const auto& error = result.ErrorValue();
+        std::wcerr << L"  agent run failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+    const auto& summary = result.Value();
+    std::wcout << L"  summary  : sent " << summary.reportsSent
+               << L" report(s), connect failures " << summary.connectFailures
+               << L"\n";
+    if (summary.reportsSent == 0) {
+        std::wcout << L"  -> host unreachable within window (offline / Safe Mode\n"
+                      L"     pause / rejected); agent stays bounded and exits\n";
+    } else {
+        std::wcout << L"  last ack : " << (summary.lastReplyAck ? L"yes" : L"no")
+                   << L"\n";
+    }
+    return 0;
 }
 
 int RunIpcCredentialCommand(int argc, wchar_t* argv[]) {
@@ -2183,6 +2335,13 @@ void PrintUsage() {
         << L"                             failures pause intake for 2 s)\n"
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
+        << L"  CppOptimizer.exe --agent run <s> [suffix] [--interval-ms <50..10000>]\n"
+        << L"                             [--ipc-token <t>] [--ipc-token-file [<path>]]\n"
+        << L"                             Agent reporter (foreground, bounded): every\n"
+        << L"                             interval ms collect real memory facts and\n"
+        << L"                             report over the protected pipe for 1..60 s;\n"
+        << L"                             bounded connect retries/backoff per report;\n"
+        << L"                             optional session token; window-summary output\n"
         << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix] [--session]\n"
         << L"                             [--instances <1..8>] [--ipc-token <t>]\n"
         << L"                             Protected pipe server for 1..60 s: serve one\n"
@@ -2277,6 +2436,13 @@ int wmain(int argc, wchar_t* argv[]) {
                 case optimizer::service::RunMode::Uninstall:
                     return RunServiceUninstallCommand();
             }
+        }
+        if (argc >= 3 && std::wstring_view(argv[1]) == L"--agent") {
+            if (std::wstring_view(argv[2]) != L"run") {
+                std::wcerr << L"  --agent requires run\n";
+                return 2;
+            }
+            return RunAgentCommand(argc, argv);
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--ipc-pipe") {
             if (std::wstring_view(argv[2]) == L"server") {

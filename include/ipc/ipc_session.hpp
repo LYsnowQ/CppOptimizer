@@ -238,4 +238,31 @@ struct IpcConcurrentSummary {
     std::chrono::milliseconds frameIdle, IpcSession::Handler handler,
     const std::function<std::shared_ptr<IpcSession>()>& sessionFactory);
 
+// 周期上报客户端（Agent 运行实体，IPC-011）：在 window 窗口内按 interval 周期调用
+// requestFactory 生成一帧请求（每帧独立真实观测、requestId 递增），经受保护管道上报并
+// 校验应答（复用 IpcRoundTrip：requestId 配对、Error 应答不伪装）。每次上报至多尝试
+// maxConnectAttempts 次连接/传输，尝试间按 reconnectBackoff 退避；连接/传输失败属可恢复
+// （宿主离线/Safe Mode 暂停受理），计入 connectFailures 并继续下一周期；采样失败
+// （requestFactory 返回失败）为致命，原样上报并停止。窗口到期必然返回（有界重连，不无限
+// 重试），汇总报告数/失败数。backend 复用跨周期（Connect 可重入）。
+struct IpcPeriodicReportOptions {
+    std::wstring pipePath;      // 受保护管道名
+    std::chrono::milliseconds window = std::chrono::milliseconds(0);
+    std::chrono::milliseconds interval = std::chrono::milliseconds(1000);
+    std::chrono::milliseconds ioTimeout = std::chrono::milliseconds(3000);
+    std::size_t maxConnectAttempts = 3;  // 单次上报的连接/传输尝试上限
+    std::chrono::milliseconds reconnectBackoff = std::chrono::milliseconds(300);
+};
+
+struct IpcPeriodicReportSummary {
+    std::size_t reportsSent = 0;      // 成功上报（收到应答）数
+    std::size_t connectFailures = 0;  // 因连接/传输失败放弃的上报次数（可恢复）
+    bool lastReplyAck = false;        // 最近一次应答是否为 Ack
+};
+
+[[nodiscard]] common::Result<IpcPeriodicReportSummary> RunPeriodicReporter(
+    std::shared_ptr<IpcClientBackend> backend,
+    const IpcPeriodicReportOptions& options,
+    const std::function<common::Result<IpcFrameRequest>()>& requestFactory);
+
 } // namespace optimizer::ipc
