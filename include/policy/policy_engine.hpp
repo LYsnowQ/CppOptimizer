@@ -73,7 +73,7 @@ struct PolicyInput {
 // 策略决策输出。v1 全部为只读咨询:
 // - reasonCode 为机器可读原因码(如 "mem_tight"),reason 为可读说明;
 // - ttlMs 为建议有效时长(= 防抖冷却期),仅动作决策非零,NoOp 为零;
-// - 决策绝不触发任何系统修改(执行器在后续批次实现)。
+// - 决策绝不触发任何系统修改(执行器在后续阶段实现)。
 struct PolicyDecision {
     PolicyAction action = PolicyAction::NoOp;
     std::string gameId;

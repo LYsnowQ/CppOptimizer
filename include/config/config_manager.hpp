@@ -41,8 +41,8 @@ struct LayerConfig {
 struct PowerConfig {
     bool executionRequired = true;
     bool displayRequired = false;
-    // [OPT-RESERVE][MOD-PWR-001] switchPowerScheme 已解析未消费：R2 危险开关，
-    // 全局电源计划切换由 PowerSchemeController（docs/design/modules/08）实现时消费
+    // switchPowerScheme 已解析未消费：R2 危险开关，全局电源计划切换待独立能力
+    // （PowerSchemeController）实现后消费
     bool switchPowerScheme = false; // R2：默认关闭
 };
 
@@ -78,8 +78,7 @@ struct GameConfig {
     std::string id;
     std::string displayName;
     std::vector<std::string> processNames;
-    // [OPT-GAP][MOD-PRC-001] windowTitleContains 已解析未消费：窗口标题匹配策略
-    // （docs/design/modules/05 4.2）实现时参与规则过滤
+    // windowTitleContains 已解析未消费：窗口标题参与规则过滤属后续匹配策略
     std::string windowTitleContains;
     bool pauseWhenBackground = true;
 };
@@ -103,11 +102,10 @@ struct LoggingConfig {
 // [memory] 节。危险开关默认 false，配置不得自动打开 R2/R3 能力。
 struct MemoryConfig {
     bool queryEnabled = true;
-    // [OPT-RESERVE][MOD-MEM-001] scheduledCleanEnabled 已解析未消费：R2 危险开关，
-    // MemoryTuner 清理能力（Experimental，docs/design/modules/04）门禁就绪后消费
+    // scheduledCleanEnabled 已解析未消费：R2 危险开关，MemoryTuner 清理能力
+    // （Experimental）门禁就绪后消费
     bool scheduledCleanEnabled = false; // R2：默认关闭
-    // [OPT-RESERVE][MOD-MEM-001] allowNativeWrite 已解析未消费：R3 预留，
-    // Native 写能力评审（docs/20）后消费
+    // allowNativeWrite 已解析未消费：R3 预留，Native 写能力经安全评审后消费
     bool allowNativeWrite = false;      // R3：默认关闭
     CleanLevel maxCleanLevel = CleanLevel::Light;
 };

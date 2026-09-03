@@ -1,3 +1,3 @@
-# 空骨架占位（目录未实现）
+# 预留占位（模块尚未实施）
 
-[OPT-RESERVE][MOD-GPU-001] gpu 模块目录：见 docs/design/modules/09-module-gpu-heartbeat.md，按规划实施时填充
+gpu（GPU 心跳）目录保留模块位；实施时以真实代码文件替换本占位。

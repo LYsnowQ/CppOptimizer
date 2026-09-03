@@ -9,8 +9,7 @@ namespace optimizer::ipc {
 
 // IPC-007：agent_token 真实供给（替换 IPC-005 的 demo 明文传参）。
 //
-// 设计（docs/23 第 5 节“校验客户端 token”；信任边界：Agent 与 Service 同机互信，
-// 本切片供给“按用户私有”的共享秘密）：
+// 设计（信任边界：Agent 与 Service 同机互信，本实现供给“按用户私有”的共享秘密）：
 //   - token = 32 位 [A-Za-z0-9] 随机串（一次生成），写入用户私有文件
 //     %LOCALAPPDATA%\CppOptimizer\ipc_agent_token；
 //   - 文件显式 DACL：仅 SYSTEM 与当前用户（保护 DACL 不继承、不放行 Everyone/
@@ -20,8 +19,8 @@ namespace optimizer::ipc {
 //   - 不提供“打印 token”接口（防泄漏）；Provision 幂等（已存在即失败），
 //     轮换用 force（重写为新随机串）。
 //
-// 真实部署注意（非本切片范围，见 docs/10 7.2）：多用户/跨会话场景下 SYSTEM 服务需按
-// 会话用户定位其私有文件（模拟/按 SID 目录），以及失败计数→Safe Mode 联动。
+// 真实部署注意（非本实现范围）：多用户/跨会话场景下 SYSTEM 服务需按会话用户
+// 定位其私有文件（模拟/按 SID 目录），以及失败计数与安全模式联动。
 
 // 默认私有存储路径（LOCALAPPDATA\CppOptimizer\ipc_agent_token）；
 // LOCALAPPDATA 不可用时返回空串（调用方应要求显式路径）。

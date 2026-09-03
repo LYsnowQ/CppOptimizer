@@ -16,7 +16,6 @@ namespace optimizer::ipc {
 namespace {
 
 // 显式 SDDL：仅 SYSTEM、内置管理员与交互用户可访问；保护 DACL（不继承）。
-// 对应 docs/23 第 5 节「命名管道使用显式 SDDL」。
 constexpr wchar_t kPipeSddl[] =
     L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)";
 

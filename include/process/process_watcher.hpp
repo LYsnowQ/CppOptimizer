@@ -22,8 +22,7 @@ enum class ProcessState {
     NotRunning,
     Starting,
     Running,
-    // [OPT-RESERVE][MOD-PRC-001] Suspended 预留：线程挂起检测属 R2 高风险区，
-    // 当前不会产生（docs/design/guides/14 7.2）
+    // Suspended 预留：线程挂起检测属 R2 高风险区，当前不产生该状态
     Suspended,
     Exiting
 };

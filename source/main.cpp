@@ -1176,7 +1176,7 @@ constexpr wchar_t kServiceDescription[] =
 // “受保护管道事实消费”（SVC-002/003，仅 console demo 启用）：作为 IPC 服务端
 // 常驻监听（persistentAccept），窗口内连续受理到达的 Agent 客户端（每客户端一帧
 // FactsSnapshot）并记录身份/摘要。
-// 服务模式不接受临时危险命令（docs/23 第 3 节），本负载不产生任何系统修改。
+// 服务模式不接受临时危险命令，本负载不产生任何系统修改。
 struct ServiceHostDemoState {
     optimizer::logger::Logger logger;
     std::size_t tickCount = 0;

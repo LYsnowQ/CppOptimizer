@@ -2,11 +2,8 @@
 
 ## 开发前必读
 
-1. `docs/design/engineering/20-user-native-kernel-boundary-learning-guide.md`；
-2. `docs/design/engineering/21-formal-engineering-handbook.md`；
-3. `docs/design/engineering/22-error-resource-concurrency-guide.md`；
-4. `docs/design/engineering/23-dangerous-operation-policy-and-threat-model.md`；
-5. 对应模块的设计文档（`docs/design/modules/`）。
+- 仓库内以源码与头文件注释为契约真相，功能总览见 README.md；
+- 详细设计、工程与安全规范文档在本地维护，不随仓库分发；提交到仓库的内容不引用它们，需要的信息在公开文件中直接说明。
 
 ## 工作流
 
@@ -39,4 +36,4 @@
 
 ## 注释
 
-注释解释不变量、API 契约和风险，不逐行翻译代码。教学型长解释留在 `.md`；`.hpp/.cpp` 保留正式、适量的关键注释。
+注释解释不变量、API 契约和风险，不逐行翻译代码；长解释与设计文档在本地维护，`.hpp/.cpp` 仅保留正式、适量的关键注释。

@@ -70,8 +70,8 @@ struct IpcClientIdentity {
 // 实例可复用（每轮重新 CreateAndListen/AcceptClient）。
 // persistentAccept（SVC-003 连续受理）：同一管道实例在 ServeOne 之间保持监听，
 // 可连续服务多个客户端（每客户端一帧），由 Close() 结束。
-// [OPT-RESERVE][MOD-IPC-001] 仍剩扩展点：同一连接内多帧/心跳复用、多实例并发
-// （PIPE_UNLIMITED_INSTANCES 已保留）为服务运行形态后续切片
+// 仍剩扩展点：同一连接内多帧/心跳复用、多实例并发（PIPE_UNLIMITED_INSTANCES
+// 已保留），待服务运行形态落地
 class IpcSession {
 public:
     // 应用层处理器：根据请求填写应答；返回失败表示拒绝（应答 Error）。
@@ -146,8 +146,8 @@ private:
 
 // 客户端往返：连接 -> 发送一帧 -> 读取应答帧 -> 关闭。
 // 应答为 Error 类型或 requestId 与请求不配对时返回失败（失败不伪装成功）。
-// [OPT-RESERVE][MOD-IPC-001] 单次往返单帧：同一连接内多帧/心跳复用为服务形态
-// 扩展点（与 IpcSession 多帧切片配套）
+// 单次往返单帧：同一连接内多帧/心跳复用留待服务运行形态扩展
+// （与 IpcSession 多帧扩展配套）
 [[nodiscard]] common::Result<IpcReply> IpcRoundTrip(
     std::shared_ptr<IpcClientBackend> backend, std::wstring_view pipePath,
     IpcMessageType type, std::span<const std::byte> payload,

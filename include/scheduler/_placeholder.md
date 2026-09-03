@@ -1,3 +1,3 @@
-# 空骨架占位（目录未实现）
+# 预留占位（模块尚未实施）
 
-[OPT-RESERVE][MOD-SCH-001] scheduler 模块目录：见 docs/design/modules/18-module-scheduler-tuner.md，按规划实施时填充
+scheduler（调度参数微调）目录保留模块位；实施时以真实代码文件替换本占位。
