@@ -717,6 +717,29 @@ common::Result<IpcConcurrentSummary> RunConcurrentServer(
         std::move(shared->summary));
 }
 
+std::chrono::milliseconds IpcReportGapAfterFailures(
+    std::size_t consecutiveFailures, std::chrono::milliseconds base,
+    std::chrono::milliseconds cap) noexcept {
+    if (cap.count() <= 0) {
+        return base; // 无封顶：退化为固定间隔（防御）
+    }
+    auto gap = base.count();
+    if (gap > cap.count()) {
+        gap = cap.count();
+    }
+    for (std::size_t i = 0; i < consecutiveFailures && gap < cap.count(); ++i) {
+        if (gap > cap.count() / 2) {
+            gap = cap.count(); // 下次翻倍必超上限：直接封顶，防乘法溢出
+            break;
+        }
+        gap *= 2;
+        if (gap > cap.count()) {
+            gap = cap.count();
+        }
+    }
+    return std::chrono::milliseconds(gap);
+}
+
 common::Result<IpcPeriodicReportSummary> RunPeriodicReporter(
     std::shared_ptr<IpcClientBackend> backend,
     const IpcPeriodicReportOptions& options,
@@ -737,6 +760,9 @@ common::Result<IpcPeriodicReportSummary> RunPeriodicReporter(
     IpcPeriodicReportSummary summary;
     const auto deadline = std::chrono::steady_clock::now() + options.window;
     auto nextSlot = std::chrono::steady_clock::now();
+    std::size_t consecutiveFailures = 0; // 连续失败数（自适应节奏输入）
+    const bool adaptivePacing =
+        options.intervalCap.count() > 0 && options.intervalCap > options.interval;
     for (;;) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
@@ -779,11 +805,15 @@ common::Result<IpcPeriodicReportSummary> RunPeriodicReporter(
         if (!delivered) {
             ++summary.connectFailures; // 可恢复失败：继续下一周期
         }
-        nextSlot += options.interval;
-        // 追赶保护：周期执行过慢时以“当前 + interval”对齐，避免突发密集上报。
-        if (nextSlot <= std::chrono::steady_clock::now()) {
-            nextSlot = std::chrono::steady_clock::now() + options.interval;
-        }
+        // 自适应节奏（IPC-012）：成功后回基础间隔；连续失败指数放大至 intervalCap
+        //（Safe Mode 暂停等长离线下不空转高频空试），上报成功即复位计数。
+        consecutiveFailures = delivered ? 0 : consecutiveFailures + 1;
+        nextSlot = std::chrono::steady_clock::now() +
+                   (adaptivePacing && consecutiveFailures > 0
+                        ? IpcReportGapAfterFailures(
+                              consecutiveFailures, options.interval,
+                              options.intervalCap)
+                        : options.interval);
     }
     backend->Close();
     return common::Result<IpcPeriodicReportSummary>::Success(

@@ -1588,7 +1588,8 @@ std::wstring FindIpcSuffix(int argc, wchar_t* argv[], int start) noexcept {
                                   arg == L"--session" ||
                                   arg == L"--frames" ||
                                   arg == L"--instances" ||
-                                  arg == L"--interval-ms";
+                                  arg == L"--interval-ms" ||
+                                  arg == L"--max-interval-ms";
         if (!skipNextValue && isOptionFlag) {
             skipNextValue = true;
             continue;
@@ -1615,7 +1616,8 @@ bool HasIpcSessionFlag(int argc, wchar_t* argv[], int start) noexcept {
                                      arg == L"--ipc-allow-user" ||
                                      arg == L"--frames" ||
                                      arg == L"--instances" ||
-                                     arg == L"--interval-ms";
+                                     arg == L"--interval-ms" ||
+                                     arg == L"--max-interval-ms";
         if (!skipNextValue && optionWithValue) {
             skipNextValue = true;
             continue;
@@ -1673,6 +1675,21 @@ std::uint32_t FindIpcIntervalMs(int argc, wchar_t* argv[], int start) noexcept {
         }
     }
     return 1000;
+}
+
+// 读取 --max-interval-ms <n>（自适应节奏放大上限）；缺省 0（未指定，由命令层给默认）。
+// 解析失败返回 0。
+std::uint32_t FindIpcMaxIntervalMs(int argc, wchar_t* argv[], int start) noexcept {
+    for (int i = start; i + 1 < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--max-interval-ms") {
+            std::uint32_t value = 0;
+            if (!ParseUint32(argv[i + 1], value)) {
+                return 0;
+            }
+            return value;
+        }
+    }
+    return 0;
 }
 
 // 扫描 --ipc-token <值>（IPC-005 demo：共享会话凭据）。返回是否存在；
@@ -1744,6 +1761,18 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
         std::wcerr << L"  --interval-ms must be in 50..10000\n";
         return 2;
     }
+    // 自适应节奏放大上限（IPC-012）：显式须 >= interval；缺省 max(3*interval, 5s)。
+    const std::uint32_t intervalCapMs = FindIpcMaxIntervalMs(argc, argv, 4);
+    if (intervalCapMs != 0 &&
+        (intervalCapMs < intervalMs || intervalCapMs > 60000)) {
+        std::wcerr << L"  --max-interval-ms must be in [" << intervalMs
+                   << L"..60000]\n";
+        return 2;
+    }
+    const std::uint32_t effectiveCapMs =
+        intervalCapMs != 0
+            ? intervalCapMs
+            : (intervalMs * 3 > 5000u ? intervalMs * 3 : 5000u);
     std::wstring token;
     bool hasToken = false;
     if (FindIpcToken(argc, argv, 4, token)) {
@@ -1818,6 +1847,8 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     reportOptions.pipePath = pipeName;
     reportOptions.window = std::chrono::milliseconds(seconds) * 1000;
     reportOptions.interval = std::chrono::milliseconds(intervalMs);
+    reportOptions.intervalCap =
+        std::chrono::milliseconds(effectiveCapMs); // 自适应放大上限
     reportOptions.ioTimeout = std::chrono::milliseconds(3000);
     reportOptions.maxConnectAttempts = 3;
     reportOptions.reconnectBackoff = std::chrono::milliseconds(300);
@@ -1826,7 +1857,8 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
                << L" s)\n";
     std::wcout << L"  pipe     : " << pipeName << L"\n";
     std::wcout << L"  report   : every " << intervalMs
-               << L" ms, up to 3 connect attempts per report\n";
+               << L" ms (grow to " << effectiveCapMs
+               << L" ms after repeated failures), up to 3 connect attempts per report\n";
     if (hasToken) {
         std::wcout << L"  auth     : session token supplied (hidden)\n";
     }
@@ -2336,12 +2368,14 @@ void PrintUsage() {
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
         << L"  CppOptimizer.exe --agent run <s> [suffix] [--interval-ms <50..10000>]\n"
-        << L"                             [--ipc-token <t>] [--ipc-token-file [<path>]]\n"
-        << L"                             Agent reporter (foreground, bounded): every\n"
-        << L"                             interval ms collect real memory facts and\n"
-        << L"                             report over the protected pipe for 1..60 s;\n"
-        << L"                             bounded connect retries/backoff per report;\n"
-        << L"                             optional session token; window-summary output\n"
+        << L"                             [--max-interval-ms <n>] [--ipc-token <t>]\n"
+        << L"                             [--ipc-token-file [<path>]]  Agent reporter\n"
+        << L"                             (foreground, bounded): every interval ms collect\n"
+        << L"                             real memory facts and report over the protected\n"
+        << L"                             pipe for 1..60 s; bounded connect retries/backoff\n"
+        << L"                             per report; repeated failures grow the gap up to\n"
+        << L"                             max-interval-ms (default max(3x, 5 s)); optional\n"
+        << L"                             session token; window-summary output\n"
         << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix] [--session]\n"
         << L"                             [--instances <1..8>] [--ipc-token <t>]\n"
         << L"                             Protected pipe server for 1..60 s: serve one\n"

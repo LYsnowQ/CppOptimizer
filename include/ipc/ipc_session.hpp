@@ -245,14 +245,26 @@ struct IpcConcurrentSummary {
 // （宿主离线/Safe Mode 暂停受理），计入 connectFailures 并继续下一周期；采样失败
 // （requestFactory 返回失败）为致命，原样上报并停止。窗口到期必然返回（有界重连，不无限
 // 重试），汇总报告数/失败数。backend 复用跨周期（Connect 可重入）。
+// 自适应节奏（IPC-012）：intervalCap>0 时连续失败会使“下一周期间隔”按
+// IpcReportGapAfterFailures 指数放大至 intervalCap（Safe Mode 暂停等长离线下不空转高频
+// 空试），上报成功即回到 interval；intervalCap==0 表示关闭放大（恒用 interval，缺省）。
 struct IpcPeriodicReportOptions {
     std::wstring pipePath;      // 受保护管道名
     std::chrono::milliseconds window = std::chrono::milliseconds(0);
     std::chrono::milliseconds interval = std::chrono::milliseconds(1000);
+    std::chrono::milliseconds intervalCap = std::chrono::milliseconds(0); // 0=关闭放大
     std::chrono::milliseconds ioTimeout = std::chrono::milliseconds(3000);
     std::size_t maxConnectAttempts = 3;  // 单次上报的连接/传输尝试上限
     std::chrono::milliseconds reconnectBackoff = std::chrono::milliseconds(300);
 };
+
+// 连续 N 次失败后的下一上报间隔（自适应节奏，IPC-012）：N==0 返回 base；N>=1 返回
+// min(cap, base * 2^N)（指数放大 + 封顶，乘法溢出安全）。cap 必须为正且视为硬上限；
+// base 超过 cap 时以 cap 为界。纯函数，可确定性测试。
+[[nodiscard]] std::chrono::milliseconds IpcReportGapAfterFailures(
+    std::size_t consecutiveFailures, std::chrono::milliseconds base,
+    std::chrono::milliseconds cap) noexcept;
+
 
 struct IpcPeriodicReportSummary {
     std::size_t reportsSent = 0;      // 成功上报（收到应答）数

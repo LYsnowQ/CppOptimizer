@@ -45,6 +45,7 @@ using optimizer::ipc::IpcSessionEndReason;
 using optimizer::ipc::IpcClientVerdict;
 using optimizer::ipc::IpcFrameRequest;
 using optimizer::ipc::IpcPeriodicReportOptions;
+using optimizer::ipc::IpcReportGapAfterFailures;
 using optimizer::ipc::RunPeriodicReporter;
 using optimizer::ipc::RunConcurrentServer;
 using optimizer::ipc::kIpcHeaderSize;
@@ -2189,6 +2190,51 @@ bool TestPeriodicReporterBoundedRetryRecovers() {
     return fake->connectCount >= 3;
 }
 
+// ---------- 自适应上报节奏（IPC-012，IpcReportGapAfterFailures） ----------
+
+bool TestReportGapPureBasics() {
+    using namespace std::chrono;
+    // 0 次失败 = 基础间隔；失败指数放大；达 cap 封顶。
+    const auto g0 =
+        IpcReportGapAfterFailures(0, milliseconds(1000), milliseconds(5000));
+    const auto g1 =
+        IpcReportGapAfterFailures(1, milliseconds(1000), milliseconds(5000));
+    const auto g2 =
+        IpcReportGapAfterFailures(2, milliseconds(1000), milliseconds(5000));
+    const auto g3 =
+        IpcReportGapAfterFailures(3, milliseconds(1000), milliseconds(5000));
+    const auto gMany =
+        IpcReportGapAfterFailures(99, milliseconds(1000), milliseconds(5000));
+    if (g0 != milliseconds(1000) || g1 != milliseconds(2000) ||
+        g2 != milliseconds(4000) || g3 != milliseconds(5000) ||
+        gMany != milliseconds(5000)) {
+        return false;
+    }
+    // base 超过 cap：一律以 cap 为界。
+    const auto clamp0 =
+        IpcReportGapAfterFailures(0, milliseconds(1000), milliseconds(300));
+    const auto clamp1 =
+        IpcReportGapAfterFailures(1, milliseconds(1000), milliseconds(300));
+    return clamp0 == milliseconds(300) && clamp1 == milliseconds(300);
+}
+
+bool TestReportGapPureOverflowSafe() {
+    using namespace std::chrono;
+    // 巨大 cap/大量失败：指数放大封顶且不发生乘法溢出。
+    const auto huge = milliseconds(1LL << 62);
+    const auto g =
+        IpcReportGapAfterFailures(200, milliseconds(1000), huge);
+    return g == huge && g.count() > 0;
+}
+
+bool TestReportGapPureDefensiveCapZero() {
+    using namespace std::chrono;
+    // cap<=0（未配置）：退化为固定基础间隔（防御分支）。
+    const auto g = IpcReportGapAfterFailures(5, milliseconds(1000),
+                                             milliseconds(0));
+    return g == milliseconds(1000);
+}
+
 } // namespace
 
 int wmain() {
@@ -2347,5 +2393,8 @@ int wmain() {
         &TestPeriodicReporterSampleFailureIsFatal);
     run(L"periodic reporter bounded retry recovers",
         &TestPeriodicReporterBoundedRetryRecovers);
+    run(L"report gap pure basics", &TestReportGapPureBasics);
+    run(L"report gap pure overflow safe", &TestReportGapPureOverflowSafe);
+    run(L"report gap pure defensive cap zero", &TestReportGapPureDefensiveCapZero);
     return failed == 0 ? 0 : 1;
 }
