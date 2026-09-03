@@ -426,7 +426,8 @@ struct ManualClock {
 using optimizer::service::SafeModeGuard;
 using optimizer::service::SafeModeState;
 
-bool TestSafeModeEnterAfterThreshold() {
+bool TestSafeModeWindowTriggersWithinThreshold() {
+    // 时间窗口内达阈值即触发（含正常受理交错：正常受理不复位，IPC-013 语义）。
     ManualClock clock;
     SafeModeGuard::Options options;
     options.cooldown = std::chrono::milliseconds(10000);
@@ -436,33 +437,41 @@ bool TestSafeModeEnterAfterThreshold() {
         !guard.ShouldAcceptClients()) {
         return false;
     }
-    guard.OnClientRejected();
-    guard.OnClientRejected();
+    guard.OnClientRejected();            // 失败 1
+    clock.now += std::chrono::milliseconds(300); // 合法 Agent 受理时段
+    guard.OnClientRejected();            // 失败 2（正常受理不复位计数）
+    clock.now += std::chrono::milliseconds(300);
     if (guard.State() != SafeModeState::Normal) {
         return false; // 阈值-1：仍 Normal
     }
-    guard.OnClientRejected(); // 达阈值：进入 Safe Mode
+    guard.OnClientRejected(); // 失败 3（窗口内）达阈值：进入 Safe Mode
     return guard.State() == SafeModeState::SafeMode &&
            !guard.ShouldAcceptClients() &&
            guard.CooldownRemaining() > std::chrono::milliseconds(0);
 }
 
-bool TestSafeModeServedResetsFailures() {
+bool TestSafeModeWindowExpiryPreventsOldFailures() {
+    // 窗口外旧失败自然过期：不参与计数（低速单点失败不会积累触发）。
     ManualClock clock;
     SafeModeGuard::Options options;
     options.cooldown = std::chrono::milliseconds(10000);
     options.now = [&clock] { return clock.now; };
     SafeModeGuard guard(options);
     guard.OnClientRejected();
+    clock.now += std::chrono::milliseconds(1000);
     guard.OnClientRejected();
-    guard.OnClientServed(); // 正常受理：复位连续失败
+    if (guard.State() != SafeModeState::Normal) {
+        return false;
+    }
+    clock.now += std::chrono::milliseconds(10000); // 超出 5s 窗口
+    guard.OnClientRejected(); // 旧失败已剪除，新失败才第 1 次
     guard.OnClientRejected();
-    guard.OnClientRejected(); // 复位后仅 2 次连续失败：未达阈值
     return guard.State() == SafeModeState::Normal &&
            guard.ShouldAcceptClients();
 }
 
-bool TestSafeModeCooldownRecovers() {
+bool TestSafeModeCooldownRecoveryClearsWindow() {
+    // 冷却到期自动恢复并清空窗口：恢复后旧失败不会导致瞬间再次触发。
     ManualClock clock;
     SafeModeGuard::Options options;
     options.cooldown = std::chrono::milliseconds(1000);
@@ -475,10 +484,13 @@ bool TestSafeModeCooldownRecovers() {
         return false;
     }
     clock.now += std::chrono::milliseconds(1500); // 冷却到期
-    // 查询即自动恢复 Normal 并复位计数
-    return guard.State() == SafeModeState::Normal &&
-           guard.ShouldAcceptClients() &&
-           guard.CooldownRemaining() == std::chrono::milliseconds(0);
+    if (guard.State() != SafeModeState::Normal ||
+        !guard.ShouldAcceptClients() ||
+        guard.CooldownRemaining() != std::chrono::milliseconds(0)) {
+        return false;
+    }
+    guard.OnClientRejected(); // 窗口已清空：仅 1 次失败，不会立即重入
+    return guard.State() == SafeModeState::Normal;
 }
 
 bool TestSafeModeDisabledStaysNormal() {
@@ -557,9 +569,12 @@ int wmain() {
     run(L"uninstall rejects empty name", &TestUninstallRejectsEmptyName);
     run(L"win32 backend rejects non-scm dispatcher",
         &TestWin32BackendRejectsNonScmDispatcher);
-    run(L"safe mode enter after threshold", &TestSafeModeEnterAfterThreshold);
-    run(L"safe mode served resets failures", &TestSafeModeServedResetsFailures);
-    run(L"safe mode cooldown recovers", &TestSafeModeCooldownRecovers);
+    run(L"safe mode window triggers within threshold",
+        &TestSafeModeWindowTriggersWithinThreshold);
+    run(L"safe mode window expiry prevents old failures",
+        &TestSafeModeWindowExpiryPreventsOldFailures);
+    run(L"safe mode cooldown recovery clears window",
+        &TestSafeModeCooldownRecoveryClearsWindow);
     run(L"safe mode disabled stays normal", &TestSafeModeDisabledStaysNormal);
     run(L"safe mode boundary and cooldown", &TestSafeModeGuardBoundaryAndCooldown);
     return failed == 0 ? 0 : 1;

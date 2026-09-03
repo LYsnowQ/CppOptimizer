@@ -478,12 +478,25 @@ common::Result<void> ServiceHost::ReReportCurrentStatus() noexcept {
 SafeModeGuard::SafeModeGuard(Options options)
     : options_(std::move(options)) {}
 
-void SafeModeGuard::Refresh() noexcept {
-    // 冷却到期自动回到 Normal 并复位计数（下轮从头累计）。
-    if (safeMode_ && options_.now() >= cooldownUntil_) {
-        safeMode_ = false;
-        consecutiveFailures_ = 0;
+void SafeModeGuard::PruneExpired() noexcept {
+    const auto cutoff = options_.now() - options_.countingWindow;
+    auto& times = failureTimes_;
+    while (!times.empty() && times.front() <= cutoff) {
+        times.erase(times.begin());
     }
+}
+
+void SafeModeGuard::Refresh() noexcept {
+    if (safeMode_) {
+        // 冷却到期自动回到 Normal 并清空窗口（避免恢复瞬间因窗口内旧失败立即再触发）。
+        if (options_.now() >= cooldownUntil_) {
+            safeMode_ = false;
+            failureTimes_.clear();
+        }
+        return;
+    }
+    // Normal：剪掉窗口外失败，防止长期低速失败无限积累后“越界触发”。
+    PruneExpired();
 }
 
 SafeModeState SafeModeGuard::State() noexcept {
@@ -506,17 +519,6 @@ std::chrono::milliseconds SafeModeGuard::CooldownRemaining() noexcept {
     return remaining.count() > 0 ? remaining : std::chrono::milliseconds(0);
 }
 
-void SafeModeGuard::OnClientServed() noexcept {
-    if (!options_.enabled) {
-        return;
-    }
-    Refresh();
-    if (safeMode_) {
-        return; // Safe Mode 期间不产生“正常受理”（宿主已暂停），防御性忽略
-    }
-    consecutiveFailures_ = 0;
-}
-
 void SafeModeGuard::OnClientRejected() noexcept {
     if (!options_.enabled) {
         return;
@@ -525,8 +527,10 @@ void SafeModeGuard::OnClientRejected() noexcept {
     if (safeMode_) {
         return; // 已在 Safe Mode：冷却期结束前不再累计
     }
-    ++consecutiveFailures_;
-    if (consecutiveFailures_ >= options_.consecutiveFailuresToEnter) {
+    // 时间窗口计数：记录时间戳，剪枝后窗口内失败数达阈值即进入 Safe Mode。
+    failureTimes_.push_back(options_.now());
+    PruneExpired();
+    if (failureTimes_.size() >= options_.failuresToEnter) {
         safeMode_ = true;
         cooldownUntil_ = options_.now() + options_.cooldown;
     }

@@ -1193,7 +1193,7 @@ struct ServiceHostDemoState {
     bool ipcLastReplyAck = false;                 // 最近一次是否回 Ack
     std::string ipcLastFactSummary;               // 最近受理解析摘要（ASCII）
     std::wstring ipcExpectedToken;                // 会话凭据（IPC-005；空 = 不要求）
-    // Safe Mode（IPC-010，Agent 受理门禁）：身份/凭据失败连续达阈值暂停受理新 Agent。
+    // Safe Mode（IPC-010/013，Agent 受理门禁）：时间窗口内身份/凭据失败达阈值暂停受理新 Agent。
     std::optional<optimizer::service::SafeModeGuard> ipcSafeMode; // console demo 启用
     bool ipcAuthRejected = false;                 // 最近一次 ServeOne 是否以身份/凭据拒绝结束
     std::size_t ipcSafeModeEntries = 0;           // 窗口内进入 Safe Mode 次数（汇总）
@@ -1371,16 +1371,15 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             }
         }
         state.ipcExpectedToken = ipcOptions.expectedToken; // 供 tick 自定义处理器复用
-        // Safe Mode 门禁（IPC-010）：身份/凭据失败连续达阈值（3 次）暂停受理新 Agent
-        // 冷却 2 秒；仅影响 Agent 受理，R0 负载照常。
+        // Safe Mode 门禁（IPC-010/013）：时间窗口（5s）内身份/凭据失败达阈值（3 次）
+        // 暂停受理新 Agent 冷却 2 秒；仅影响 Agent 受理，R0 负载照常。
         state.ipcSafeMode.emplace(); // 默认：阈值 3、冷却 2s、启用
         ipcOptions.verdictObserver =
             [&state](optimizer::ipc::IpcClientVerdict verdict) {
                 auto& guard = *state.ipcSafeMode;
                 const auto before = guard.State();
                 if (verdict == optimizer::ipc::IpcClientVerdict::Accepted) {
-                    guard.OnClientServed();
-                    return;
+                    return; // 正常受理不参与计数（窗口自然过期，IPC-013 语义）
                 }
                 guard.OnClientRejected();
                 ++state.ipcRejectedClients;
@@ -1390,7 +1389,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                     ++state.ipcSafeModeEntries;
                     state.logger.Write(
                         optimizer::logger::LogLevel::Info, L"service",
-                        L"ipc  : Safe Mode entered - 暂停受理新 Agent（连续身份/凭据失败）");
+                        L"ipc  : Safe Mode entered - 暂停受理新 Agent（身份/凭据失败达阈值）");
                 }
                 state.ipcAuthRejected = true;
             };
@@ -1418,7 +1417,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         optimizer::common::WriteConsoleLine(
             L"  ipc      : pipe \\\\.\\pipe\\CppOptimizerIpc");
         optimizer::common::WriteConsoleLine(
-            L"             safe mode : intake gate on (3 consecutive auth failures -> 2 s pause)");
+            L"             safe mode : intake gate on (3 auth failures in 5 s -> 2 s pause)");
     }
     optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
     const auto result = host.RunConsole(std::chrono::seconds(seconds));
@@ -2363,8 +2362,8 @@ void PrintUsage() {
         << L"                             to stop). --ipc-facts also serves Agent facts\n"
         << L"                             frames via the protected pipe continuously\n"
         << L"                             (optional session token / user SID allow-list;\n"
-        << L"                             Safe Mode intake gate: 3 consecutive auth\n"
-        << L"                             failures pause intake for 2 s)\n"
+        << L"                             Safe Mode intake gate: 3 auth failures\n"
+        << L"                             within 5 s pause intake for 2 s)\n"
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
         << L"  CppOptimizer.exe --agent run <s> [suffix] [--interval-ms <50..10000>]\n"
