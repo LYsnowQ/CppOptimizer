@@ -43,6 +43,17 @@ struct IpcReply {
     std::vector<std::byte> payload;
 };
 
+// 会话（连接）结束原因（ServeSession 多帧服务）。
+enum class IpcSessionEndReason : std::uint8_t {
+    ClientClosed = 0, // 客户端完成多帧后主动关闭连接（正常结束）
+    IdleTimeout = 1,  // 帧间空闲超时：客户端静默超过 idleTimeout（心跳丢失）
+    SessionBudget = 2 // 会话总预算耗尽（调用方窗口到期）
+};
+
+// 结束原因名（纯查询，恒成功）。
+[[nodiscard]] const wchar_t* IpcSessionEndReasonToString(
+    IpcSessionEndReason reason) noexcept;
+
 // 一次会话结果摘要。
 struct IpcServeResult {
     IpcMessageType requestType = IpcMessageType::Ping;
@@ -52,6 +63,10 @@ struct IpcServeResult {
     std::uint32_t clientSessionId = 0;
     std::wstring clientUserSid; // 客户端用户 SID（未知为空串）
     std::uint32_t payloadBytes = 0;
+    // 本调用成功服务的帧数（ServeOne 恒为 1；ServeSession 为该连接内已服务帧数）。
+    std::uint32_t framesServed = 1;
+    // 会话结束原因（ServeSession 填写；ServeOne 单帧语义视为 ClientClosed）。
+    IpcSessionEndReason endReason = IpcSessionEndReason::ClientClosed;
 };
 
 // 客户端身份（服务端从传输层记录/查询，见 ipc_transport.hpp）。
@@ -62,16 +77,17 @@ struct IpcClientIdentity {
     std::wstring userSid;
 };
 
-// 单客户端会话服务端：创建/监听 -> 接受一个客户端 -> 读取一帧 ->
-// 严格校验（未知版本/类型/超长载荷 -> Error 应答并断开，不做宽松转换）
-// -> 会话级身份裁决（默认要求可识别 PID 与交互会话；拒绝 -> Error(UnauthorizedClient)
-//    并断开）-> 用户 SID 授权白名单（配置时）-> 调用处理器 -> 写回应答 -> 断开。
-// 处理器失败 -> Error 应答（失败不伪装成功）。
+// 单客户端会话服务端：创建/监听 -> 接受一个客户端 -> 逐帧严格校验（未知版本/
+// 类型/超长载荷 -> Error 应答并断开，不做宽松转换）-> 会话级身份裁决（默认要求
+// 可识别 PID 与交互会话；拒绝 -> Error(UnauthorizedClient) 并断开）-> 用户 SID
+// 授权白名单（配置时）-> 调用处理器 -> 写回应答。处理器失败 -> Error 应答
+// （失败不伪装成功）。
 // 实例可复用（每轮重新 CreateAndListen/AcceptClient）。
-// persistentAccept（SVC-003 连续受理）：同一管道实例在 ServeOne 之间保持监听，
-// 可连续服务多个客户端（每客户端一帧），由 Close() 结束。
-// 仍剩扩展点：同一连接内多帧/心跳复用、多实例并发（PIPE_UNLIMITED_INSTANCES
-// 已保留），待服务运行形态落地
+// persistentAccept（SVC-003 连续受理）：同一管道实例在 ServeOne/ServeSession 之间
+// 保持监听，可连续服务多个客户端，由 Close() 结束。
+// ServeOne 每客户端一帧；ServeSession 在同一连接上连续服务多帧（连接复用/心跳，
+// 结束条件见 IpcSessionEndReason）。仍剩扩展点：多实例并发
+// （PIPE_UNLIMITED_INSTANCES 已保留），待服务运行形态落地。
 class IpcSession {
 public:
     // 应用层处理器：根据请求填写应答；返回失败表示拒绝（应答 Error）。
@@ -125,6 +141,19 @@ public:
     [[nodiscard]] common::Result<IpcServeResult> ServeOne(
         Handler handler, std::chrono::milliseconds acceptTimeout);
 
+    // 同一连接上的多帧服务（连接复用/心跳）：接受一个客户端后在其连接上连续服务
+    // 多帧，每帧独立执行与 ServeOne 相同的 读帧-严格校验-裁决-处理器-应答 顺序，
+    // 直至客户端关闭（ClientClosed）、帧间空闲超过 idleTimeout（IdleTimeout，心跳
+    // 丢失）或会话总预算 sessionBudget 耗尽（SessionBudget）。acceptTimeout 为接受
+    // 窗口（无客户端 -> ERROR_TIMEOUT）。返回结果含 framesServed（已服务帧数）与
+    // endReason。任一帧失败（非法帧/裁决拒绝/处理器失败/传输失败）即终止会话并返回
+    // 失败（已发出 Error 应答的路径一并上报；与 ServeOne 严格语义一致）。
+    // persistentAccept 语义同 ServeOne：会话结束后是否保留监听实例由 Close 控制。
+    [[nodiscard]] common::Result<IpcServeResult> ServeSession(
+        Handler handler, std::chrono::milliseconds acceptTimeout,
+        std::chrono::milliseconds idleTimeout,
+        std::chrono::milliseconds sessionBudget);
+
     // 默认处理器（无凭据要求）：Ping -> Ack；FactsSnapshot -> 解析 CPOPFACTS/1 载荷并过 v1
     // 键语义白名单（ipc_facts.hpp），合法则 Ack（载荷为紧凑摘要文本），语法或
     // schema 任一违反则 Error(InvalidFacts) 应答（不宽松接受）；其余请求类型 ->
@@ -140,17 +169,38 @@ public:
         std::wstring_view expectedToken);
 
 private:
+    // 服务循环内核：CreateAndListen -> AcceptClient -> 逐帧服务。
+    // maxFrames==0 表示不设帧数上限（由客户端关闭/帧间空闲/会话预算结束，即
+    // ServeSession）；>0 表示服务满该帧数即正常结束（ServeOne 的 1 帧语义）。
+    [[nodiscard]] common::Result<IpcServeResult> ServeLoop(
+        Handler handler, std::chrono::milliseconds acceptTimeout,
+        std::chrono::milliseconds idleTimeout,
+        std::chrono::milliseconds sessionBudget, std::uint32_t maxFrames);
+
     std::shared_ptr<IpcServerBackend> backend_;
     Options options_;
 };
 
 // 客户端往返：连接 -> 发送一帧 -> 读取应答帧 -> 关闭。
 // 应答为 Error 类型或 requestId 与请求不配对时返回失败（失败不伪装成功）。
-// 单次往返单帧：同一连接内多帧/心跳复用留待服务运行形态扩展
-// （与 IpcSession 多帧扩展配套）
 [[nodiscard]] common::Result<IpcReply> IpcRoundTrip(
     std::shared_ptr<IpcClientBackend> backend, std::wstring_view pipePath,
     IpcMessageType type, std::span<const std::byte> payload,
     std::uint32_t requestId, std::chrono::milliseconds timeout);
+
+// 客户端单连接会话中的一帧请求（连接复用多帧，见 IpcRoundTripSession）。
+struct IpcFrameRequest {
+    IpcMessageType type = IpcMessageType::Ping;
+    std::uint32_t requestId = 0;
+    std::vector<std::byte> payload;
+};
+
+// 复用同一连接的多次往返（多帧）：连接一次，依次发送 requests 每帧并读取配对
+// 应答（requestId 配对、Error 应答不伪装成功，与 IpcRoundTrip 语义一致）；任一帧
+// 失败即中止并关闭连接返回失败。全部完成返回与 requests 一一对应的应答列表。
+[[nodiscard]] common::Result<std::vector<IpcReply>> IpcRoundTripSession(
+    std::shared_ptr<IpcClientBackend> backend, std::wstring_view pipePath,
+    std::span<const IpcFrameRequest> requests,
+    std::chrono::milliseconds timeout);
 
 } // namespace optimizer::ipc

@@ -2,6 +2,9 @@
 
 #include "ipc/ipc_facts.hpp"
 
+#include <windows.h>
+
+#include <algorithm>
 #include <array>
 #include <cwctype>
 #include <string>
@@ -101,6 +104,19 @@ const wchar_t* IpcErrorCodeToString(IpcErrorCode code) noexcept {
     return L"unknown error";
 }
 
+const wchar_t* IpcSessionEndReasonToString(
+    IpcSessionEndReason reason) noexcept {
+    switch (reason) {
+        case IpcSessionEndReason::ClientClosed:
+            return L"client closed";
+        case IpcSessionEndReason::IdleTimeout:
+            return L"idle timeout";
+        case IpcSessionEndReason::SessionBudget:
+            return L"session budget";
+    }
+    return L"unknown";
+}
+
 IpcSession::IpcSession(std::shared_ptr<IpcServerBackend> backend,
                        Options options)
     : backend_(std::move(backend)), options_(options) {}
@@ -127,13 +143,15 @@ common::Result<void> IpcSession::AllowAllClientGate(
     return common::Result<void>::Success();
 }
 
-common::Result<IpcServeResult> IpcSession::ServeOne(
-    Handler handler, std::chrono::milliseconds acceptTimeout) {
+common::Result<IpcServeResult> IpcSession::ServeLoop(
+    Handler handler, std::chrono::milliseconds acceptTimeout,
+    std::chrono::milliseconds idleTimeout,
+    std::chrono::milliseconds sessionBudget, std::uint32_t maxFrames) {
     auto& backend = *backend_;
-    // 统一收尾：错误应答路径先“排空读”等待对端读完 Error 帧（防 Disconnect
-    // 竞态——对端读到 233 断管而非错误码），再断开；最后按 persistentAccept 决定
-    // 是否保留监听实例（SVC-003 连续受理：实例在 ServeOne 调用间隙保持监听，
-    // 消除“每轮重建+空窗”问题）。对端已关/超时均视为尽力而为，不阻断主错误上报。
+    // 统一收尾：错误应答/会话结束路径先“排空读”等待对端读完（防 Disconnect 竞态
+    // ——对端读到 233 断管而非错误码/应答），再断开；最后按 persistentAccept 决定
+    // 是否保留监听实例（SVC-003 连续受理：实例在调用间隙保持监听，消除“每轮重建
+    // +空窗”问题）。对端已关/超时均视为尽力而为，不阻断主错误上报。
     const auto drainAndDisconnect = [&backend, this]() {
         std::array<std::byte, 1> drain{};
         (void)backend.ReadAll(drain, options_.ioTimeout);
@@ -144,146 +162,226 @@ common::Result<IpcServeResult> IpcSession::ServeOne(
             backend.Close();
         }
     };
+    // 单帧模式（ServeOne）不设空闲/预算语义：读帧恒用 ioTimeout。
+    const bool limitedFrames = (maxFrames != 0);
+    const auto sessionDeadline =
+        std::chrono::steady_clock::now() + sessionBudget;
 
     if (auto created = backend.CreateAndListen(); !created) {
         return common::Result<IpcServeResult>::Failure(created.ErrorValue());
     }
     if (auto accepted = backend.AcceptClient(acceptTimeout); !accepted) {
-        // 持续模式接受超时：保留监听实例返回 ERROR_TIMEOUT，由调用方决定继续/结束。
+        // 接受超时：持续模式保留监听实例返回 ERROR_TIMEOUT，由调用方决定继续/结束。
         closeUnlessPersistent();
         return common::Result<IpcServeResult>::Failure(accepted.ErrorValue());
     }
 
-    // 读取并解析帧头（严格校验；非法帧 -> Error 应答并断开）。
-    std::array<std::byte, kIpcHeaderSize> headerBytes{};
-    if (auto readHeader = backend.ReadAll(headerBytes, options_.ioTimeout);
-        !readHeader) {
-        // 客户端连上即断开/读失败：断开本次连接；持续模式保留监听实例。
-        (void)backend.DisconnectClient();
-        closeUnlessPersistent();
-        return common::Result<IpcServeResult>::Failure(
-            readHeader.ErrorValue());
-    }
-    auto parsedHeader = ParseHeader(headerBytes);
-    if (!parsedHeader) {
-        SendErrorReply(backend, 0, IpcErrorCode::InvalidHeader,
-                       options_.ioTimeout);
-        drainAndDisconnect();
-        closeUnlessPersistent();
-        return common::Result<IpcServeResult>::Failure(
-            parsedHeader.ErrorValue());
-    }
-    const IpcHeader header = parsedHeader.Value();
+    std::uint32_t frames = 0;   // 本次连接已成功服务帧数
+    IpcServeResult last;        // 最近一帧摘要
+    IpcSessionEndReason endReason = IpcSessionEndReason::ClientClosed;
 
-    // 读取载荷。
-    std::vector<std::byte> payload;
-    if (header.payloadLength > 0) {
-        payload.resize(header.payloadLength);
-        if (auto readPayload = backend.ReadAll(payload, options_.ioTimeout);
-            !readPayload) {
+    for (;;) {
+        // 会话预算检查（多帧模式）：预算耗尽且已服务过帧 -> 正常结束；尚未服务
+        // 任何帧 -> 视为接受后无帧可服务（ERROR_TIMEOUT，不伪装成功）。
+        std::chrono::milliseconds headerTimeout = options_.ioTimeout;
+        if (!limitedFrames) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    sessionDeadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0) {
+                if (frames == 0) {
+                    (void)backend.DisconnectClient();
+                    closeUnlessPersistent();
+                    return common::Result<IpcServeResult>::Failure(
+                        common::Error::FromWin32(ERROR_TIMEOUT, "ServeSession"));
+                }
+                endReason = IpcSessionEndReason::SessionBudget;
+                break;
+            }
+            headerTimeout = std::min(idleTimeout, remaining);
+        }
+
+        // 读取并解析帧头（严格校验；非法帧 -> Error 应答并断开）。
+        std::array<std::byte, kIpcHeaderSize> headerBytes{};
+        if (auto readHeader = backend.ReadAll(headerBytes, headerTimeout);
+            !readHeader) {
+            const auto& error = readHeader.ErrorValue();
+            const bool clientClosed =
+                error.domain == common::ErrorDomain::Win32 &&
+                (error.code == ERROR_BROKEN_PIPE ||
+                 error.code == ERROR_NO_DATA);
+            const bool timedOut =
+                error.domain == common::ErrorDomain::Win32 &&
+                error.code == ERROR_TIMEOUT;
+            // 多帧模式：客户端在已服务多帧后关闭/心跳丢失 -> 会话正常结束。
+            if (clientClosed && frames > 0) {
+                endReason = IpcSessionEndReason::ClientClosed;
+                break;
+            }
+            if (timedOut && frames > 0) {
+                // 空闲超时与预算耗尽同源于读超时（超时值取 min(idle, remaining)）：
+                // 等于 idleTimeout 说明 idle 先到（心跳丢失），否则预算先耗尽。
+                endReason =
+                    (headerTimeout == idleTimeout)
+                        ? IpcSessionEndReason::IdleTimeout
+                        : IpcSessionEndReason::SessionBudget;
+                break;
+            }
+            // 尚未服务任何帧即关闭/超时/读失败：断开本次连接（同单帧语义）。
+            (void)backend.DisconnectClient();
+            closeUnlessPersistent();
+            return common::Result<IpcServeResult>::Failure(error);
+        }
+        auto parsedHeader = ParseHeader(headerBytes);
+        if (!parsedHeader) {
+            SendErrorReply(backend, 0, IpcErrorCode::InvalidHeader,
+                           options_.ioTimeout);
+            drainAndDisconnect();
+            closeUnlessPersistent();
+            return common::Result<IpcServeResult>::Failure(
+                parsedHeader.ErrorValue());
+        }
+        const IpcHeader header = parsedHeader.Value();
+
+        // 读取载荷。
+        std::vector<std::byte> payload;
+        if (header.payloadLength > 0) {
+            payload.resize(header.payloadLength);
+            if (auto readPayload = backend.ReadAll(payload, options_.ioTimeout);
+                !readPayload) {
+                (void)backend.DisconnectClient();
+                closeUnlessPersistent();
+                return common::Result<IpcServeResult>::Failure(
+                    readPayload.ErrorValue());
+            }
+        }
+
+        // 组装请求（帧头已校验，类型必然可解析）。
+        IpcRequest request;
+        request.type = ParseMessageType(header.type).value();
+        request.requestId = header.requestId;
+        request.payload = std::move(payload);
+        request.clientPid = backend.ClientPid();
+        request.clientSessionId = backend.ClientSessionId();
+
+        // 会话级身份裁决 + SID 授权白名单：受理帧前按客户端身份决定是否放行
+        // （同一连接内身份固定，逐帧执行结果不变；拒绝 -> Error 应答并断开）。
+        // Options 缺省启用 DefaultClientGate；置空 clientGate 视为放行（防误用）。
+        const IpcClientIdentity identity{request.clientPid,
+                                         request.clientSessionId,
+                                         backend.ClientUserSid()};
+        if (options_.clientGate) {
+            if (auto gated = options_.clientGate(identity); !gated) {
+                SendErrorReply(backend, request.requestId,
+                               IpcErrorCode::UnauthorizedClient,
+                               options_.ioTimeout);
+                drainAndDisconnect();
+                closeUnlessPersistent();
+                return common::Result<IpcServeResult>::Failure(
+                    gated.ErrorValue());
+            }
+        }
+        if (!options_.allowedClientSids.empty()) {
+            bool sidAllowed = false;
+            for (const std::wstring& sid : options_.allowedClientSids) {
+                if (SidEqualsIgnoreCase(identity.userSid, sid)) {
+                    sidAllowed = true;
+                    break;
+                }
+            }
+            if (!sidAllowed) {
+                SendErrorReply(backend, request.requestId,
+                               IpcErrorCode::UnauthorizedClient,
+                               options_.ioTimeout);
+                drainAndDisconnect();
+                closeUnlessPersistent();
+                return common::Result<IpcServeResult>::Failure(
+                    common::Error::Validation(
+                        "SessionSidGate", L"客户端用户不在授权白名单"));
+            }
+        }
+
+        IpcReply reply;
+        // 无自定义处理器时使用默认处理器（可携带会话凭据要求 expectedToken）。
+        const bool customHandler = static_cast<bool>(handler);
+        const common::Result<void> handled =
+            customHandler
+                ? handler(request, reply)
+                : DefaultHandler(request, reply, options_.expectedToken);
+        if (!handled) {
+            SendErrorReply(backend, request.requestId,
+                           handler ? IpcErrorCode::HandlerFailed
+                                   : IpcErrorCode::UnsupportedType,
+                           options_.ioTimeout);
+            drainAndDisconnect();
+            closeUnlessPersistent();
+            return common::Result<IpcServeResult>::Failure(
+                handled.ErrorValue());
+        }
+
+        // 校验应答帧（载荷超限属内部错误，不写出、不伪装成功）。
+        if (const auto valid = ValidateIpcHeader(MakeIpcHeader(
+                reply.type, static_cast<std::uint32_t>(reply.payload.size()),
+                request.requestId));
+            !valid) {
+            (void)backend.DisconnectClient();
+            closeUnlessPersistent();
+            return common::Result<IpcServeResult>::Failure(valid.ErrorValue());
+        }
+
+        if (auto written = backend.WriteAll(
+                MakeFrame(reply.type, request.requestId, reply.payload),
+                options_.ioTimeout);
+            !written) {
             (void)backend.DisconnectClient();
             closeUnlessPersistent();
             return common::Result<IpcServeResult>::Failure(
-                readPayload.ErrorValue());
+                written.ErrorValue());
+        }
+
+        ++frames;
+        last.requestType = request.type;
+        last.replyType = reply.type;
+        last.requestId = request.requestId;
+        last.clientPid = request.clientPid;
+        last.clientSessionId = request.clientSessionId;
+        last.clientUserSid = identity.userSid;
+        last.payloadBytes =
+            static_cast<std::uint32_t>(request.payload.size());
+
+        // 单帧模式（ServeOne）：服务满 maxFrames 帧即正常结束。
+        if (limitedFrames && frames >= maxFrames) {
+            break;
         }
     }
 
-    // 组装请求（帧头已校验，类型必然可解析）。
-    IpcRequest request;
-    request.type = ParseMessageType(header.type).value();
-    request.requestId = header.requestId;
-    request.payload = std::move(payload);
-    request.clientPid = backend.ClientPid();
-    request.clientSessionId = backend.ClientSessionId();
-
-    // 会话级身份裁决：受理前按客户端身份决定是否放行。拒绝 -> Error 应答并断开。
-    // Options 缺省启用 DefaultClientGate；置空 clientGate 视为放行（防误用）。
-    const IpcClientIdentity identity{request.clientPid, request.clientSessionId,
-                                     backend.ClientUserSid()};
-    if (options_.clientGate) {
-        if (auto gated = options_.clientGate(identity); !gated) {
-            SendErrorReply(backend, request.requestId,
-                           IpcErrorCode::UnauthorizedClient,
-                           options_.ioTimeout);
-            drainAndDisconnect();
-            closeUnlessPersistent();
-            return common::Result<IpcServeResult>::Failure(
-                gated.ErrorValue());
-        }
-    }
-    // SID 授权白名单（IPC-006）：配置后要求客户端用户 SID 命中其一（大小写不敏感）。
-    if (!options_.allowedClientSids.empty()) {
-        bool sidAllowed = false;
-        for (const std::wstring& sid : options_.allowedClientSids) {
-            if (SidEqualsIgnoreCase(identity.userSid, sid)) {
-                sidAllowed = true;
-                break;
-            }
-        }
-        if (!sidAllowed) {
-            SendErrorReply(backend, request.requestId,
-                           IpcErrorCode::UnauthorizedClient,
-                           options_.ioTimeout);
-            drainAndDisconnect();
-            closeUnlessPersistent();
-            return common::Result<IpcServeResult>::Failure(
-                common::Error::Validation(
-                    "SessionSidGate", L"客户端用户不在授权白名单"));
-        }
-    }
-
-    IpcReply reply;
-    // 无自定义处理器时使用默认处理器（可携带会话凭据要求 expectedToken）。
-    const bool customHandler = static_cast<bool>(handler);
-    const common::Result<void> handled =
-        customHandler
-            ? handler(request, reply)
-            : DefaultHandler(request, reply, options_.expectedToken);
-    if (!handled) {
-        SendErrorReply(backend, request.requestId,
-                       handler ? IpcErrorCode::HandlerFailed
-                               : IpcErrorCode::UnsupportedType,
-                       options_.ioTimeout);
-        drainAndDisconnect();
-        closeUnlessPersistent();
-        return common::Result<IpcServeResult>::Failure(
-            handled.ErrorValue());
-    }
-
-    // 校验应答帧（载荷超限属内部错误，不写出、不伪装成功）。
-    if (const auto valid = ValidateIpcHeader(MakeIpcHeader(
-            reply.type, static_cast<std::uint32_t>(reply.payload.size()),
-            request.requestId));
-        !valid) {
-        (void)backend.DisconnectClient();
-        closeUnlessPersistent();
-        return common::Result<IpcServeResult>::Failure(valid.ErrorValue());
-    }
-
-    if (auto written = backend.WriteAll(
-            MakeFrame(reply.type, request.requestId, reply.payload),
-            options_.ioTimeout);
-        !written) {
-        (void)backend.DisconnectClient();
-        closeUnlessPersistent();
-        return common::Result<IpcServeResult>::Failure(written.ErrorValue());
-    }
-
-    // 等待客户端关闭（经典命名管道握手：断开前先确认对端已读完应答，
-    // 避免 DisconnectNamedPipe 竞态导致客户端读应答失败）。
-    // 0 字节/对端关闭/超时均视为可安全断开（尽力而为，不阻断结果）。
+    // 会话结束：断开前“排空读”等待对端读完最后一帧应答（防 Disconnect 竞态）。
     drainAndDisconnect();
     closeUnlessPersistent();
 
-    IpcServeResult result;
-    result.requestType = request.type;
-    result.replyType = reply.type;
-    result.requestId = request.requestId;
-    result.clientPid = request.clientPid;
-    result.clientSessionId = request.clientSessionId;
-    result.clientUserSid = identity.userSid;
-    result.payloadBytes = static_cast<std::uint32_t>(request.payload.size());
-    return common::Result<IpcServeResult>::Success(std::move(result));
+    last.framesServed = frames;
+    last.endReason = endReason;
+    return common::Result<IpcServeResult>::Success(std::move(last));
+}
+
+common::Result<IpcServeResult> IpcSession::ServeOne(
+    Handler handler, std::chrono::milliseconds acceptTimeout) {
+    // 单帧语义由 ServeLoop(maxFrames=1) 承载：接受一个客户端、服务一帧、断开。
+    return ServeLoop(handler, acceptTimeout, options_.ioTimeout,
+                     options_.ioTimeout, 1);
+}
+
+common::Result<IpcServeResult> IpcSession::ServeSession(
+    Handler handler, std::chrono::milliseconds acceptTimeout,
+    std::chrono::milliseconds idleTimeout,
+    std::chrono::milliseconds sessionBudget) {
+    if (idleTimeout.count() <= 0 || sessionBudget.count() <= 0) {
+        return common::Result<IpcServeResult>::Failure(common::Error::Validation(
+            "ServeSession", L"idleTimeout 与 sessionBudget 必须为正"));
+    }
+    // 多帧会话：接受一个客户端后在同一连接上连续服务（帧数不设上限），结束条件
+    // 见 IpcSessionEndReason（客户端关闭/帧间空闲心跳丢失/会话预算耗尽）。
+    return ServeLoop(handler, acceptTimeout, idleTimeout, sessionBudget, 0);
 }
 
 common::Result<void> IpcSession::DefaultHandler(const IpcRequest& request,
@@ -403,6 +501,89 @@ common::Result<IpcReply> IpcRoundTrip(
     reply.type = replyType;
     reply.payload = std::move(replyPayload);
     return common::Result<IpcReply>::Success(std::move(reply));
+}
+
+common::Result<std::vector<IpcReply>> IpcRoundTripSession(
+    std::shared_ptr<IpcClientBackend> backend, std::wstring_view pipePath,
+    std::span<const IpcFrameRequest> requests,
+    std::chrono::milliseconds timeout) {
+    auto& client = *backend;
+    if (requests.empty()) {
+        return common::Result<std::vector<IpcReply>>::Success({});
+    }
+
+    // 连接一次，在同一连接上依次完成每帧请求-应答（连接复用多帧）。
+    if (auto connected = client.Connect(pipePath, timeout); !connected) {
+        return common::Result<std::vector<IpcReply>>::Failure(
+            connected.ErrorValue());
+    }
+    std::vector<IpcReply> replies;
+    replies.reserve(requests.size());
+    for (const IpcFrameRequest& frame : requests) {
+        if (auto written = client.WriteAll(
+                MakeFrame(frame.type, frame.requestId, frame.payload),
+                timeout);
+            !written) {
+            client.Close();
+            return common::Result<std::vector<IpcReply>>::Failure(
+                written.ErrorValue());
+        }
+
+        std::array<std::byte, kIpcHeaderSize> headerBytes{};
+        if (auto readHeader = client.ReadAll(headerBytes, timeout);
+            !readHeader) {
+            client.Close();
+            return common::Result<std::vector<IpcReply>>::Failure(
+                readHeader.ErrorValue());
+        }
+        auto parsedHeader = ParseHeader(headerBytes);
+        if (!parsedHeader) {
+            client.Close();
+            return common::Result<std::vector<IpcReply>>::Failure(
+                parsedHeader.ErrorValue());
+        }
+        const IpcHeader header = parsedHeader.Value();
+
+        std::vector<std::byte> replyPayload;
+        if (header.payloadLength > 0) {
+            replyPayload.resize(header.payloadLength);
+            if (auto readPayload = client.ReadAll(replyPayload, timeout);
+                !readPayload) {
+                client.Close();
+                return common::Result<std::vector<IpcReply>>::Failure(
+                    readPayload.ErrorValue());
+            }
+        }
+
+        // 应答 requestId 必须与当前请求配对（防乱序/伪造）；不匹配拒绝并中止。
+        if (header.requestId != frame.requestId) {
+            client.Close();
+            return common::Result<std::vector<IpcReply>>::Failure(
+                common::Error::Validation(
+                    "IpcRoundTripSession", L"应答 requestId 与请求不匹配"));
+        }
+        const IpcMessageType replyType = ParseMessageType(header.type).value();
+        if (replyType == IpcMessageType::Error) {
+            // Error 应答：载荷首字节为错误码（空载荷按内部错误处理）。
+            const IpcErrorCode code =
+                replyPayload.empty()
+                    ? IpcErrorCode::Internal
+                    : static_cast<IpcErrorCode>(replyPayload[0]);
+            client.Close();
+            return common::Result<std::vector<IpcReply>>::Failure(
+                common::Error::Validation(
+                    "IpcRoundTripSession",
+                    std::wstring(L"服务端返回错误: ") +
+                        IpcErrorCodeToString(code)));
+        }
+
+        IpcReply reply;
+        reply.type = replyType;
+        reply.payload = std::move(replyPayload);
+        replies.push_back(std::move(reply));
+    }
+    client.Close();
+    return common::Result<std::vector<IpcReply>>::Success(std::move(replies));
 }
 
 } // namespace optimizer::ipc

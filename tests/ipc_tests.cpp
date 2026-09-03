@@ -34,9 +34,12 @@ using optimizer::ipc::IpcMessageType;
 using optimizer::ipc::IpcReply;
 using optimizer::ipc::IpcRequest;
 using optimizer::ipc::IpcRoundTrip;
+using optimizer::ipc::IpcRoundTripSession;
 using optimizer::ipc::IpcServeResult;
 using optimizer::ipc::IpcServerBackend;
 using optimizer::ipc::IpcSession;
+using optimizer::ipc::IpcSessionEndReason;
+using optimizer::ipc::IpcFrameRequest;
 using optimizer::ipc::kIpcHeaderSize;
 using optimizer::ipc::kIpcMagic;
 using optimizer::ipc::kIpcVersion;
@@ -79,6 +82,10 @@ public:
     int acceptCount = 0;
     int disconnectCount = 0;
     int closeCount = 0;
+    // 按调用次数的读失败注入（多帧/会话超时测试）：0 = 不启用。
+    std::size_t readCallCount = 0;
+    std::size_t failReadAtCall = 0;      // 从第 N 次 ReadAll 起强制失败
+    std::uint32_t failReadAtErrorCode = ERROR_TIMEOUT;
 
     Result<void> CreateAndListen() override {
         ++createCount;
@@ -100,6 +107,11 @@ public:
 
     Result<void> ReadAll(std::span<std::byte> buffer,
                          std::chrono::milliseconds) override {
+        ++readCallCount;
+        if (failReadAtCall != 0 && readCallCount >= failReadAtCall) {
+            return Result<void>::Failure(
+                Error::FromWin32(failReadAtErrorCode, "ReadAll"));
+        }
         if (failRead) {
             return Result<void>::Failure(
                 Error::FromWin32(failErrorCode, "ReadAll"));
@@ -249,6 +261,38 @@ bool ParseWrittenFrame(const std::vector<std::byte>& written,
     payload.assign(written.begin() + static_cast<std::ptrdiff_t>(kIpcHeaderSize),
                    written.end());
     return payload.size() == header.payloadLength;
+}
+
+// 解析服务端写出的多个应答帧（帧头 + 载荷），保持写入顺序。
+bool ParseWrittenFrames(const std::vector<std::byte>& written,
+                        std::vector<IpcHeader>& headers,
+                        std::vector<std::vector<std::byte>>& payloads) {
+    std::size_t offset = 0;
+    while (offset < written.size()) {
+        if (written.size() - offset < kIpcHeaderSize) {
+            return false;
+        }
+        std::array<std::byte, kIpcHeaderSize> headerBytes{};
+        std::copy_n(written.begin() + static_cast<std::ptrdiff_t>(offset),
+                    kIpcHeaderSize, headerBytes.begin());
+        auto parsed = ParseHeader(headerBytes);
+        if (!parsed) {
+            return false;
+        }
+        const std::size_t total =
+            kIpcHeaderSize + parsed.Value().payloadLength;
+        if (total > written.size() - offset) {
+            return false;
+        }
+        headers.push_back(parsed.Value());
+        payloads.push_back(std::vector<std::byte>(
+            written.begin() + static_cast<std::ptrdiff_t>(offset +
+                                                          kIpcHeaderSize),
+            written.begin() +
+                static_cast<std::ptrdiff_t>(offset + total)));
+        offset += total;
+    }
+    return true;
 }
 
 // ---------- 协议纯函数 ----------
@@ -1348,6 +1392,189 @@ bool TestServeNonPersistentAcceptTimeoutCloses() {
     return !served && fake->closeCount == 1;
 }
 
+// ---------- 同一连接多帧会话（IPC-008，ServeSession） ----------
+
+bool TestServeSessionTwoPingsOneConnection() {
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto first = BuildFrame(IpcMessageType::Ping, 1, {});
+    const auto second = BuildFrame(IpcMessageType::Ping, 2, {});
+    fake->incoming.insert(fake->incoming.end(), first.begin(), first.end());
+    fake->incoming.insert(fake->incoming.end(), second.begin(), second.end());
+    IpcSession session(fake);
+    auto served = session.ServeSession(
+        nullptr, std::chrono::milliseconds(100), std::chrono::milliseconds(200),
+        std::chrono::milliseconds(5000));
+    if (!served || served.Value().framesServed != 2 ||
+        served.Value().endReason != IpcSessionEndReason::ClientClosed ||
+        served.Value().replyType != IpcMessageType::Ack ||
+        served.Value().requestId != 2) {
+        return false;
+    }
+    // 同一连接上两帧：仅一次 accept/断开/关闭，逐帧 Ack 且 requestId 配对。
+    std::vector<IpcHeader> headers;
+    std::vector<std::vector<std::byte>> payloads;
+    return ParseWrittenFrames(fake->outgoing, headers, payloads) &&
+           headers.size() == 2 && fake->acceptCount == 1 &&
+           fake->disconnectCount == 1 && fake->closeCount == 1 &&
+           headers[0].type ==
+               static_cast<std::uint8_t>(IpcMessageType::Ack) &&
+           headers[0].requestId == 1 &&
+           headers[1].type ==
+               static_cast<std::uint8_t>(IpcMessageType::Ack) &&
+           headers[1].requestId == 2;
+}
+
+bool TestServeSessionFactsTwoFrames() {
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    std::vector<IpcFact> facts = {{"client_pid", "12345"},
+                                  {"observer", "demo"}};
+    auto encoded = SerializeFactsV1(facts);
+    if (!encoded) {
+        return false;
+    }
+    const auto frame1 =
+        BuildFrame(IpcMessageType::FactsSnapshot, 10, encoded.Value());
+    const auto frame2 =
+        BuildFrame(IpcMessageType::FactsSnapshot, 11, encoded.Value());
+    fake->incoming.insert(fake->incoming.end(), frame1.begin(), frame1.end());
+    fake->incoming.insert(fake->incoming.end(), frame2.begin(), frame2.end());
+    IpcSession session(fake);
+    auto served = session.ServeSession(
+        nullptr, std::chrono::milliseconds(100), std::chrono::milliseconds(200),
+        std::chrono::milliseconds(5000));
+    if (!served || served.Value().framesServed != 2 ||
+        served.Value().payloadBytes != encoded.Value().size()) {
+        return false;
+    }
+    std::vector<IpcHeader> headers;
+    std::vector<std::vector<std::byte>> payloads;
+    if (!ParseWrittenFrames(fake->outgoing, headers, payloads) ||
+        headers.size() != 2) {
+        return false;
+    }
+    const auto expected = BytesFromText(FormatFactsSummary(facts));
+    return headers[0].type ==
+               static_cast<std::uint8_t>(IpcMessageType::Ack) &&
+           payloads[0] == expected && headers[1].requestId == 11 &&
+           payloads[1] == expected;
+}
+
+bool TestServeSessionIdleTimeoutEnds() {
+    // 帧间空闲超时（客户端静默超过 idleTimeout，心跳丢失）正常结束会话。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    fake->failReadAtCall = 2; // 服务完首帧后，读下一帧头超时
+    fake->failReadAtErrorCode = ERROR_TIMEOUT;
+    IpcSession session(fake);
+    auto served = session.ServeSession(
+        nullptr, std::chrono::milliseconds(100), std::chrono::milliseconds(50),
+        std::chrono::milliseconds(5000));
+    return served && served.Value().framesServed == 1 &&
+           served.Value().endReason == IpcSessionEndReason::IdleTimeout &&
+           served.Value().replyType == IpcMessageType::Ack &&
+           fake->closeCount == 1;
+}
+
+bool TestServeSessionBudgetEnds() {
+    // 会话总预算比帧间空闲先耗尽：按 SessionBudget 正常结束。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    fake->failReadAtCall = 2;
+    fake->failReadAtErrorCode = ERROR_TIMEOUT;
+    IpcSession session(fake);
+    auto served = session.ServeSession(
+        nullptr, std::chrono::milliseconds(100),
+        std::chrono::milliseconds(10000), std::chrono::milliseconds(2000));
+    return served && served.Value().framesServed == 1 &&
+           served.Value().endReason == IpcSessionEndReason::SessionBudget;
+}
+
+bool TestServeSessionInvalidSecondFrameEnds() {
+    // 会话中第二帧非法（破坏魔数）：帧级严格拒绝 -> Error(InvalidHeader) 并终止。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto first = BuildFrame(IpcMessageType::Ping, 1, {});
+    auto bad = BuildFrame(IpcMessageType::Ping, 2, {});
+    bad[0] = std::byte{0x00};
+    fake->incoming.insert(fake->incoming.end(), first.begin(), first.end());
+    fake->incoming.insert(fake->incoming.end(), bad.begin(), bad.end());
+    IpcSession session(fake);
+    const auto served = session.ServeSession(
+        nullptr, std::chrono::milliseconds(100), std::chrono::milliseconds(200),
+        std::chrono::milliseconds(5000));
+    if (served || served.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    std::vector<IpcHeader> headers;
+    std::vector<std::vector<std::byte>> payloads;
+    return ParseWrittenFrames(fake->outgoing, headers, payloads) &&
+           headers.size() == 2 &&
+           headers[0].type ==
+               static_cast<std::uint8_t>(IpcMessageType::Ack) &&
+           headers[1].type ==
+               static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           !payloads[1].empty() &&
+           static_cast<IpcErrorCode>(payloads[1][0]) ==
+               IpcErrorCode::InvalidHeader;
+}
+
+bool TestServeSessionTokenCheckedEveryFrame() {
+    // 会话每帧独立过凭据校验：首帧带 token 回 Ack，次帧缺 token 回
+    // Error(AuthFailed)。Error 应答是合法回执，会话继续直至客户端关闭。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto withToken =
+        BytesFromText("CPOPFACTS/1\nagent_token=secret123\nobserver=demo");
+    const auto withoutToken = BytesFromText("CPOPFACTS/1\nobserver=demo");
+    const auto frame1 =
+        BuildFrame(IpcMessageType::FactsSnapshot, 1, withToken);
+    const auto frame2 =
+        BuildFrame(IpcMessageType::FactsSnapshot, 2, withoutToken);
+    fake->incoming.insert(fake->incoming.end(), frame1.begin(), frame1.end());
+    fake->incoming.insert(fake->incoming.end(), frame2.begin(), frame2.end());
+    IpcSession::Options options;
+    options.expectedToken = L"secret123";
+    IpcSession session(fake, options);
+    auto served = session.ServeSession(
+        nullptr, std::chrono::milliseconds(100), std::chrono::milliseconds(200),
+        std::chrono::milliseconds(5000));
+    if (!served || served.Value().framesServed != 2) {
+        return false;
+    }
+    std::vector<IpcHeader> headers;
+    std::vector<std::vector<std::byte>> payloads;
+    return ParseWrittenFrames(fake->outgoing, headers, payloads) &&
+           headers.size() == 2 &&
+           headers[0].type ==
+               static_cast<std::uint8_t>(IpcMessageType::Ack) &&
+           headers[1].type ==
+               static_cast<std::uint8_t>(IpcMessageType::Error) &&
+           !payloads[1].empty() &&
+           static_cast<IpcErrorCode>(payloads[1][0]) ==
+               IpcErrorCode::AuthFailed;
+}
+
+bool TestServeSessionConnectThenCloseIsFailure() {
+    // 客户端连接后未发任何帧即关闭：0 帧不伪装成功（与单帧语义一致）。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    IpcSession session(fake);
+    const auto served = session.ServeSession(
+        nullptr, std::chrono::milliseconds(100), std::chrono::milliseconds(200),
+        std::chrono::milliseconds(5000));
+    return !served && served.ErrorValue().domain == ErrorDomain::Win32 &&
+           served.ErrorValue().code == ERROR_BROKEN_PIPE &&
+           fake->closeCount == 1;
+}
+
+bool TestServeSessionZeroParamsRejected() {
+    // 空闲超时/会话预算必须为正（Validation 拒绝，不触后端）。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    IpcSession session(fake);
+    const auto served = session.ServeSession(
+        nullptr, std::chrono::milliseconds(100), std::chrono::milliseconds(0),
+        std::chrono::milliseconds(0));
+    return !served && served.ErrorValue().domain == ErrorDomain::Validation &&
+           fake->createCount == 0;
+}
+
 // ---------- 客户端往返（fake 后端） ----------
 
 bool TestServeTokenMatchingAck() {
@@ -1550,6 +1777,89 @@ bool TestRoundTripReadFailure() {
            reply.ErrorValue().code == ERROR_BROKEN_PIPE;
 }
 
+// ---------- 客户端多帧会话（IPC-008，IpcRoundTripSession） ----------
+
+bool TestRoundTripSessionTwoPings() {
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    const auto reply1 = BuildFrame(IpcMessageType::Ack, 1, {});
+    const auto reply2 = BuildFrame(IpcMessageType::Ack, 2, {});
+    fake->incoming.insert(fake->incoming.end(), reply1.begin(), reply1.end());
+    fake->incoming.insert(fake->incoming.end(), reply2.begin(), reply2.end());
+    std::vector<IpcFrameRequest> requests = {
+        {IpcMessageType::Ping, 1, {}}, {IpcMessageType::Ping, 2, {}}};
+    const auto result = IpcRoundTripSession(
+        fake, L"\\.\\pipe\\test", requests, std::chrono::milliseconds(100));
+    if (!result || result.Value().size() != 2) {
+        return false;
+    }
+    // 连接一次，两帧请求与两帧应答一一配对。
+    if (fake->connectedPath != L"\\.\\pipe\\test" || !fake->closed) {
+        return false;
+    }
+    std::vector<IpcHeader> headers;
+    std::vector<std::vector<std::byte>> payloads;
+    return ParseWrittenFrames(fake->outgoing, headers, payloads) &&
+           headers.size() == 2 && headers[0].requestId == 1 &&
+           headers[1].requestId == 2;
+}
+
+bool TestRoundTripSessionEmptyNoConnect() {
+    // 空请求序列：不连接、直接成功返回空列表（避免无意义的连接往返）。
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    const auto result =
+        IpcRoundTripSession(fake, L"\\.\\pipe\\test", {},
+                            std::chrono::milliseconds(100));
+    return result && result.Value().empty() && !fake->closed &&
+           fake->connectedPath.empty();
+}
+
+bool TestRoundTripSessionSecondErrorAborts() {
+    // 会话中途 Error 应答：中止并关闭，不伪装成功，错误原因可见。
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    const auto ok = BuildFrame(IpcMessageType::Ack, 1, {});
+    const std::vector<std::byte> errorPayload{
+        static_cast<std::byte>(IpcErrorCode::AuthFailed)};
+    const auto err = BuildFrame(IpcMessageType::Error, 2, errorPayload);
+    fake->incoming.insert(fake->incoming.end(), ok.begin(), ok.end());
+    fake->incoming.insert(fake->incoming.end(), err.begin(), err.end());
+    std::vector<IpcFrameRequest> requests = {
+        {IpcMessageType::Ping, 1, {}},
+        {IpcMessageType::FactsSnapshot, 2, {}}};
+    const auto result = IpcRoundTripSession(
+        fake, L"\\.\\pipe\\test", requests, std::chrono::milliseconds(100));
+    return !result && result.ErrorValue().domain == ErrorDomain::Validation &&
+           result.ErrorValue().message.find(L"authentication failed") !=
+               std::wstring::npos &&
+           fake->closed;
+}
+
+bool TestRoundTripSessionMidRequestIdMismatch() {
+    // 会话中途应答 requestId 与当前请求不配对：拒绝并中止。
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    const auto ok = BuildFrame(IpcMessageType::Ack, 1, {});
+    const auto bad = BuildFrame(IpcMessageType::Ack, 99, {}); // 不配对
+    fake->incoming.insert(fake->incoming.end(), ok.begin(), ok.end());
+    fake->incoming.insert(fake->incoming.end(), bad.begin(), bad.end());
+    std::vector<IpcFrameRequest> requests = {
+        {IpcMessageType::Ping, 1, {}}, {IpcMessageType::Ping, 2, {}}};
+    const auto result = IpcRoundTripSession(
+        fake, L"\\.\\pipe\\test", requests, std::chrono::milliseconds(100));
+    return !result && result.ErrorValue().domain == ErrorDomain::Validation &&
+           fake->closed;
+}
+
+bool TestRoundTripSessionConnectFailure() {
+    auto fake = std::make_shared<FakeIpcClientBackend>();
+    fake->failConnect = true;
+    fake->failCode = ERROR_PIPE_BUSY;
+    std::vector<IpcFrameRequest> requests = {
+        {IpcMessageType::Ping, 1, {}}, {IpcMessageType::Ping, 2, {}}};
+    const auto result = IpcRoundTripSession(
+        fake, L"\\.\\pipe\\test", requests, std::chrono::milliseconds(100));
+    return !result && result.ErrorValue().domain == ErrorDomain::Win32 &&
+           result.ErrorValue().code == ERROR_PIPE_BUSY;
+}
+
 } // namespace
 
 int wmain() {
@@ -1643,6 +1953,19 @@ int wmain() {
         &TestServePersistentAcceptTimeoutKeepsInstance);
     run(L"serve non persistent accept timeout closes",
         &TestServeNonPersistentAcceptTimeoutCloses);
+    run(L"serve session two pings one connection",
+        &TestServeSessionTwoPingsOneConnection);
+    run(L"serve session facts two frames", &TestServeSessionFactsTwoFrames);
+    run(L"serve session idle timeout ends", &TestServeSessionIdleTimeoutEnds);
+    run(L"serve session budget ends", &TestServeSessionBudgetEnds);
+    run(L"serve session invalid second frame ends",
+        &TestServeSessionInvalidSecondFrameEnds);
+    run(L"serve session token checked every frame",
+        &TestServeSessionTokenCheckedEveryFrame);
+    run(L"serve session connect then close is failure",
+        &TestServeSessionConnectThenCloseIsFailure);
+    run(L"serve session zero params rejected",
+        &TestServeSessionZeroParamsRejected);
     run(L"serve one custom handler", &TestServeOneCustomHandler);
     run(L"serve one bad magic rejected", &TestServeOneBadMagicRejected);
     run(L"serve one unknown version rejected", &TestServeOneUnknownVersionRejected);
@@ -1670,5 +1993,13 @@ int wmain() {
     run(L"round trip connect failure", &TestRoundTripConnectFailure);
     run(L"round trip write failure", &TestRoundTripWriteFailure);
     run(L"round trip read failure", &TestRoundTripReadFailure);
+    run(L"round trip session two pings", &TestRoundTripSessionTwoPings);
+    run(L"round trip session empty no connect",
+        &TestRoundTripSessionEmptyNoConnect);
+    run(L"round trip session second error aborts",
+        &TestRoundTripSessionSecondErrorAborts);
+    run(L"round trip session mid request id mismatch",
+        &TestRoundTripSessionMidRequestIdMismatch);
+    run(L"round trip session connect failure", &TestRoundTripSessionConnectFailure);
     return failed == 0 ? 0 : 1;
 }

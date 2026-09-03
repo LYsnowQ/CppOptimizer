@@ -34,6 +34,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -1491,7 +1492,9 @@ std::wstring FindIpcSuffix(int argc, wchar_t* argv[], int start) noexcept {
         const std::wstring_view arg(argv[i]);
         const bool isOptionFlag = arg == L"--ipc-token" ||
                                   arg == L"--ipc-token-file" ||
-                                  arg == L"--ipc-allow-user";
+                                  arg == L"--ipc-allow-user" ||
+                                  arg == L"--session" ||
+                                  arg == L"--frames";
         if (!skipNextValue && isOptionFlag) {
             skipNextValue = true;
             continue;
@@ -1505,6 +1508,46 @@ std::wstring FindIpcSuffix(int argc, wchar_t* argv[], int start) noexcept {
         }
     }
     return suffix;
+}
+
+// 在位置参数中检测 --session 开关（多帧会话演示）；跳过各带值选项及其值，
+// 与 FindIpcSuffix 的解析一致（顺序无关）。--session 本身不带值，直接判定。
+bool HasIpcSessionFlag(int argc, wchar_t* argv[], int start) noexcept {
+    bool skipNextValue = false;
+    for (int i = start; i < argc; ++i) {
+        const std::wstring_view arg(argv[i]);
+        const bool optionWithValue = arg == L"--ipc-token" ||
+                                     arg == L"--ipc-token-file" ||
+                                     arg == L"--ipc-allow-user" ||
+                                     arg == L"--frames";
+        if (!skipNextValue && optionWithValue) {
+            skipNextValue = true;
+            continue;
+        }
+        if (skipNextValue) {
+            skipNextValue = false;
+            continue;
+        }
+        if (arg == L"--session") {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 读取 --frames <n>（多帧会话演示帧数，连接一次依次发送）；缺省 1（单帧往返）。
+// 解析失败返回 0（调用方校验 1..16）。
+std::uint32_t FindIpcFrames(int argc, wchar_t* argv[], int start) noexcept {
+    for (int i = start; i + 1 < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--frames") {
+            std::uint32_t frames = 0;
+            if (!ParseUint32(argv[i + 1], frames)) {
+                return 0;
+            }
+            return frames;
+        }
+    }
+    return 1;
 }
 
 // 扫描 --ipc-token <值>（IPC-005 demo：共享会话凭据）。返回是否存在；
@@ -1608,13 +1651,14 @@ int RunIpcCredentialCommand(int argc, wchar_t* argv[]) {
 }
 
 int RunIpcServerCommand(int argc, wchar_t* argv[]) {
-    // --ipc-pipe server <s> [suffix] [--ipc-token <t>]：受保护命名管道服务端演示
-    // （IPC-005）。前台、有界（s 秒）：等待至多一个客户端连接，读取一帧并严格校验
-    // （未知版本/类型/超长载荷 -> Error 应答），默认处理器应答
+    // --ipc-pipe server <s> [suffix] [--session] [--ipc-token <t>]：受保护命名
+    // 管道服务端演示（IPC-005/008）。前台、有界（s 秒）：等待至多一个客户端连接，
+    // 逐帧严格校验（未知版本/类型/超长载荷 -> Error 应答），默认处理器应答
     // （Ping->Ack；FactsSnapshot 依次过 CPOPFACTS/1 语法解析与 v1 键语义白名单，
     // 合法回 Ack 摘要、任一违反回 Error(InvalidFacts)；配置 --ipc-token 后还要求
     // 载荷携带匹配的 agent_token 事实，缺失/不匹配回 Error(AuthFailed)），
-    // 输出客户端身份（PID + 会话）与请求/应答摘要。
+    // 输出客户端身份（PID + 会话）与请求/应答摘要。缺省每客户端一帧；--session
+    // 在同一连接上连续服务多帧（客户端关闭/帧间空闲/窗口到期结束，IPC-008）。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
@@ -1661,10 +1705,14 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
             sessionOptions.allowedClientSids.push_back(sid);
         }
     }
+    // 多帧会话（IPC-008）：--session 接受一个客户端后在同一连接上连续服务多帧
+    //（帧间空闲/窗口到期结束），连接内不再每帧重连；缺省保持单帧语义不变。
+    const bool sessionMode = HasIpcSessionFlag(argc, argv, 4);
     auto backend = optimizer::ipc::CreateWin32ServerBackend(pipeName);
     optimizer::ipc::IpcSession session(backend, sessionOptions);
 
-    std::wcout << L"IPC pipe server (protected transport, single client, "
+    std::wcout << L"IPC pipe server (protected transport, "
+               << (sessionMode ? L"multi-frame session, " : L"single client, ")
                << seconds << L" s)\n";
     std::wcout << L"  pipe     : " << pipeName << L"\n";
     if (!sessionOptions.expectedToken.empty()) {
@@ -1679,12 +1727,18 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
                           std::chrono::seconds(seconds);
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
         deadline - std::chrono::steady_clock::now());
-    auto served = session.ServeOne(nullptr, remaining);
+    // 帧间空闲上限（心跳节奏）：客户端超过该时长未发帧视为心跳丢失，会话结束。
+    const std::chrono::milliseconds kSessionIdle(2000);
+    const optimizer::common::Result<optimizer::ipc::IpcServeResult> served =
+        sessionMode
+            ? session.ServeSession(nullptr, remaining, kSessionIdle,
+                                   remaining + kSessionIdle)
+            : session.ServeOne(nullptr, remaining);
     if (!served) {
         const auto& error = served.ErrorValue();
         if (error.domain == optimizer::common::ErrorDomain::Win32 &&
             error.code == ERROR_TIMEOUT) {
-            // 有界窗口内无客户端连接：正常结束（非失败）。
+            // 有界窗口内无客户端连接/会话无帧：正常结束（非失败）。
             std::wcout << L"  no client connected within " << seconds
                        << L" s (bounded window ended)\n";
             return 0;
@@ -1700,6 +1754,13 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
                << result.clientSessionId << L"\n";
     if (!result.clientUserSid.empty()) {
         std::wcout << L"  identity : user SID " << result.clientUserSid.c_str()
+                   << L"\n";
+    }
+    if (sessionMode) {
+        std::wcout << L"  session  : served " << result.framesServed
+                   << L" frame(s) on one connection, end: "
+                   << optimizer::ipc::IpcSessionEndReasonToString(
+                          result.endReason)
                    << L"\n";
     }
     std::wcout << L"  request  : "
@@ -1719,10 +1780,12 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
 }
 
 int RunIpcClientCommand(int argc, wchar_t* argv[]) {
-    // --ipc-pipe client [suffix] [--ipc-token <t>]：受保护命名管道客户端演示
-    // （IPC-005）。连接服务端，发送一帧 FactsSnapshot（CPOPFACTS/1 结构化事实：
-    // 真实内存观测 + 自报身份；配置 --ipc-token 时附 agent_token 凭据事实），
-    // 读取并校验应答帧（requestId 配对、Error 应答不伪装成功）。
+    // --ipc-pipe client [suffix] [--ipc-token <t>] [--ipc-token-file [<path>]]
+    //   [--frames <n>]：受保护命名管道客户端演示（IPC-005/008）。缺省：连接服务端
+    // 发送一帧 FactsSnapshot（CPOPFACTS/1 结构化事实：真实内存观测 + 自报身份；
+    // 配置 --ipc-token/--ipc-token-file 时附 agent_token 凭据事实），读取并校验
+    // 应答帧（requestId 配对、Error 应答不伪装成功）。--frames n（2..16）：复用
+    // 同一连接依次发送 n 帧（连接内多帧会话，逐帧独立内存观测，不再逐帧重连）。
     const std::wstring suffix = FindIpcSuffix(argc, argv, 3);
     const std::wstring pipeName = IpcPipeName(suffix);
     if (pipeName.empty()) {
@@ -1750,90 +1813,157 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
         token = stored.Value();
         hasToken = true;
     }
+    const std::uint32_t frames = FindIpcFrames(argc, argv, 3);
+    if (frames == 0 || frames > 16) {
+        std::wcerr << L"  --frames must be 1..16\n";
+        return 2;
+    }
+    const bool sessionMode = frames > 1;
 
-    // 结构化事实载荷（IPC-003 v1 schema：client_pid + 真实内存观测 + observer）。
-    // 内存字段来自 QueryMemoryStatus（只读、无副作用）；v1 键白名单见 ipc_facts.hpp。
-    auto memoryStatus = optimizer::memory::QueryMemoryStatus();
-    if (!memoryStatus) {
-        std::wcerr << L"  memory query failed ["
-                   << optimizer::common::ToString(
-                          memoryStatus.ErrorValue().domain)
-                   << L"] " << memoryStatus.ErrorValue().message << L"\n";
-        return 2;
-    }
-    const auto& memory = memoryStatus.Value();
-    std::vector<optimizer::ipc::IpcFact> facts;
-    facts.push_back(optimizer::ipc::IpcFact{
-        "client_pid", std::to_string(::GetCurrentProcessId())});
-    facts.push_back(optimizer::ipc::IpcFact{
-        "memory_total_mb",
-        std::to_string(memory.totalPhysicalBytes / (1024 * 1024))});
-    facts.push_back(optimizer::ipc::IpcFact{
-        "memory_available_mb",
-        std::to_string(memory.availablePhysicalBytes / (1024 * 1024))});
-    facts.push_back(optimizer::ipc::IpcFact{
-        "memory_load_percent",
-        std::to_string(memory.memoryLoadPercent)});
-    facts.push_back(
-        optimizer::ipc::IpcFact{"observer", "CppOptimizer ipc demo"});
-    if (hasToken) {
-        // 会话凭据事实（IPC-005）：ASCII 窄化（已在 IsValidIpcToken 约束）；
-        // 不打印明文（FormatFactsSummary 亦不回显凭据）。
-        std::string narrowToken;
-        narrowToken.reserve(token.size());
-        for (const wchar_t ch : token) {
-            narrowToken.push_back(static_cast<char>(ch));
+    // 构建一帧结构化事实载荷（IPC-003 v1 schema：client_pid + 真实内存观测 +
+    // observer；可附 agent_token 凭据事实）。每次调用重取内存（逐帧可能变化），
+    // QueryMemoryStatus 只读无副作用。失败已打印原因，返回空。
+    const auto buildFactsPayload =
+        [&]() -> std::optional<
+            std::pair<std::vector<optimizer::ipc::IpcFact>,
+                      std::vector<std::byte>>> {
+        auto memoryStatus = optimizer::memory::QueryMemoryStatus();
+        if (!memoryStatus) {
+            std::wcerr << L"  memory query failed ["
+                       << optimizer::common::ToString(
+                              memoryStatus.ErrorValue().domain)
+                       << L"] " << memoryStatus.ErrorValue().message << L"\n";
+            return std::nullopt;
         }
+        const auto& memory = memoryStatus.Value();
+        std::vector<optimizer::ipc::IpcFact> facts;
         facts.push_back(optimizer::ipc::IpcFact{
-            std::string(optimizer::ipc::kFactsTokenKey), narrowToken});
-    }
-    auto payloadResult = optimizer::ipc::SerializeFactsV1(facts);
-    if (!payloadResult) {
-        std::wcerr << L"  serialize facts failed ["
-                   << optimizer::common::ToString(
-                          payloadResult.ErrorValue().domain)
-                   << L"] " << payloadResult.ErrorValue().message << L"\n";
-        return 2;
-    }
-    const std::vector<std::byte> payload =
-        std::move(payloadResult).Value();
+            "client_pid", std::to_string(::GetCurrentProcessId())});
+        facts.push_back(optimizer::ipc::IpcFact{
+            "memory_total_mb",
+            std::to_string(memory.totalPhysicalBytes / (1024 * 1024))});
+        facts.push_back(optimizer::ipc::IpcFact{
+            "memory_available_mb",
+            std::to_string(memory.availablePhysicalBytes / (1024 * 1024))});
+        facts.push_back(optimizer::ipc::IpcFact{
+            "memory_load_percent",
+            std::to_string(memory.memoryLoadPercent)});
+        facts.push_back(
+            optimizer::ipc::IpcFact{"observer", "CppOptimizer ipc demo"});
+        if (hasToken) {
+            // 会话凭据事实（IPC-005）：ASCII 窄化（已在 IsValidIpcToken 约束）；
+            // 不打印明文（FormatFactsSummary 亦不回显凭据）。
+            std::string narrowToken;
+            narrowToken.reserve(token.size());
+            for (const wchar_t ch : token) {
+                narrowToken.push_back(static_cast<char>(ch));
+            }
+            facts.push_back(optimizer::ipc::IpcFact{
+                std::string(optimizer::ipc::kFactsTokenKey), narrowToken});
+        }
+        auto encoded = optimizer::ipc::SerializeFactsV1(facts);
+        if (!encoded) {
+            std::wcerr << L"  serialize facts failed ["
+                       << optimizer::common::ToString(
+                              encoded.ErrorValue().domain)
+                       << L"] " << encoded.ErrorValue().message << L"\n";
+            return std::nullopt;
+        }
+        return std::make_pair(std::move(facts), std::move(encoded).Value());
+    };
+
+    // 应答显示（默认处理器 Ack 载荷为 ASCII 文本，可直接显示）。
+    const auto printReply = [](std::uint32_t requestId,
+                               const optimizer::ipc::IpcReply& value) {
+        std::wcout << L"  reply    : "
+                   << optimizer::ipc::MessageTypeToString(value.type)
+                   << L" id=" << requestId << L" payload="
+                   << value.payload.size() << L" bytes";
+        if (value.type == optimizer::ipc::IpcMessageType::Ack &&
+            !value.payload.empty()) {
+            std::string text;
+            text.reserve(value.payload.size());
+            for (const auto b : value.payload) {
+                text.push_back(
+                    static_cast<char>(static_cast<unsigned char>(b)));
+            }
+            std::wcout << L" [" << text.c_str() << L"]";
+        }
+        std::wcout << L"\n";
+    };
 
     std::wcout << L"IPC pipe client (protected transport)\n";
     std::wcout << L"  pipe     : " << pipeName << L"\n";
     if (hasToken) {
         std::wcout << L"  auth     : session token supplied (hidden)\n";
     }
-    std::wcout << L"  request  : FactsSnapshot id=1 payload=" << payload.size()
-               << L" bytes (" << facts.size() << L" facts)\n";
-    std::wcout << L"  facts    : "
-               << optimizer::ipc::FormatFactsSummary(facts).c_str() << L"\n";
+    if (sessionMode) {
+        std::wcout << L"  session  : " << frames
+                   << L" frames on one connection (no reconnect)\n";
+    }
 
     auto backend = optimizer::ipc::CreateWin32ClientBackend();
-    auto reply = optimizer::ipc::IpcRoundTrip(
-        backend, pipeName, optimizer::ipc::IpcMessageType::FactsSnapshot,
-        payload, 1, std::chrono::milliseconds(3000));
-    if (!reply) {
-        const auto& error = reply.ErrorValue();
-        std::wcerr << L"  round trip failed ["
+    const std::chrono::milliseconds kIpcTimeout(3000);
+
+    if (!sessionMode) {
+        auto built = buildFactsPayload();
+        if (!built) {
+            return 2;
+        }
+        const std::vector<std::byte>& payload = built->second;
+        std::wcout << L"  request  : FactsSnapshot id=1 payload=" << payload.size()
+                   << L" bytes (" << built->first.size() << L" facts)\n";
+        std::wcout << L"  facts    : "
+                   << optimizer::ipc::FormatFactsSummary(built->first).c_str()
+                   << L"\n";
+        auto reply = optimizer::ipc::IpcRoundTrip(
+            backend, pipeName, optimizer::ipc::IpcMessageType::FactsSnapshot,
+            payload, 1, kIpcTimeout);
+        if (!reply) {
+            const auto& error = reply.ErrorValue();
+            std::wcerr << L"  round trip failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        printReply(1, reply.Value());
+        return 0;
+    }
+
+    // 多帧会话：连接一次，逐帧发送（每帧独立真实内存观测与自报身份）。
+    std::vector<optimizer::ipc::IpcFrameRequest> requests;
+    requests.reserve(frames);
+    for (std::uint32_t i = 0; i < frames; ++i) {
+        auto built = buildFactsPayload();
+        if (!built) {
+            return 2;
+        }
+        if (i == 0) {
+            std::wcout << L"  request  : FactsSnapshot id=1.." << frames
+                       << L" payload=" << built->second.size() << L" bytes ("
+                       << built->first.size() << L" facts each)\n";
+            std::wcout << L"  facts    : "
+                       << optimizer::ipc::FormatFactsSummary(built->first).c_str()
+                       << L"\n";
+        }
+        optimizer::ipc::IpcFrameRequest request;
+        request.type = optimizer::ipc::IpcMessageType::FactsSnapshot;
+        request.requestId = i + 1;
+        request.payload = std::move(built->second);
+        requests.push_back(std::move(request));
+    }
+    auto replies = optimizer::ipc::IpcRoundTripSession(backend, pipeName,
+                                                       requests, kIpcTimeout);
+    if (!replies) {
+        const auto& error = replies.ErrorValue();
+        std::wcerr << L"  round trip session failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
     }
-    const auto& value = reply.Value();
-    std::wcout << L"  reply    : "
-               << optimizer::ipc::MessageTypeToString(value.type)
-               << L" id=1 payload=" << value.payload.size() << L" bytes";
-    if (value.type == optimizer::ipc::IpcMessageType::Ack &&
-        !value.payload.empty()) {
-        // 默认处理器应答载荷为 ASCII 文本（收到字节数说明），可直接显示。
-        std::string text;
-        text.reserve(value.payload.size());
-        for (const auto b : value.payload) {
-            text.push_back(static_cast<char>(static_cast<unsigned char>(b)));
-        }
-        std::wcout << L" [" << text.c_str() << L"]";
+    for (std::size_t i = 0; i < replies.Value().size(); ++i) {
+        printReply(static_cast<std::uint32_t>(i + 1), replies.Value()[i]);
     }
-    std::wcout << L"\n";
     return 0;
 }
 
@@ -1879,15 +2009,20 @@ void PrintUsage() {
         << L"                             the protected pipe, SVC-002)\n"
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
-        << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix] [--ipc-token <t>]\n"
-        << L"                             Serve one protected named-pipe client for\n"
-        << L"                             1..60 s (single frame; strict validation;\n"
-        << L"                             facts parsed + v1 schema whitelist; optional\n"
-        << L"                             session token / user SID allow-list;\n"
-        << L"                             ack/error reply)\n"
-        << L"  CppOptimizer.exe --ipc-pipe client [suffix] [--ipc-token <t>]  Send a\n"
-        << L"                             real memory facts snapshot (CPOPFACTS/1;\n"
-        << L"                             optional agent_token) and print the reply\n"
+        << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix] [--session]\n"
+        << L"                             [--ipc-token <t>]  Protected pipe server\n"
+        << L"                             for 1..60 s: serve one client frame\n"
+        << L"                             (strict validation; facts parsed + v1\n"
+        << L"                             schema whitelist; optional session token /\n"
+        << L"                             user SID allow-list; ack/error reply).\n"
+        << L"                             --session: serve multiple frames on one\n"
+        << L"                             connection until client close / idle\n"
+        << L"  CppOptimizer.exe --ipc-pipe client [suffix] [--frames <1..16>]\n"
+        << L"                             [--ipc-token <t>]  Send real memory facts\n"
+        << L"                             snapshots (CPOPFACTS/1; optional token) and\n"
+        << L"                             print each reply. --frames n: reuse one\n"
+        << L"                             connection for n frames (no reconnect;\n"
+        << L"                             default 1)\n"
         << L"  CppOptimizer.exe --ipc-credential provision [path] [--force]\n"
         << L"                             Create/rotate the per-user private agent\n"
         << L"                             token store (IPC-007; ACL: SYSTEM + user;\n"
