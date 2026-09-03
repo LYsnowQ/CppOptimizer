@@ -164,6 +164,12 @@ common::Result<IpcServeResult> IpcSession::ServeLoop(
             backend.Close();
         }
     };
+    // 客户端受理结论回调（连接层面，至多一次）：宿主据此计数身份/凭据失败（Safe Mode）。
+    const auto emitVerdict = [this](IpcClientVerdict verdict) {
+        if (options_.verdictObserver) {
+            options_.verdictObserver(verdict);
+        }
+    };
     // 单帧模式（ServeOne）不设空闲/预算语义：读帧恒用 ioTimeout。
     const bool limitedFrames = (maxFrames != 0);
     const auto sessionDeadline =
@@ -181,6 +187,7 @@ common::Result<IpcServeResult> IpcSession::ServeLoop(
     std::uint32_t frames = 0;   // 本次连接已成功服务帧数
     IpcServeResult last;        // 最近一帧摘要
     IpcSessionEndReason endReason = IpcSessionEndReason::ClientClosed;
+    bool clientAuthRejected = false; // 本次连接是否出现过凭据不符（AuthFailed 回执）
 
     for (;;) {
         // 会话预算检查（多帧模式）：预算耗尽且已服务过帧 -> 正常结束；尚未服务
@@ -277,6 +284,7 @@ common::Result<IpcServeResult> IpcSession::ServeLoop(
                 SendErrorReply(backend, request.requestId,
                                IpcErrorCode::UnauthorizedClient,
                                options_.ioTimeout);
+                emitVerdict(IpcClientVerdict::UnauthorizedClient);
                 drainAndDisconnect();
                 closeUnlessPersistent();
                 return common::Result<IpcServeResult>::Failure(
@@ -295,6 +303,7 @@ common::Result<IpcServeResult> IpcSession::ServeLoop(
                 SendErrorReply(backend, request.requestId,
                                IpcErrorCode::UnauthorizedClient,
                                options_.ioTimeout);
+                emitVerdict(IpcClientVerdict::UnauthorizedClient);
                 drainAndDisconnect();
                 closeUnlessPersistent();
                 return common::Result<IpcServeResult>::Failure(
@@ -319,6 +328,13 @@ common::Result<IpcServeResult> IpcSession::ServeLoop(
             closeUnlessPersistent();
             return common::Result<IpcServeResult>::Failure(
                 handled.ErrorValue());
+        }
+        // 凭据不符（默认处理器回 Error(AuthFailed)，非处理器失败）：标记本次连接结论。
+        if (reply.type == IpcMessageType::Error &&
+            reply.payload.size() == 1 &&
+            static_cast<IpcErrorCode>(reply.payload[0]) ==
+                IpcErrorCode::AuthFailed) {
+            clientAuthRejected = true;
         }
 
         // 校验应答帧（载荷超限属内部错误，不写出、不伪装成功）。
@@ -363,6 +379,9 @@ common::Result<IpcServeResult> IpcSession::ServeLoop(
 
     last.framesServed = frames;
     last.endReason = endReason;
+    // 受理结论（连接层面）：凭据失败优先于正常受理上报（即使同一连接曾正常服务过帧）。
+    emitVerdict(clientAuthRejected ? IpcClientVerdict::AuthFailed
+                                   : IpcClientVerdict::Accepted);
     return common::Result<IpcServeResult>::Success(std::move(last));
 }
 

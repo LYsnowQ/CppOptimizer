@@ -41,6 +41,7 @@ using optimizer::ipc::IpcServeResult;
 using optimizer::ipc::IpcServerBackend;
 using optimizer::ipc::IpcSession;
 using optimizer::ipc::IpcSessionEndReason;
+using optimizer::ipc::IpcClientVerdict;
 using optimizer::ipc::IpcFrameRequest;
 using optimizer::ipc::RunConcurrentServer;
 using optimizer::ipc::kIpcHeaderSize;
@@ -1578,6 +1579,81 @@ bool TestServeSessionZeroParamsRejected() {
            fake->createCount == 0;
 }
 
+// ---------- 受理结论观察者（IPC-010，Safe Mode 联动） ----------
+
+bool TestVerdictObserverAcceptedOnServe() {
+    // 正常受理完成：连接层面回调一次 Accepted。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    std::vector<IpcClientVerdict> verdicts;
+    IpcSession::Options options;
+    options.verdictObserver = [&verdicts](IpcClientVerdict v) {
+        verdicts.push_back(v);
+    };
+    IpcSession session(fake, options);
+    const auto served =
+        session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    return served && verdicts.size() == 1 &&
+           verdicts[0] == IpcClientVerdict::Accepted;
+}
+
+bool TestVerdictObserverGateReject() {
+    // 会话级身份裁决拒绝（会话 0）：回调 UnauthorizedClient（连接层面一次），不回调 Accepted。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientPid = 1234;
+    fake->clientSessionId = 0;
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    std::vector<IpcClientVerdict> verdicts;
+    IpcSession::Options options;
+    options.verdictObserver = [&verdicts](IpcClientVerdict v) {
+        verdicts.push_back(v);
+    };
+    IpcSession session(fake, options);
+    const auto served =
+        session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    return !served && verdicts.size() == 1 &&
+           verdicts[0] == IpcClientVerdict::UnauthorizedClient;
+}
+
+bool TestVerdictObserverSidReject() {
+    // SID 白名单不匹配：回调 UnauthorizedClient。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->clientSid = L"S-1-5-21-1-2-3-9999";
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    std::vector<IpcClientVerdict> verdicts;
+    IpcSession::Options options;
+    options.allowedClientSids.push_back(L"S-1-5-21-1-2-3-1001");
+    options.verdictObserver = [&verdicts](IpcClientVerdict v) {
+        verdicts.push_back(v);
+    };
+    IpcSession session(fake, options);
+    const auto served =
+        session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    return !served && verdicts.size() == 1 &&
+           verdicts[0] == IpcClientVerdict::UnauthorizedClient;
+}
+
+bool TestVerdictObserverAuthFailed() {
+    // 凭据不符（缺 token）：服务端回 Error(AuthFailed)；结论为 AuthFailed（非 Accepted）。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    const auto payload = BytesFromText("CPOPFACTS/1\nobserver=demo");
+    fake->incoming =
+        BuildFrame(IpcMessageType::FactsSnapshot, 3, payload);
+    std::vector<IpcClientVerdict> verdicts;
+    IpcSession::Options options;
+    options.expectedToken = L"secret123";
+    options.verdictObserver = [&verdicts](IpcClientVerdict v) {
+        verdicts.push_back(v);
+    };
+    IpcSession session(fake, options);
+    const auto served =
+        session.ServeOne(nullptr, std::chrono::milliseconds(100));
+    return served &&
+           served.Value().replyType == IpcMessageType::Error &&
+           verdicts.size() == 1 &&
+           verdicts[0] == IpcClientVerdict::AuthFailed;
+}
+
 // ---------- 客户端往返（fake 后端） ----------
 
 bool TestServeTokenMatchingAck() {
@@ -2107,6 +2183,11 @@ int wmain() {
         &TestServeSessionConnectThenCloseIsFailure);
     run(L"serve session zero params rejected",
         &TestServeSessionZeroParamsRejected);
+    run(L"verdict observer accepted on serve",
+        &TestVerdictObserverAcceptedOnServe);
+    run(L"verdict observer gate reject", &TestVerdictObserverGateReject);
+    run(L"verdict observer sid reject", &TestVerdictObserverSidReject);
+    run(L"verdict observer auth failed", &TestVerdictObserverAuthFailed);
     run(L"serve one custom handler", &TestServeOneCustomHandler);
     run(L"serve one bad magic rejected", &TestServeOneBadMagicRejected);
     run(L"serve one unknown version rejected", &TestServeOneUnknownVersionRejected);

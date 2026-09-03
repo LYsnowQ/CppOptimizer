@@ -1192,6 +1192,12 @@ struct ServiceHostDemoState {
     std::size_t ipcLastFactCount = 0;
     bool ipcLastReplyAck = false;                 // 最近一次是否回 Ack
     std::string ipcLastFactSummary;               // 最近受理解析摘要（ASCII）
+    std::wstring ipcExpectedToken;                // 会话凭据（IPC-005；空 = 不要求）
+    // Safe Mode（IPC-010，Agent 受理门禁）：身份/凭据失败连续达阈值暂停受理新 Agent。
+    std::optional<optimizer::service::SafeModeGuard> ipcSafeMode; // console demo 启用
+    bool ipcAuthRejected = false;                 // 最近一次 ServeOne 是否以身份/凭据拒绝结束
+    std::size_t ipcSafeModeEntries = 0;           // 窗口内进入 Safe Mode 次数（汇总）
+    std::size_t ipcRejectedClients = 0;           // 窗口内身份/凭据拒绝客户端数（汇总）
 };
 
 optimizer::common::Result<void> ServiceWorkloadTick(
@@ -1210,12 +1216,20 @@ optimizer::common::Result<void> ServiceWorkloadTick(
 
     // SVC-002/003：受保护管道事实消费（--ipc-facts；常驻监听连续受理多客户端）。
     if (state.ipcEnabled && state.ipcSession) {
+        state.ipcAuthRejected = false; // 每轮受理前复位（verdictObserver 按结论置位）
+        // Safe Mode（IPC-010）：冷却期暂停受理新 Agent，R0 观测/日志照常。
+        if (state.ipcSafeMode && !state.ipcSafeMode->ShouldAcceptClients()) {
+            state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
+                               L"ipc  : Safe Mode 冷却中，暂停受理 Agent");
+            return optimizer::common::Result<void>::Success();
+        }
         auto served = state.ipcSession->ServeOne(
             [&state](const optimizer::ipc::IpcRequest& request,
                      optimizer::ipc::IpcReply& reply) {
-                // 默认处理语义；另在受理侧记录解析摘要（R0 只读，不执行任何动作）。
-                auto handled =
-                    optimizer::ipc::IpcSession::DefaultHandler(request, reply);
+                // 默认处理语义（复用会话凭据要求 expectedToken，与 ServeOne 缺省处理器一致）；
+                // 另在受理侧记录解析摘要（R0 只读，不执行任何动作）。
+                auto handled = optimizer::ipc::IpcSession::DefaultHandler(
+                    request, reply, state.ipcExpectedToken);
                 if (request.type ==
                     optimizer::ipc::IpcMessageType::FactsSnapshot) {
                     if (auto parsed =
@@ -1237,6 +1251,12 @@ optimizer::common::Result<void> ServiceWorkloadTick(
             // 接受超时 = 暂无 Agent 连接：继续下一 tick；其余失败如实上报。
             if (error.domain == optimizer::common::ErrorDomain::Win32 &&
                 error.code == ERROR_TIMEOUT) {
+                return optimizer::common::Result<void>::Success();
+            }
+            // 身份/凭据拒绝（观察者已计数，可能已触发 Safe Mode）：非宿主故障，
+            // 记录后继续下一 tick（IPC-010；此前此类拒绝会中止整个窗口）。
+            if (state.ipcAuthRejected) {
+                state.ipcAuthRejected = false;
                 return optimizer::common::Result<void>::Success();
             }
             return optimizer::common::Result<void>::Failure(error);
@@ -1284,6 +1304,13 @@ void SetupServiceLogger(optimizer::logger::Logger& logger) noexcept {
     }
 }
 
+// IPC 凭据/选项解析辅助（前向声明，定义见 IPC 命令区段；服务控制台命令复用同套解析）。
+bool FindIpcToken(int argc, wchar_t* argv[], int start,
+                  std::wstring& out) noexcept;
+bool IsValidIpcToken(const std::wstring& token) noexcept;
+std::optional<std::filesystem::path> FindIpcTokenFile(
+    int argc, wchar_t* argv[], int start) noexcept;
+
 int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     // --service console <s> [--ipc-facts]：控制台托管演示（前台、有界、Ctrl+C
     // 优雅停止）。可选 --ipc-facts 在负载窗口内同时作为受保护管道服务端受理一个
@@ -1312,6 +1339,61 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             L"\\\\.\\pipe\\CppOptimizerIpc"; // 与 --ipc-pipe 默认管道同名
         optimizer::ipc::IpcSession::Options ipcOptions;
         ipcOptions.persistentAccept = true; // 常驻监听：窗口内连续受理多客户端
+        // 会话凭据/用户 SID 授权（IPC-005/006/007，与 --ipc-pipe server 同语义；
+        // 缺省不要求，仅当显式配置才启用）。
+        std::wstring ipcToken;
+        if (FindIpcToken(argc, argv, 4, ipcToken)) {
+            if (!IsValidIpcToken(ipcToken)) {
+                std::wcerr
+                    << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
+                return 2;
+            }
+            ipcOptions.expectedToken = ipcToken;
+        }
+        if (auto tokenFile = FindIpcTokenFile(argc, argv, 4)) {
+            auto stored = optimizer::ipc::ReadAgentTokenFile(*tokenFile);
+            if (!stored) {
+                std::wcerr << L"  --ipc-token-file unreadable; run "
+                              L"--ipc-credential provision first\n";
+                return 2;
+            }
+            ipcOptions.expectedToken = stored.Value();
+        }
+        for (int i = 4; i + 1 < argc; ++i) {
+            if (std::wstring_view(argv[i]) == L"--ipc-allow-user") {
+                const std::wstring sid = argv[i + 1];
+                if (sid.empty() || sid.size() > 192) {
+                    std::wcerr
+                        << L"  --ipc-allow-user needs a valid SID string\n";
+                    return 2;
+                }
+                ipcOptions.allowedClientSids.push_back(sid);
+            }
+        }
+        state.ipcExpectedToken = ipcOptions.expectedToken; // 供 tick 自定义处理器复用
+        // Safe Mode 门禁（IPC-010）：身份/凭据失败连续达阈值（3 次）暂停受理新 Agent
+        // 冷却 2 秒；仅影响 Agent 受理，R0 负载照常。
+        state.ipcSafeMode.emplace(); // 默认：阈值 3、冷却 2s、启用
+        ipcOptions.verdictObserver =
+            [&state](optimizer::ipc::IpcClientVerdict verdict) {
+                auto& guard = *state.ipcSafeMode;
+                const auto before = guard.State();
+                if (verdict == optimizer::ipc::IpcClientVerdict::Accepted) {
+                    guard.OnClientServed();
+                    return;
+                }
+                guard.OnClientRejected();
+                ++state.ipcRejectedClients;
+                if (before == optimizer::service::SafeModeState::Normal &&
+                    guard.State() ==
+                        optimizer::service::SafeModeState::SafeMode) {
+                    ++state.ipcSafeModeEntries;
+                    state.logger.Write(
+                        optimizer::logger::LogLevel::Info, L"service",
+                        L"ipc  : Safe Mode entered - 暂停受理新 Agent（连续身份/凭据失败）");
+                }
+                state.ipcAuthRejected = true;
+            };
         state.ipcSession = std::make_shared<optimizer::ipc::IpcSession>(
             optimizer::ipc::CreateWin32ServerBackend(state.ipcPipeName),
             ipcOptions);
@@ -1333,7 +1415,10 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     if (ipcFacts) {
         optimizer::common::WriteConsoleLine(
             L"             + protected-pipe facts consume (continuous, R0)");
-        optimizer::common::WriteConsoleLine(L"  ipc      : pipe \\\\.\\pipe\\CppOptimizerIpc");
+        optimizer::common::WriteConsoleLine(
+            L"  ipc      : pipe \\\\.\\pipe\\CppOptimizerIpc");
+        optimizer::common::WriteConsoleLine(
+            L"             safe mode : intake gate on (3 consecutive auth failures -> 2 s pause)");
     }
     optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
     const auto result = host.RunConsole(std::chrono::seconds(seconds));
@@ -1365,6 +1450,13 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             ipcLine << L"  ipc      : no Agent connected within window";
         }
         optimizer::common::WriteConsoleLine(ipcLine.str());
+        if (state.ipcSafeMode) {
+            std::wostringstream safeLine;
+            safeLine << L"  safe mode: entered " << state.ipcSafeModeEntries
+                     << L" time(s), rejected clients "
+                     << state.ipcRejectedClients;
+            optimizer::common::WriteConsoleLine(safeLine.str());
+        }
     }
     std::wostringstream stoppedLine;
     stoppedLine << L"  stopped  : "
@@ -2080,11 +2172,15 @@ void PrintUsage() {
         << L"                             demand start, R0 workload)\n"
         << L"  CppOptimizer.exe --service uninstall           Remove the Windows service\n"
         << L"                             (SCM, requires administrator)\n"
-        << L"  CppOptimizer.exe --service console <s> [--ipc-facts]  Host the R0\n"
-        << L"                             workload in console mode for 1..60 s\n"
-        << L"                             (foreground; Ctrl+C to stop; --ipc-facts\n"
-        << L"                             also consumes one Agent facts frame via\n"
-        << L"                             the protected pipe, SVC-002)\n"
+        << L"  CppOptimizer.exe --service console <s> [--ipc-facts]\n"
+        << L"                             [--ipc-token <t>] [--ipc-token-file [<path>]]\n"
+        << L"                             [--ipc-allow-user <SID>]  Host the R0 workload\n"
+        << L"                             in console mode for 1..60 s (foreground; Ctrl+C\n"
+        << L"                             to stop). --ipc-facts also serves Agent facts\n"
+        << L"                             frames via the protected pipe continuously\n"
+        << L"                             (optional session token / user SID allow-list;\n"
+        << L"                             Safe Mode intake gate: 3 consecutive auth\n"
+        << L"                             failures pause intake for 2 s)\n"
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
         << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix] [--session]\n"

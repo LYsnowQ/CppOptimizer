@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -183,6 +184,55 @@ private:
     std::atomic<ServiceState> currentState_{ServiceState::Unknown};
     mutable std::mutex mutex_;
     std::condition_variable cv_;
+};
+
+// Safe Mode（docs/23 §6 面向 Agent 受理侧的首个触发项）：宿主对“身份/凭据失败”（服务端
+// 裁决/SID 白名单 UnauthorizedClient、凭据 AuthFailed，见 ipc::IpcClientVerdict）连续计数，
+// 达阈值即进入 Safe Mode——暂停继续受理新 Agent（仅保留 R0 观测/日志），冷却期过后自动回到
+// Normal 并复位计数。纯状态机 + 可注入时钟（确定性单测）；由宿主在每轮受理前用
+// ShouldAcceptClients() 决策。其余触发项（配置无效/Native 探测异常/审计不可用等）属后续。
+enum class SafeModeState {
+    Normal,   // 正常受理
+    SafeMode  // 冷却中：暂停受理新 Agent
+};
+
+// Safe Mode 门禁状态机（docs/23 §6 触发项：IPC 身份验证失败次数异常）。
+class SafeModeGuard {
+public:
+    using Clock = std::function<std::chrono::steady_clock::time_point()>;
+
+    struct Options {
+        std::size_t consecutiveFailuresToEnter = 3; // 连续失败阈值（任一正常受理即复位）
+        std::chrono::milliseconds cooldown = std::chrono::milliseconds(2000);
+        bool enabled = true; // false = 恒 Normal（不启用门禁）
+        Clock now = [] { return std::chrono::steady_clock::now(); };
+    };
+
+    explicit SafeModeGuard(Options options = {});
+
+    // 当前状态（查询时推进冷却到期自动恢复）。
+    [[nodiscard]] SafeModeState State() noexcept;
+
+    // 是否可以受理新客户端（enabled=false 或 Normal 且未在冷却中为 true）。
+    [[nodiscard]] bool ShouldAcceptClients() noexcept;
+
+    // Safe Mode 中剩余冷却时长（Normal 时为 0）。
+    [[nodiscard]] std::chrono::milliseconds CooldownRemaining() noexcept;
+
+    // 一次受理正常完成（Accepted 结论）时调用：复位连续失败计数。
+    void OnClientServed() noexcept;
+
+    // 一次身份/凭据拒绝（UnauthorizedClient/AuthFailed 结论）时调用：连续失败 +1，
+    // 达阈值进入 Safe Mode 并启动冷却。
+    void OnClientRejected() noexcept;
+
+private:
+    void Refresh() noexcept; // 冷却到期自动回到 Normal 并复位计数
+
+    Options options_;
+    std::size_t consecutiveFailures_ = 0;
+    bool safeMode_ = false;
+    std::chrono::steady_clock::time_point cooldownUntil_{};
 };
 
 } // namespace optimizer::service

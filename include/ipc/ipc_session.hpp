@@ -54,6 +54,14 @@ enum class IpcSessionEndReason : std::uint8_t {
 [[nodiscard]] const wchar_t* IpcSessionEndReasonToString(
     IpcSessionEndReason reason) noexcept;
 
+// 客户端受理结论（连接层面；Safe Mode 联动，见 service::SafeModeGuard）。
+// 每完成一个客户端至多回调一次 verdictObserver。
+enum class IpcClientVerdict : std::uint8_t {
+    Accepted = 0,           // 正常受理并服务完成（含 InvalidFacts 等非身份类 Error 回执）
+    UnauthorizedClient = 1, // 身份裁决/SID 白名单拒绝（服务端回 Error(UnauthorizedClient)）
+    AuthFailed = 2          // 会话凭据不符（服务端回 Error(AuthFailed)）
+};
+
 // 一次会话结果摘要。
 struct IpcServeResult {
     IpcMessageType requestType = IpcMessageType::Ping;
@@ -127,6 +135,11 @@ public:
         // （沿用 IPC-002/003 行为）。真实供给见 ipc_credentials.hpp（IPC-007：
         // 每用户私有 ACL 存储 + 轮换），此处为程序内注入点（CLI/宿主从存储加载）。
         std::wstring expectedToken;
+        // 客户端受理结论观察者（Safe Mode 联动）：每完成一个客户端（连接层面）至多
+        // 回调一次——Accepted（含 InvalidFacts 等非身份类 Error 回执）或
+        // UnauthorizedClient/AuthFailed（身份/凭据拒绝）。宿主据此做连续失败计数与
+        // 门禁（暂停受理）；默认空 = 不回调（既有行为不变）。
+        std::function<void(IpcClientVerdict)> verdictObserver;
     };
 
     explicit IpcSession(std::shared_ptr<IpcServerBackend> backend,

@@ -1,5 +1,6 @@
 ﻿#include "service/service_host.hpp"
 
+#include <chrono>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -417,6 +418,103 @@ bool TestWin32BackendRejectsNonScmDispatcher() {
            result.ErrorValue().code == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT;
 }
 
+// 手动时钟：可推进的 steady 时钟，供 SafeModeGuard 确定性测试。
+struct ManualClock {
+    std::chrono::steady_clock::time_point now{};
+};
+
+using optimizer::service::SafeModeGuard;
+using optimizer::service::SafeModeState;
+
+bool TestSafeModeEnterAfterThreshold() {
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.cooldown = std::chrono::milliseconds(10000);
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    if (guard.State() != SafeModeState::Normal ||
+        !guard.ShouldAcceptClients()) {
+        return false;
+    }
+    guard.OnClientRejected();
+    guard.OnClientRejected();
+    if (guard.State() != SafeModeState::Normal) {
+        return false; // 阈值-1：仍 Normal
+    }
+    guard.OnClientRejected(); // 达阈值：进入 Safe Mode
+    return guard.State() == SafeModeState::SafeMode &&
+           !guard.ShouldAcceptClients() &&
+           guard.CooldownRemaining() > std::chrono::milliseconds(0);
+}
+
+bool TestSafeModeServedResetsFailures() {
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.cooldown = std::chrono::milliseconds(10000);
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    guard.OnClientRejected();
+    guard.OnClientRejected();
+    guard.OnClientServed(); // 正常受理：复位连续失败
+    guard.OnClientRejected();
+    guard.OnClientRejected(); // 复位后仅 2 次连续失败：未达阈值
+    return guard.State() == SafeModeState::Normal &&
+           guard.ShouldAcceptClients();
+}
+
+bool TestSafeModeCooldownRecovers() {
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.cooldown = std::chrono::milliseconds(1000);
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    guard.OnClientRejected();
+    guard.OnClientRejected();
+    guard.OnClientRejected(); // 进入 Safe Mode
+    if (guard.State() != SafeModeState::SafeMode) {
+        return false;
+    }
+    clock.now += std::chrono::milliseconds(1500); // 冷却到期
+    // 查询即自动恢复 Normal 并复位计数
+    return guard.State() == SafeModeState::Normal &&
+           guard.ShouldAcceptClients() &&
+           guard.CooldownRemaining() == std::chrono::milliseconds(0);
+}
+
+bool TestSafeModeDisabledStaysNormal() {
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.enabled = false;
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    for (int i = 0; i < 6; ++i) {
+        guard.OnClientRejected();
+    }
+    return guard.State() == SafeModeState::Normal &&
+           guard.ShouldAcceptClients() &&
+           guard.CooldownRemaining() == std::chrono::milliseconds(0);
+}
+
+bool TestSafeModeGuardBoundaryAndCooldown() {
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.cooldown = std::chrono::milliseconds(500);
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    // 冷却剩余时长随时钟推进递减。
+    guard.OnClientRejected();
+    guard.OnClientRejected();
+    guard.OnClientRejected();
+    if (guard.CooldownRemaining() <= std::chrono::milliseconds(0) ||
+        guard.CooldownRemaining() > std::chrono::milliseconds(500)) {
+        return false;
+    }
+    clock.now += std::chrono::milliseconds(300);
+    const auto remaining = guard.CooldownRemaining();
+    return remaining > std::chrono::milliseconds(0) &&
+           remaining <= std::chrono::milliseconds(200);
+}
+
 } // namespace
 
 int wmain() {
@@ -459,5 +557,10 @@ int wmain() {
     run(L"uninstall rejects empty name", &TestUninstallRejectsEmptyName);
     run(L"win32 backend rejects non-scm dispatcher",
         &TestWin32BackendRejectsNonScmDispatcher);
+    run(L"safe mode enter after threshold", &TestSafeModeEnterAfterThreshold);
+    run(L"safe mode served resets failures", &TestSafeModeServedResetsFailures);
+    run(L"safe mode cooldown recovers", &TestSafeModeCooldownRecovers);
+    run(L"safe mode disabled stays normal", &TestSafeModeDisabledStaysNormal);
+    run(L"safe mode boundary and cooldown", &TestSafeModeGuardBoundaryAndCooldown);
     return failed == 0 ? 0 : 1;
 }

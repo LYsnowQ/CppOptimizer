@@ -1,5 +1,6 @@
 ﻿#include "service/service_host.hpp"
 
+#include <utility>
 #include <vector>
 
 namespace optimizer::service {
@@ -472,6 +473,63 @@ common::Result<void> ServiceHost::ReReportCurrentStatus() noexcept {
         return common::Result<void>::Success();
     }
     return backend_->ReportStatus(MakeStatusReport(state));
+}
+
+SafeModeGuard::SafeModeGuard(Options options)
+    : options_(std::move(options)) {}
+
+void SafeModeGuard::Refresh() noexcept {
+    // 冷却到期自动回到 Normal 并复位计数（下轮从头累计）。
+    if (safeMode_ && options_.now() >= cooldownUntil_) {
+        safeMode_ = false;
+        consecutiveFailures_ = 0;
+    }
+}
+
+SafeModeState SafeModeGuard::State() noexcept {
+    Refresh();
+    return safeMode_ ? SafeModeState::SafeMode : SafeModeState::Normal;
+}
+
+bool SafeModeGuard::ShouldAcceptClients() noexcept {
+    Refresh();
+    return !options_.enabled || !safeMode_;
+}
+
+std::chrono::milliseconds SafeModeGuard::CooldownRemaining() noexcept {
+    Refresh();
+    if (!safeMode_) {
+        return std::chrono::milliseconds(0);
+    }
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        cooldownUntil_ - options_.now());
+    return remaining.count() > 0 ? remaining : std::chrono::milliseconds(0);
+}
+
+void SafeModeGuard::OnClientServed() noexcept {
+    if (!options_.enabled) {
+        return;
+    }
+    Refresh();
+    if (safeMode_) {
+        return; // Safe Mode 期间不产生“正常受理”（宿主已暂停），防御性忽略
+    }
+    consecutiveFailures_ = 0;
+}
+
+void SafeModeGuard::OnClientRejected() noexcept {
+    if (!options_.enabled) {
+        return;
+    }
+    Refresh();
+    if (safeMode_) {
+        return; // 已在 Safe Mode：冷却期结束前不再累计
+    }
+    ++consecutiveFailures_;
+    if (consecutiveFailures_ >= options_.consecutiveFailuresToEnter) {
+        safeMode_ = true;
+        cooldownUntil_ = options_.now() + options_.cooldown;
+    }
 }
 
 } // namespace optimizer::service
