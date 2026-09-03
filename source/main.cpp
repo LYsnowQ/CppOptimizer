@@ -1,5 +1,6 @@
 ﻿#include "common/console_output.hpp"
 #include "common/error.hpp"
+#include "activity/user_activity.hpp"
 #include "config/config_manager.hpp"
 #include "ipc/ipc_facts.hpp"
 #include "ipc/ipc_credentials.hpp"
@@ -228,6 +229,66 @@ int RunConfigCommand(std::wstring_view path) {
                << c.policy.tightMarginPercent << L" cooldown "
                << c.policy.cooldownMs << L" ms\n";
     std::wcout << L"  games      : " << c.games.size() << L" rule(s)\n";
+    return 0;
+}
+
+int RunActivityCommand(std::wstring_view secondsText,
+                       std::wstring_view idleSecsText) {
+    // --activity <s> [idle-secs]：用户输入活动观测（MOD-ACT-001，R0 只读、前台有界）。
+    // 每秒只读查询最近键鼠输入（GetLastInputInfo）并分类 Active/Idle/Unknown，输出逐样本
+    // 状态与窗口汇总。无 Hook、不采集输入内容；非交互会话查询失败按 Unknown 降级不伪装。
+    constexpr std::uint32_t kMaxSeconds = 60;
+    std::uint32_t seconds = 0;
+    if (!ParseUint32(secondsText, seconds) || seconds == 0 ||
+        seconds > kMaxSeconds) {
+        std::wcerr << L"  --activity seconds must be in 1.." << kMaxSeconds
+                   << L"\n";
+        return 2;
+    }
+    std::uint32_t idleSecs = 15; // 默认空闲阈值 15 秒
+    if (!idleSecsText.empty()) {
+        if (!ParseUint32(idleSecsText, idleSecs) || idleSecs == 0 ||
+            idleSecs > 3600) {
+            std::wcerr << L"  --activity idle-secs must be in 1..3600\n";
+            return 2;
+        }
+    }
+
+    std::wcout << L"User activity observation (read-only, foreground, "
+               << seconds << L" s)\n";
+    std::wcout << L"  threshold : idle >= " << idleSecs << L" s\n";
+    std::wcout << L"  source    : GetLastInputInfo (no hooks, no input content)\n";
+
+    auto backend = optimizer::activity::CreateWin32LastInputBackend();
+    std::size_t sampleIndex = 0;
+    const auto result = optimizer::activity::ObserveActivity(
+        *backend, seconds, std::chrono::milliseconds(1000),
+        static_cast<std::int64_t>(idleSecs) * 1000,
+        [&seconds, &sampleIndex](optimizer::activity::ActivityState state,
+                                 std::int64_t idleMs) {
+            ++sampleIndex;
+            std::wcout << L"  [" << sampleIndex << L"/" << seconds << L"] "
+                       << optimizer::activity::ActivityStateToString(state);
+            if (state != optimizer::activity::ActivityState::Unknown) {
+                std::wcout << L" (idle " << idleMs << L" ms)";
+            }
+            std::wcout << L"\n";
+        });
+    if (!result) {
+        const auto& error = result.ErrorValue();
+        std::wcerr << L"  observation failed ["
+                   << optimizer::common::ToString(error.domain) << L":"
+                   << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+    const auto& summary = result.Value();
+    std::wcout << L"  summary  : active " << summary.active << L" / idle "
+               << summary.idle << L" / unknown " << summary.unknown << L"\n";
+    if (summary.unknown == summary.samples && summary.samples > 0) {
+        std::wcout
+            << L"  -> last-input query unavailable (non-interactive session?);\n"
+               L"     degraded to unknown, not Active/Idle\n";
+    }
     return 0;
 }
 
@@ -2328,6 +2389,11 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --status     Show one read-only memory snapshot\n"
         << L"  CppOptimizer.exe --observe <s> [threshold] Sample each second for 1..60 s;\n"
         << L"                             optional low-load threshold 0..100 (default 50)\n"
+        << L"  CppOptimizer.exe --activity <s> [idle-secs]  Observe user input activity\n"
+        << L"                             (read-only GetLastInputInfo; no hooks) for\n"
+        << L"                             1..60 s; idle threshold 1..3600 s (default 15);\n"
+        << L"                             outputs per-second Active/Idle/Unknown states\n"
+
         << L"  CppOptimizer.exe --log <module> <message...> Write one Info log line to stderr\n"
         << L"                             (read-only, foreground, bounded)\n"
         << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
@@ -2428,6 +2494,10 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc == 3 && std::wstring_view(argv[1]) == L"--config") {
             return RunConfigCommand(argv[2]);
+        }
+        if ((argc == 3 || argc == 4) &&
+            std::wstring_view(argv[1]) == L"--activity") {
+            return RunActivityCommand(argv[2], argc == 4 ? argv[3] : L"");
         }
         if ((argc == 3 || argc == 4) && std::wstring_view(argv[1]) == L"--watch") {
             return RunWatchCommand(argc, argv);

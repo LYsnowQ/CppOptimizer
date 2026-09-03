@@ -43,6 +43,7 @@ add_executable(CppOptimizer
     source/power/power_locker.cpp
     source/priority/priority_booster.cpp
     source/process/process_watcher.cpp
+    source/activity/user_activity.cpp
     source/service/service_host.cpp
     source/ipc/ipc_protocol.cpp
     source/ipc/ipc_transport.cpp
@@ -333,4 +334,23 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerIpcTests PRIVATE -municode)
     endif()
     add_test(NAME IpcTests COMMAND CppOptimizerIpcTests)
+
+    add_executable(CppOptimizerActivityTests
+        tests/activity_tests.cpp
+        source/common/error.cpp
+        source/activity/user_activity.cpp
+    )
+    target_include_directories(CppOptimizerActivityTests PRIVATE include)
+    target_link_libraries(CppOptimizerActivityTests PRIVATE user32)
+    target_compile_features(CppOptimizerActivityTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerActivityTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerActivityTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerActivityTests PRIVATE -municode)
+    endif()
+    add_test(NAME ActivityTests COMMAND CppOptimizerActivityTests)
 endif()

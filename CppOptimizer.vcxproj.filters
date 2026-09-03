@@ -51,6 +51,9 @@
     <ClInclude Include="include\process\process_watcher.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\activity\user_activity.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="include\service\service_host.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -111,6 +114,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\process\process_watcher.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\activity\user_activity.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\service\service_host.cpp">

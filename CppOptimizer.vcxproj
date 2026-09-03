@@ -112,6 +112,7 @@
     <ClInclude Include="include\power\power_locker.hpp" />
     <ClInclude Include="include\priority\priority_booster.hpp" />
     <ClInclude Include="include\process\process_watcher.hpp" />
+    <ClInclude Include="include\activity\user_activity.hpp" />
     <ClInclude Include="include\service\service_host.hpp" />
     <ClInclude Include="include\ipc\ipc_protocol.hpp" />
     <ClInclude Include="include\ipc\ipc_transport.hpp" />
@@ -134,6 +135,7 @@
     <ClCompile Include="source\power\power_locker.cpp" />
     <ClCompile Include="source\priority\priority_booster.cpp" />
     <ClCompile Include="source\process\process_watcher.cpp" />
+    <ClCompile Include="source\activity\user_activity.cpp" />
     <ClCompile Include="source\service\service_host.cpp" />
     <ClCompile Include="source\ipc\ipc_protocol.cpp" />
     <ClCompile Include="source\ipc\ipc_transport.cpp" />
