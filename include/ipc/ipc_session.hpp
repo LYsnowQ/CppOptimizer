@@ -86,8 +86,9 @@ struct IpcClientIdentity {
 // persistentAccept（SVC-003 连续受理）：同一管道实例在 ServeOne/ServeSession 之间
 // 保持监听，可连续服务多个客户端，由 Close() 结束。
 // ServeOne 每客户端一帧；ServeSession 在同一连接上连续服务多帧（连接复用/心跳，
-// 结束条件见 IpcSessionEndReason）。仍剩扩展点：多实例并发
-// （PIPE_UNLIMITED_INSTANCES 已保留），待服务运行形态落地。
+// 结束条件见 IpcSessionEndReason）。
+// 多实例并发（IPC-009）：RunConcurrentServer 以 N 个独立实例/线程并发受理并服务多个
+// 客户端（每个连接在自己的实例上按会话语义服务），由窗口到期 join 回收。
 class IpcSession {
 public:
     // 应用层处理器：根据请求填写应答；返回失败表示拒绝（应答 Error）。
@@ -202,5 +203,26 @@ struct IpcFrameRequest {
     std::shared_ptr<IpcClientBackend> backend, std::wstring_view pipePath,
     std::span<const IpcFrameRequest> requests,
     std::chrono::milliseconds timeout);
+
+// 一次并发受理（多实例）的汇总。
+struct IpcConcurrentSummary {
+    std::size_t workers = 0;             // 启动的 worker（管道实例）数
+    std::size_t clientsServed = 0;       // 服务完成的客户端会话数（含 Error 回执帧的会话）
+    std::size_t failedSessions = 0;      // 会话级失败数（客户端即连即断/被拒/读失败等）
+    std::vector<IpcServeResult> sessions; // 各客户端会话摘要（完成顺序不定）
+};
+
+// 多实例并发受理（IPC-009）：以 instances 个独立管道实例（各自线程 + 各自 IpcSession）
+// 在 window 窗口内并发受理并服务客户端。每个 worker 循环：接受一个客户端 -> 在同一
+// 连接上按会话语义服务多帧（frameIdle 为帧间空闲/心跳丢失上限，复用 ServeSession）->
+// 会话结束后继续接受下一客户端，直至窗口到期（无客户端等待超时属正常结束）。窗口到期
+// join 全部 worker 并由各会话 Close 实例：无脱逸/后台线程，调用返回后线程全部回收。
+// sessionFactory 为每个 worker 构造会话（含各自后端与 Options，如 persistentAccept=
+// true 使实例跨会话保持监听），便于测试注入 fake；handler 为空使用默认处理器。
+// instances/window/frameIdle 非正 -> Validation 拒绝（不启动任何线程）。
+[[nodiscard]] common::Result<IpcConcurrentSummary> RunConcurrentServer(
+    std::size_t instances, std::chrono::milliseconds window,
+    std::chrono::milliseconds frameIdle, IpcSession::Handler handler,
+    const std::function<std::shared_ptr<IpcSession>()>& sessionFactory);
 
 } // namespace optimizer::ipc

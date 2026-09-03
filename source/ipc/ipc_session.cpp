@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <array>
 #include <cwctype>
+#include <mutex>
 #include <string>
+#include <thread>
 
 namespace optimizer::ipc {
 
@@ -584,6 +586,116 @@ common::Result<std::vector<IpcReply>> IpcRoundTripSession(
     }
     client.Close();
     return common::Result<std::vector<IpcReply>>::Success(std::move(replies));
+}
+
+namespace {
+
+// 并发受理各 worker 共享的汇总与错误状态（互斥保护；每 worker 使用各自会话/实例，
+// 不共享可变会话状态，仅汇总与致命错误标记共享）。
+struct ConcurrentSharedState {
+    std::mutex mutex;
+    IpcConcurrentSummary summary;
+    bool fatalError = false;
+};
+
+// 单个 worker：用自己（工厂创建的）会话/管道实例在窗口内循环——接受一个客户端 ->
+// 在同一连接上按会话语义服务多帧（ServeSession，frameIdle 为帧间空闲上限）-> 会话
+// 结束继续接受下一客户端，直至窗口到期（每次迭代以剩余时间重算接受窗口与预算，
+// 最后到达的客户端也能获得至少 frameIdle 的服务时长，窗口溢出有界）。无客户端等待
+// 超时/连接即断的 0 帧会话属正常活动缺失：不计数，继续循环到窗口到期自然退出；
+// 其余会话级失败（拒绝/非法帧/读写失败）计数后继续（一个坏客户端不中断他人）。
+// 线程体整体捕获异常：任何意外都汇入 fatalError，由 RunConcurrentServer join 后上报。
+void RunConcurrentWorker(
+    std::shared_ptr<IpcSession> session, IpcSession::Handler handler,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds frameIdle,
+    std::shared_ptr<ConcurrentSharedState> shared) noexcept {
+    try {
+        for (;;) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0) {
+                break;
+            }
+            auto served =
+                session->ServeSession(handler, remaining, frameIdle,
+                                      remaining + frameIdle);
+            if (!served) {
+                const auto& error = served.ErrorValue();
+                const bool noActivity =
+                    error.domain == common::ErrorDomain::Win32 &&
+                    (error.code == ERROR_TIMEOUT ||
+                     error.code == ERROR_BROKEN_PIPE ||
+                     error.code == ERROR_NO_DATA);
+                if (noActivity) {
+                    continue;
+                }
+                std::lock_guard<std::mutex> lock(shared->mutex);
+                ++shared->summary.failedSessions;
+                continue;
+            }
+            {
+                std::lock_guard<std::mutex> lock(shared->mutex);
+                shared->summary.sessions.push_back(served.Value());
+                ++shared->summary.clientsServed;
+            }
+        }
+        session->Close(); // 窗口到期：释放本 worker 的管道实例（幂等）
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(shared->mutex);
+        shared->fatalError = true;
+    }
+}
+
+} // namespace
+
+common::Result<IpcConcurrentSummary> RunConcurrentServer(
+    std::size_t instances, std::chrono::milliseconds window,
+    std::chrono::milliseconds frameIdle, IpcSession::Handler handler,
+    const std::function<std::shared_ptr<IpcSession>()>& sessionFactory) {
+    if (instances == 0 || window.count() <= 0 || frameIdle.count() <= 0) {
+        return common::Result<IpcConcurrentSummary>::Failure(
+            common::Error::Validation(
+                "RunConcurrentServer",
+                L"instances/window/frameIdle 必须为正"));
+    }
+    if (!sessionFactory) {
+        return common::Result<IpcConcurrentSummary>::Failure(
+            common::Error::Validation(
+                "RunConcurrentServer", L"sessionFactory 不能为空"));
+    }
+
+    auto shared = std::make_shared<ConcurrentSharedState>();
+    shared->summary.workers = instances;
+    const auto deadline = std::chrono::steady_clock::now() + window;
+
+    // 启动 N 个有界 worker（每 worker = 独立实例 + 独立线程）；窗口到期全部 join，
+    // 无脱逸/后台线程，调用返回即回收。
+    std::vector<std::thread> threads;
+    threads.reserve(instances);
+    for (std::size_t i = 0; i < instances; ++i) {
+        threads.emplace_back([&]() {
+            auto session = sessionFactory();
+            if (!session) {
+                std::lock_guard<std::mutex> lock(shared->mutex);
+                shared->fatalError = true; // 工厂失败视为编排致命错误
+                return;
+            }
+            RunConcurrentWorker(std::move(session), handler, deadline,
+                                frameIdle, shared);
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    if (shared->fatalError) {
+        return common::Result<IpcConcurrentSummary>::Failure(
+            common::Error::Validation(
+                "RunConcurrentServer", L"worker 异常/会话工厂失败"));
+    }
+    return common::Result<IpcConcurrentSummary>::Success(
+        std::move(shared->summary));
 }
 
 } // namespace optimizer::ipc

@@ -1494,7 +1494,8 @@ std::wstring FindIpcSuffix(int argc, wchar_t* argv[], int start) noexcept {
                                   arg == L"--ipc-token-file" ||
                                   arg == L"--ipc-allow-user" ||
                                   arg == L"--session" ||
-                                  arg == L"--frames";
+                                  arg == L"--frames" ||
+                                  arg == L"--instances";
         if (!skipNextValue && isOptionFlag) {
             skipNextValue = true;
             continue;
@@ -1519,7 +1520,8 @@ bool HasIpcSessionFlag(int argc, wchar_t* argv[], int start) noexcept {
         const bool optionWithValue = arg == L"--ipc-token" ||
                                      arg == L"--ipc-token-file" ||
                                      arg == L"--ipc-allow-user" ||
-                                     arg == L"--frames";
+                                     arg == L"--frames" ||
+                                     arg == L"--instances";
         if (!skipNextValue && optionWithValue) {
             skipNextValue = true;
             continue;
@@ -1545,6 +1547,21 @@ std::uint32_t FindIpcFrames(int argc, wchar_t* argv[], int start) noexcept {
                 return 0;
             }
             return frames;
+        }
+    }
+    return 1;
+}
+
+// 读取 --instances <n>（多实例并发受理 worker/管道实例数）；缺省 1（单实例）。
+// 解析失败返回 0（调用方校验 1..8）。
+std::uint32_t FindIpcInstances(int argc, wchar_t* argv[], int start) noexcept {
+    for (int i = start; i + 1 < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--instances") {
+            std::uint32_t instances = 0;
+            if (!ParseUint32(argv[i + 1], instances)) {
+                return 0;
+            }
+            return instances;
         }
     }
     return 1;
@@ -1651,14 +1668,15 @@ int RunIpcCredentialCommand(int argc, wchar_t* argv[]) {
 }
 
 int RunIpcServerCommand(int argc, wchar_t* argv[]) {
-    // --ipc-pipe server <s> [suffix] [--session] [--ipc-token <t>]：受保护命名
-    // 管道服务端演示（IPC-005/008）。前台、有界（s 秒）：等待至多一个客户端连接，
-    // 逐帧严格校验（未知版本/类型/超长载荷 -> Error 应答），默认处理器应答
-    // （Ping->Ack；FactsSnapshot 依次过 CPOPFACTS/1 语法解析与 v1 键语义白名单，
-    // 合法回 Ack 摘要、任一违反回 Error(InvalidFacts)；配置 --ipc-token 后还要求
-    // 载荷携带匹配的 agent_token 事实，缺失/不匹配回 Error(AuthFailed)），
-    // 输出客户端身份（PID + 会话）与请求/应答摘要。缺省每客户端一帧；--session
-    // 在同一连接上连续服务多帧（客户端关闭/帧间空闲/窗口到期结束，IPC-008）。
+    // --ipc-pipe server <s> [suffix] [--session] [--instances <1..8>]
+    //   [--ipc-token <t>]：受保护命名管道服务端演示（IPC-005/008/009）。前台、有界
+    // （s 秒）：等待客户端连接，逐帧严格校验（未知版本/类型/超长载荷 -> Error 应答），
+    // 默认处理器应答（Ping->Ack；FactsSnapshot 依次过 CPOPFACTS/1 语法解析与 v1 键语义
+    // 白名单，合法回 Ack 摘要、任一违反回 Error(InvalidFacts)；配置 --ipc-token 后还要求
+    // 载荷携带匹配的 agent_token 事实，缺失/不匹配回 Error(AuthFailed)），输出客户端
+    // 身份（PID + 会话）与请求/应答摘要。缺省每客户端一帧；--session 在同一连接上连续
+    // 服务多帧（客户端关闭/帧间空闲/窗口到期结束，IPC-008）；--instances n（>1）以 n 个
+    // 独立实例/线程并发受理并服务多个客户端（每连接按会话语义，IPC-009）。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
@@ -1708,12 +1726,24 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
     // 多帧会话（IPC-008）：--session 接受一个客户端后在同一连接上连续服务多帧
     //（帧间空闲/窗口到期结束），连接内不再每帧重连；缺省保持单帧语义不变。
     const bool sessionMode = HasIpcSessionFlag(argc, argv, 4);
+    const std::uint32_t instances = FindIpcInstances(argc, argv, 4);
+    if (instances == 0 || instances > 8) {
+        std::wcerr << L"  --instances must be 1..8\n";
+        return 2;
+    }
+    const bool concurrentMode = instances > 1; // 多实例并发受理（IPC-009）
     auto backend = optimizer::ipc::CreateWin32ServerBackend(pipeName);
     optimizer::ipc::IpcSession session(backend, sessionOptions);
 
-    std::wcout << L"IPC pipe server (protected transport, "
-               << (sessionMode ? L"multi-frame session, " : L"single client, ")
-               << seconds << L" s)\n";
+    std::wcout << L"IPC pipe server (protected transport, ";
+    if (concurrentMode) {
+        std::wcout << instances << L" concurrent instances, ";
+    } else if (sessionMode) {
+        std::wcout << L"multi-frame session, ";
+    } else {
+        std::wcout << L"single client, ";
+    }
+    std::wcout << seconds << L" s)\n";
     std::wcout << L"  pipe     : " << pipeName << L"\n";
     if (!sessionOptions.expectedToken.empty()) {
         std::wcout << L"  auth     : session token required (hidden)\n";
@@ -1725,10 +1755,58 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(seconds);
-    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadline - std::chrono::steady_clock::now());
     // 帧间空闲上限（心跳节奏）：客户端超过该时长未发帧视为心跳丢失，会话结束。
     const std::chrono::milliseconds kSessionIdle(2000);
+
+    // 多实例并发（IPC-009）：N 个独立实例/线程并发受理并服务客户端，每连接按多帧
+    // 会话语义服务；窗口到期 join 全部 worker 并释放实例（无脱逸线程）。接受超时/
+    // 无客户端连接属正常结束（非失败）。
+    if (concurrentMode) {
+        optimizer::ipc::IpcSession::Options workerOptions = sessionOptions;
+        workerOptions.persistentAccept = true; // worker 实例跨会话保持监听（无空窗）
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+        auto result = optimizer::ipc::RunConcurrentServer(
+            instances, remaining, kSessionIdle, nullptr,
+            [pipeName, workerOptions]() {
+                return std::make_shared<optimizer::ipc::IpcSession>(
+                    optimizer::ipc::CreateWin32ServerBackend(pipeName),
+                    workerOptions);
+            });
+        if (!result) {
+            const auto& error = result.ErrorValue();
+            std::wcerr << L"  concurrent serve failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        const auto& summary = result.Value();
+        std::wcout << L"  concurrent: " << summary.workers
+                   << L" worker(s), served " << summary.clientsServed
+                   << L" client session(s), failed " << summary.failedSessions
+                   << L"\n";
+        if (summary.clientsServed == 0) {
+            std::wcout << L"  no client connected within " << seconds
+                       << L" s (bounded window ended)\n";
+            return 0;
+        }
+        for (std::size_t i = 0; i < summary.sessions.size(); ++i) {
+            const auto& item = summary.sessions[i];
+            std::wcout << L"  client #" << (i + 1) << L" : pid "
+                       << item.clientPid << L", session "
+                       << item.clientSessionId << L", served "
+                       << item.framesServed << L" frame(s), end: "
+                       << optimizer::ipc::IpcSessionEndReasonToString(
+                              item.endReason)
+                       << L"\n";
+        }
+        return 0;
+    }
+
+    // 单实例路径：默认单帧 / --session 同一连接多帧（既有语义不变）。
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
     const optimizer::common::Result<optimizer::ipc::IpcServeResult> served =
         sessionMode
             ? session.ServeSession(nullptr, remaining, kSessionIdle,
@@ -2010,13 +2088,16 @@ void PrintUsage() {
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
         << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix] [--session]\n"
-        << L"                             [--ipc-token <t>]  Protected pipe server\n"
-        << L"                             for 1..60 s: serve one client frame\n"
-        << L"                             (strict validation; facts parsed + v1\n"
-        << L"                             schema whitelist; optional session token /\n"
-        << L"                             user SID allow-list; ack/error reply).\n"
+        << L"                             [--instances <1..8>] [--ipc-token <t>]\n"
+        << L"                             Protected pipe server for 1..60 s: serve one\n"
+        << L"                             client frame (strict validation; facts parsed\n"
+        << L"                             + v1 schema whitelist; optional session token\n"
+        << L"                             / user SID allow-list; ack/error reply).\n"
         << L"                             --session: serve multiple frames on one\n"
-        << L"                             connection until client close / idle\n"
+        << L"                             connection until client close / idle.\n"
+        << L"                             --instances n (>1): n pipe instances /\n"
+        << L"                             workers accept and serve clients concurrently\n"
+        << L"                             (each connection multi-frame; bounded window)\n"
         << L"  CppOptimizer.exe --ipc-pipe client [suffix] [--frames <1..16>]\n"
         << L"                             [--ipc-token <t>]  Send real memory facts\n"
         << L"                             snapshots (CPOPFACTS/1; optional token) and\n"

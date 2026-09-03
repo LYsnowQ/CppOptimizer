@@ -10,6 +10,7 @@
 #include <sddl.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -18,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -40,6 +42,7 @@ using optimizer::ipc::IpcServerBackend;
 using optimizer::ipc::IpcSession;
 using optimizer::ipc::IpcSessionEndReason;
 using optimizer::ipc::IpcFrameRequest;
+using optimizer::ipc::RunConcurrentServer;
 using optimizer::ipc::kIpcHeaderSize;
 using optimizer::ipc::kIpcMagic;
 using optimizer::ipc::kIpcVersion;
@@ -1860,6 +1863,144 @@ bool TestRoundTripSessionConnectFailure() {
            result.ErrorValue().code == ERROR_PIPE_BUSY;
 }
 
+// ---------- 多实例并发受理（IPC-009，RunConcurrentServer） ----------
+
+bool TestRunConcurrentRejectsBadParams() {
+    // 参数非法：Validation 拒绝且不启动任何 worker/工厂。
+    int factoryCalls = 0;
+    auto factory = [&factoryCalls]() -> std::shared_ptr<IpcSession> {
+        ++factoryCalls;
+        return std::make_shared<IpcSession>(
+            std::make_shared<FakeIpcServerBackend>());
+    };
+    const auto badInstances = RunConcurrentServer(
+        0, std::chrono::milliseconds(100), std::chrono::milliseconds(200),
+        nullptr, factory);
+    if (badInstances ||
+        badInstances.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    const auto badWindow = RunConcurrentServer(
+        2, std::chrono::milliseconds(0), std::chrono::milliseconds(200),
+        nullptr, factory);
+    if (badWindow || badWindow.ErrorValue().domain != ErrorDomain::Validation) {
+        return false;
+    }
+    const auto badFactory =
+        RunConcurrentServer(2, std::chrono::milliseconds(100),
+                            std::chrono::milliseconds(200), nullptr, {});
+    return !badFactory && factoryCalls == 0;
+}
+
+bool TestRunConcurrentWindowLifecycle() {
+    // 两个 worker、无客户端（接受即超时）：窗口到期全部 join 回收，返回空汇总。
+    std::vector<std::shared_ptr<FakeIpcServerBackend>> fakes;
+    for (int i = 0; i < 2; ++i) {
+        auto fake = std::make_shared<FakeIpcServerBackend>();
+        fake->failAccept = true;
+        fake->acceptErrorCode = ERROR_TIMEOUT;
+        fakes.push_back(fake);
+    }
+    std::atomic<std::size_t> next{0};
+    auto factory = [&]() -> std::shared_ptr<IpcSession> {
+        const std::size_t i = next.fetch_add(1);
+        return std::make_shared<IpcSession>(fakes.at(i));
+    };
+    const auto start = std::chrono::steady_clock::now();
+    auto result = RunConcurrentServer(
+        2, std::chrono::milliseconds(60), std::chrono::milliseconds(200),
+        nullptr, factory);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    if (!result || result.Value().workers != 2 ||
+        result.Value().clientsServed != 0 ||
+        result.Value().failedSessions != 0) {
+        return false;
+    }
+    // 调用返回即 join 完成；窗口有界（容忍调度抖动），线程无脱逸。
+    if (elapsed.count() < 40 || elapsed.count() > 5000) {
+        return false;
+    }
+    for (const auto& fake : fakes) {
+        if (fake->closeCount < 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestRunConcurrentServesClientSession() {
+    // 单个 worker 成功服务一个客户端会话（首帧后帧间空闲正常结束），随后窗口到期。
+    auto fake = std::make_shared<FakeIpcServerBackend>();
+    fake->incoming = BuildFrame(IpcMessageType::Ping, 7, {});
+    fake->failReadAtCall = 2; // 服务完首帧后读下一帧头超时
+    fake->failReadAtErrorCode = ERROR_TIMEOUT;
+    std::atomic<std::size_t> next{0};
+    auto factory = [&]() -> std::shared_ptr<IpcSession> {
+        (void)next.fetch_add(1);
+        return std::make_shared<IpcSession>(fake);
+    };
+    auto result = RunConcurrentServer(
+        1, std::chrono::milliseconds(80), std::chrono::milliseconds(200),
+        nullptr, factory);
+    if (!result) {
+        return false;
+    }
+    const auto& summary = result.Value();
+    if (summary.workers != 1 || summary.clientsServed != 1 ||
+        summary.sessions.size() != 1) {
+        return false;
+    }
+    const auto& served = summary.sessions[0];
+    return served.requestType == IpcMessageType::Ping &&
+           served.replyType == IpcMessageType::Ack &&
+           served.framesServed == 1 && served.requestId == 7;
+}
+
+bool TestConcurrentInstancesServeTwoClients() {
+    // 集成：两个真实管道实例并发监听同一管道名（PIPE_UNLIMITED_INSTANCES），
+    // 两个客户端分别连接并被各自实例服务（互不阻塞）。
+    const std::wstring pipeName =
+        L"\\\\.\\pipe\\CppOptimizerIpcTestConcurrent";
+    bool firstOk = false;
+    bool secondOk = false;
+    std::thread firstServer([&]() {
+        IpcSession::Options options;
+        options.clientGate = IpcSession::AllowAllClientGate; // 测试/隔离：显式放行
+        options.ioTimeout = std::chrono::milliseconds(8000);
+        IpcSession session(optimizer::ipc::CreateWin32ServerBackend(pipeName),
+                           options);
+        auto served =
+            session.ServeOne(nullptr, std::chrono::milliseconds(8000));
+        firstOk = served &&
+                  served.Value().replyType == IpcMessageType::Ack;
+    });
+    std::thread secondServer([&]() {
+        IpcSession::Options options;
+        options.clientGate = IpcSession::AllowAllClientGate;
+        options.ioTimeout = std::chrono::milliseconds(8000);
+        IpcSession session(optimizer::ipc::CreateWin32ServerBackend(pipeName),
+                           options);
+        auto served =
+            session.ServeOne(nullptr, std::chrono::milliseconds(8000));
+        secondOk = served &&
+                   served.Value().replyType == IpcMessageType::Ack;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 等待两实例就绪
+    const auto runClient = [&pipeName](std::uint32_t id) -> bool {
+        auto backend = optimizer::ipc::CreateWin32ClientBackend();
+        auto reply =
+            IpcRoundTrip(backend, pipeName, IpcMessageType::Ping, {}, id,
+                         std::chrono::milliseconds(8000));
+        return reply && reply.Value().type == IpcMessageType::Ack;
+    };
+    const bool clientA = runClient(1);
+    const bool clientB = runClient(2);
+    firstServer.join();
+    secondServer.join();
+    return clientA && clientB && firstOk && secondOk;
+}
+
 } // namespace
 
 int wmain() {
@@ -2001,5 +2142,11 @@ int wmain() {
     run(L"round trip session mid request id mismatch",
         &TestRoundTripSessionMidRequestIdMismatch);
     run(L"round trip session connect failure", &TestRoundTripSessionConnectFailure);
+    run(L"run concurrent rejects bad params", &TestRunConcurrentRejectsBadParams);
+    run(L"run concurrent window lifecycle", &TestRunConcurrentWindowLifecycle);
+    run(L"run concurrent serves client session",
+        &TestRunConcurrentServesClientSession);
+    run(L"concurrent instances serve two clients",
+        &TestConcurrentInstancesServeTwoClients);
     return failed == 0 ? 0 : 1;
 }
