@@ -320,6 +320,116 @@ bool TestLoadConfigPolicyRejectsNegativeCooldown() {
     return !result.HasValue();
 }
 
+bool TestLoadConfigIpcSafeModeDefaults() {
+    // 无 [ipc] 节：Safe Mode 门禁使用默认参数（启用、阈值 3、窗口 5000ms、冷却 2000ms）。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path, "version = 1\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!result.HasValue()) {
+        return false;
+    }
+    const auto& sm = result.Value().ipc.safeMode;
+    return sm.enabled && sm.failuresToEnter == 3 &&
+           sm.countingWindowMs == 5000 && sm.cooldownMs == 2000;
+}
+
+bool TestLoadConfigIpcSafeModeSection() {
+    const std::wstring path = MakeTempConfigPath();
+    const std::string content = R"(
+[ipc]
+safe_mode_failures = 1
+safe_mode_window_ms = 1000
+safe_mode_cooldown_ms = 500
+)";
+    if (!WriteTempConfig(path, content)) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!result.HasValue()) {
+        return false;
+    }
+    const auto& sm = result.Value().ipc.safeMode;
+    return sm.enabled && sm.failuresToEnter == 1 &&
+           sm.countingWindowMs == 1000 && sm.cooldownMs == 500;
+}
+
+bool TestLoadConfigIpcSafeModeDisabled() {
+    // enabled=false：关闭门禁，其余键缺省保持默认。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[ipc]\nsafe_mode_enabled = false\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!result.HasValue()) {
+        return false;
+    }
+    const auto& sm = result.Value().ipc.safeMode;
+    return !sm.enabled && sm.failuresToEnter == 3 &&
+           sm.countingWindowMs == 5000 && sm.cooldownMs == 2000;
+}
+
+bool TestLoadConfigIpcRejectsZeroFailures() {
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[ipc]\nsafe_mode_failures = 0\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
+bool TestLoadConfigIpcRejectsTooManyFailures() {
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[ipc]\nsafe_mode_failures = 101\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
+bool TestLoadConfigIpcRejectsZeroWindow() {
+    // 0 时长使门禁无实际暂停，等同失效，作为语义错误拒绝。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[ipc]\nsafe_mode_window_ms = 0\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
+bool TestLoadConfigIpcRejectsNegativeCooldown() {
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[ipc]\nsafe_mode_cooldown_ms = -1\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
+bool TestLoadConfigIpcRejectsTooLargeCooldown() {
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[ipc]\nsafe_mode_cooldown_ms = 600001\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
 bool TestLoadConfigGamesArray() {
     const std::wstring path = MakeTempConfigPath();
     const std::string content = R"(
@@ -552,6 +662,19 @@ int wmain() {
         &TestLoadConfigPolicyRejectsOutOfRangeComfortable);
     run(L"Load config rejects negative cooldown",
         &TestLoadConfigPolicyRejectsNegativeCooldown);
+    run(L"Load config ipc safe mode defaults", &TestLoadConfigIpcSafeModeDefaults);
+    run(L"Load config ipc safe mode section", &TestLoadConfigIpcSafeModeSection);
+    run(L"Load config ipc safe mode disabled", &TestLoadConfigIpcSafeModeDisabled);
+    run(L"Load config rejects zero safe mode failures",
+        &TestLoadConfigIpcRejectsZeroFailures);
+    run(L"Load config rejects too many safe mode failures",
+        &TestLoadConfigIpcRejectsTooManyFailures);
+    run(L"Load config rejects zero safe mode window",
+        &TestLoadConfigIpcRejectsZeroWindow);
+    run(L"Load config rejects negative safe mode cooldown",
+        &TestLoadConfigIpcRejectsNegativeCooldown);
+    run(L"Load config rejects too-large safe mode cooldown",
+        &TestLoadConfigIpcRejectsTooLargeCooldown);
     run(L"Load config games array", &TestLoadConfigGamesArray);
     run(L"Load config skips game without id", &TestLoadConfigGameWithoutIdSkipped);
     run(L"ToTomlString escapes", &TestToTomlString);

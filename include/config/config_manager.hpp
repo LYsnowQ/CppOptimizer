@@ -73,6 +73,25 @@ struct PolicyConfig {
     std::int32_t cooldownMs = 5000;
 };
 
+// [ipc] 节下 Safe Mode 门禁（Agent 受理侧的“身份/凭据失败异常”触发项）窗口参数。
+// 缺省值须与 service::SafeModeGuard::Options 缺省一致（3 次 / 5000 ms / 2000 ms，
+// enabled=true），宿主要暴露自定义值时应经此节读取而非改默认常量。
+// 合法约束：1 <= failuresToEnter <= 100，
+// 1 <= countingWindowMs <= 600000，1 <= cooldownMs <= 600000；
+// 0 时长会使门禁无实际暂停效果（形同失效），语义上应以 enabled=false 显式关闭，
+// 因此越界/为零配置属语义错误，LoadConfig 直接拒绝。
+struct SafeModeConfig {
+    bool enabled = true;
+    std::int32_t failuresToEnter = 3;     // 时间窗口内失败阈值（次）
+    std::int32_t countingWindowMs = 5000; // 计数窗口（滑动，窗口外失败过期）
+    std::int32_t cooldownMs = 2000;       // 进入 Safe Mode 后的冷却期
+};
+
+// [ipc] 节：受保护管道/Agent 受理侧参数。当前仅 Safe Mode 门禁窗口参数。
+struct IpcConfig {
+    SafeModeConfig safeMode;
+};
+
 // [[games]] 数组元素。每个游戏规则必须有稳定 id。
 struct GameConfig {
     std::string id;
@@ -124,6 +143,7 @@ struct ConfigSnapshot {
     ToggleConfig scheduler;
     ToggleConfig diskCache;
     PolicyConfig policy;
+    IpcConfig ipc;
     std::vector<GameConfig> games;
 };
 

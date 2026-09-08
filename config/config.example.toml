@@ -47,6 +47,12 @@ adequate_margin_percent = 15     # 余量 > 15% -> Adequate
 tight_margin_percent = 5         # 余量 > 5% -> Tight；否则 Critical
 cooldown_ms = 5000               # 决策防抖冷却期（毫秒），>= 0
 
+[ipc]
+safe_mode_enabled = true         # Agent 受理门禁开关（false = 关闭 Safe Mode）
+safe_mode_failures = 3           # 时间窗口内身份/凭据失败阈值（1..100）
+safe_mode_window_ms = 5000       # 计数窗口（毫秒，1..600000）
+safe_mode_cooldown_ms = 2000     # 进入 Safe Mode 后的冷却期（毫秒，1..600000）
+
 # 每个游戏规则必须有稳定 id。实际生产配置建议同时限制完整安装路径。
 [[games]]
 id = "example-game"

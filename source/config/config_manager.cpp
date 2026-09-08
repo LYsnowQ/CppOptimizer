@@ -470,6 +470,52 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
                 L"0 <= tight < adequate < comfortable <= 100 and cooldown_ms >= 0"));
     }
 
+    // [ipc]：Safe Mode 门禁窗口参数（Agent 受理侧；缺省与 SafeModeGuard::Options 一致）。
+    // 数值仅在 int32 范围内写入，随后做 1..上限 的语义校验；越界/为零是语义错误
+    // （0 时长使门禁无实际暂停，等同失效），直接拒绝而非静默回退默认。
+    if (auto* section = table["ipc"].as_table()) {
+        if (const auto enabled = (*section)["safe_mode_enabled"].value<bool>()) {
+            snapshot.ipc.safeMode.enabled = *enabled;
+        }
+        if (const auto failures =
+                (*section)["safe_mode_failures"].value<std::int64_t>()) {
+            if (*failures >= std::numeric_limits<std::int32_t>::min() &&
+                *failures <= std::numeric_limits<std::int32_t>::max()) {
+                snapshot.ipc.safeMode.failuresToEnter =
+                    static_cast<std::int32_t>(*failures);
+            }
+        }
+        if (const auto window =
+                (*section)["safe_mode_window_ms"].value<std::int64_t>()) {
+            if (*window >= std::numeric_limits<std::int32_t>::min() &&
+                *window <= std::numeric_limits<std::int32_t>::max()) {
+                snapshot.ipc.safeMode.countingWindowMs =
+                    static_cast<std::int32_t>(*window);
+            }
+        }
+        if (const auto cooldown =
+                (*section)["safe_mode_cooldown_ms"].value<std::int64_t>()) {
+            if (*cooldown >= std::numeric_limits<std::int32_t>::min() &&
+                *cooldown <= std::numeric_limits<std::int32_t>::max()) {
+                snapshot.ipc.safeMode.cooldownMs =
+                    static_cast<std::int32_t>(*cooldown);
+            }
+        }
+    }
+    if (!(snapshot.ipc.safeMode.failuresToEnter >= 1 &&
+          snapshot.ipc.safeMode.failuresToEnter <= 100 &&
+          snapshot.ipc.safeMode.countingWindowMs >= 1 &&
+          snapshot.ipc.safeMode.countingWindowMs <= 600000 &&
+          snapshot.ipc.safeMode.cooldownMs >= 1 &&
+          snapshot.ipc.safeMode.cooldownMs <= 600000)) {
+        return common::Result<ConfigSnapshot>::Failure(
+            common::Error::Validation(
+                "LoadConfig",
+                L"[ipc] safe_mode must satisfy "
+                L"1 <= failures <= 100, 1 <= window_ms <= 600000, "
+                L"1 <= cooldown_ms <= 600000"));
+    }
+
     // [[games]]：数组 of table，每项必须有稳定 id。
     if (const auto games = table["games"].as_array()) {
         for (const auto& element : *games) {

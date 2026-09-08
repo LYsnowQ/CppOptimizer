@@ -1373,9 +1373,11 @@ std::optional<std::filesystem::path> FindIpcTokenFile(
     int argc, wchar_t* argv[], int start) noexcept;
 
 int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
-    // --service console <s> [--ipc-facts]：控制台托管演示（前台、有界、Ctrl+C
-    // 优雅停止）。可选 --ipc-facts 在负载窗口内同时作为受保护管道服务端受理一个
-    // 客户端的一帧 FactsSnapshot（SVC-002：Service 端消费真实 Agent 事实，R0）。
+    // --service console <s> [config.toml] [--ipc-facts]：控制台托管演示（前台、有界、
+    // Ctrl+C 优雅停止）。可选 --ipc-facts 在负载窗口内同时作为受保护管道服务端常驻
+    // 受理 Agent 事实（SVC-002/003，R0）。可选 [config.toml]（紧跟在秒数后的首个
+    // 非选项参数）在 --ipc-facts 时经 [ipc] 节配置 Safe Mode 门禁窗口参数
+    // （IPC-014：阈值/窗口/冷却/开关；缺省与 SafeModeGuard 默认一致）。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
@@ -1384,12 +1386,44 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                    << kMaxSeconds << L"\n";
         return 2;
     }
+    // 可选配置路径：argv[4] 为“非选项”token 时视为配置（其余位置参数均为选项及其值）。
+    std::optional<std::filesystem::path> consoleConfig;
+    int flagsStart = 4;
+    if (argc > 4 && argv[4][0] != L'-') {
+        consoleConfig = std::filesystem::path(argv[4]);
+        flagsStart = 5;
+    }
     bool ipcFacts = false;
-    for (int i = 4; i < argc; ++i) {
+    for (int i = flagsStart; i < argc; ++i) {
         if (std::wstring_view(argv[i]) == L"--ipc-facts") {
             ipcFacts = true;
             break;
         }
+    }
+
+    // IPC-014：Safe Mode 门禁窗口参数（供 banner/门禁构造引用，缺省 = 状态机默认）。
+    optimizer::service::SafeModeGuard::Options safeModeOptions;
+    // [ipc] 配置仅在 --ipc-facts 时消费（无门禁则配置无意义）；无配置路径时保持
+    // SafeModeGuard 默认常量（零回归）。
+    std::optional<optimizer::config::ConfigSnapshot> consoleConfigSnapshot;
+    if (ipcFacts && consoleConfig) {
+        auto loaded = optimizer::config::LoadConfig(consoleConfig->wstring());
+        if (!loaded) {
+            const auto& error = loaded.ErrorValue();
+            std::wcerr << L"  --service console config load failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        const auto& safeMode = loaded.Value().ipc.safeMode;
+        safeModeOptions.enabled = safeMode.enabled;
+        safeModeOptions.failuresToEnter =
+            static_cast<std::size_t>(safeMode.failuresToEnter);
+        safeModeOptions.countingWindow = std::chrono::milliseconds(
+            safeMode.countingWindowMs);
+        safeModeOptions.cooldown =
+            std::chrono::milliseconds(safeMode.cooldownMs);
+        consoleConfigSnapshot = loaded.Value();
     }
 
     ServiceHostDemoState state;
@@ -1403,7 +1437,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         // 会话凭据/用户 SID 授权（IPC-005/006/007，与 --ipc-pipe server 同语义；
         // 缺省不要求，仅当显式配置才启用）。
         std::wstring ipcToken;
-        if (FindIpcToken(argc, argv, 4, ipcToken)) {
+        if (FindIpcToken(argc, argv, flagsStart, ipcToken)) {
             if (!IsValidIpcToken(ipcToken)) {
                 std::wcerr
                     << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
@@ -1411,7 +1445,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             }
             ipcOptions.expectedToken = ipcToken;
         }
-        if (auto tokenFile = FindIpcTokenFile(argc, argv, 4)) {
+        if (auto tokenFile = FindIpcTokenFile(argc, argv, flagsStart)) {
             auto stored = optimizer::ipc::ReadAgentTokenFile(*tokenFile);
             if (!stored) {
                 std::wcerr << L"  --ipc-token-file unreadable; run "
@@ -1420,7 +1454,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             }
             ipcOptions.expectedToken = stored.Value();
         }
-        for (int i = 4; i + 1 < argc; ++i) {
+        for (int i = flagsStart; i + 1 < argc; ++i) {
             if (std::wstring_view(argv[i]) == L"--ipc-allow-user") {
                 const std::wstring sid = argv[i + 1];
                 if (sid.empty() || sid.size() > 192) {
@@ -1432,9 +1466,10 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             }
         }
         state.ipcExpectedToken = ipcOptions.expectedToken; // 供 tick 自定义处理器复用
-        // Safe Mode 门禁（IPC-010/013）：时间窗口（5s）内身份/凭据失败达阈值（3 次）
-        // 暂停受理新 Agent 冷却 2 秒；仅影响 Agent 受理，R0 负载照常。
-        state.ipcSafeMode.emplace(); // 默认：阈值 3、冷却 2s、启用
+        // Safe Mode 门禁（IPC-010/013）：时间窗口内身份/凭据失败达阈值暂停受理新 Agent，
+        // 冷却到期自动恢复；参数取 [ipc] 配置（IPC-014），无配置时用状态机默认
+        // （阈值 3、窗口 5s、冷却 2s、启用）——缺省行为零回归。仅影响 Agent 受理。
+        state.ipcSafeMode.emplace(safeModeOptions);
         ipcOptions.verdictObserver =
             [&state](optimizer::ipc::IpcClientVerdict verdict) {
                 auto& guard = *state.ipcSafeMode;
@@ -1477,8 +1512,32 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             L"             + protected-pipe facts consume (continuous, R0)");
         optimizer::common::WriteConsoleLine(
             L"  ipc      : pipe \\\\.\\pipe\\CppOptimizerIpc");
-        optimizer::common::WriteConsoleLine(
-            L"             safe mode : intake gate on (3 auth failures in 5 s -> 2 s pause)");
+        {
+            // 门禁参数来自 SafeModeGuard::Options（缺省 = 状态机默认），banner 随实际值输出。
+            auto spec = [](std::int64_t ms) {
+                if (ms % 1000 == 0) {
+                    return std::to_wstring(ms / 1000) + L" s";
+                }
+                return std::to_wstring(ms) + L" ms";
+            };
+            std::wostringstream gateLine;
+            gateLine << L"             safe mode : intake gate ";
+            if (!safeModeOptions.enabled) {
+                gateLine << L"off ([ipc].safe_mode_enabled = false)";
+            } else {
+                gateLine << L"on (" << safeModeOptions.failuresToEnter
+                         << L" auth failures in "
+                         << spec(safeModeOptions.countingWindow.count())
+                         << L" -> " << spec(safeModeOptions.cooldown.count())
+                         << L" pause)";
+            }
+            optimizer::common::WriteConsoleLine(gateLine.str());
+            if (consoleConfigSnapshot) {
+                optimizer::common::WriteConsoleLine(
+                    L"  config   : " + consoleConfig.value().wstring() +
+                    L" ([ipc] safe_mode)");
+            }
+        }
     }
     optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
     const auto result = host.RunConsole(std::chrono::seconds(seconds));
@@ -2421,15 +2480,17 @@ void PrintUsage() {
         << L"                             demand start, R0 workload)\n"
         << L"  CppOptimizer.exe --service uninstall           Remove the Windows service\n"
         << L"                             (SCM, requires administrator)\n"
-        << L"  CppOptimizer.exe --service console <s> [--ipc-facts]\n"
+        << L"  CppOptimizer.exe --service console <s> [config.toml] [--ipc-facts]\n"
         << L"                             [--ipc-token <t>] [--ipc-token-file [<path>]]\n"
         << L"                             [--ipc-allow-user <SID>]  Host the R0 workload\n"
         << L"                             in console mode for 1..60 s (foreground; Ctrl+C\n"
         << L"                             to stop). --ipc-facts also serves Agent facts\n"
         << L"                             frames via the protected pipe continuously\n"
-        << L"                             (optional session token / user SID allow-list;\n"
-        << L"                             Safe Mode intake gate: 3 auth failures\n"
-        << L"                             within 5 s pause intake for 2 s)\n"
+        << L"                             (optional session token / user SID allow-list).\n"
+        << L"                             Optional [config.toml] (first non-option arg)\n"
+        << L"                             sets the Safe Mode intake gate from [ipc]\n"
+        << L"                             (failures / window / cooldown / enabled;\n"
+        << L"                             defaults 3 / 5 s / 2 s; out-of-range rejected)\n"
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
         << L"  CppOptimizer.exe --agent run <s> [suffix] [--interval-ms <50..10000>]\n"
