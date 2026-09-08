@@ -139,4 +139,77 @@ struct ActivityContextSummary {
     std::chrono::milliseconds sampleInterval, std::int64_t idleThresholdMs,
     const std::function<void(ActivityState, std::int64_t)>& onSample);
 
+// ---------- ACT-003：前台窗口归属（MOD-ACT-001 第三切片，R0 只读） ----------
+
+// 前台归属结果：当前 Active/Idle 样本所属前台窗口的进程。NotApplicable=状态不可归属
+//（Locked/Disconnected/Unknown：锁屏时前台属安全桌面/断开无交互/失败不知在场，均不查询
+// 前台、不伪造 pid）；Unknown=可归属但前台查询失败（降级不伪装）；NoWindow=可归属但当前
+// 无前台窗口；Pid=可归属且前台窗口存在（pid 为其所属进程）。
+enum class ForegroundAttribution { NotApplicable, Unknown, NoWindow, Pid };
+
+// 前台窗口查询样本。hasWindow=false 表示当前桌面无前台窗口（安全桌面/无交互窗口等），
+// 此时 pid 无意义；hasWindow=true 时 pid 为前台窗口所属进程（GetWindowThreadProcessId）。
+struct ForegroundSample {
+    bool hasWindow = false;
+    std::uint32_t pid = 0;
+};
+
+// 前台窗口查询后端（可注入 fake 确定性测试；真实实现见 CreateWin32ForegroundProbe）。
+// 只读 GetForegroundWindow + GetWindowThreadProcessId，无 Hook/无窗口/无消息循环/
+// 无后台线程、不采集窗口内容（不读标题/类名）。查询失败返回 Failure，可归属样本按
+// Unknown 降级不伪装 pid。
+class ForegroundProbe {
+public:
+    virtual ~ForegroundProbe() = default;
+
+    // 查询当前前台窗口的所属进程。无前台窗口（GetForegroundWindow 返回 NULL）不算失败，
+    // 返回 Success{hasWindow=false}。
+    [[nodiscard]] virtual common::Result<ForegroundSample> Query() = 0;
+};
+
+// Win32 后端：GetForegroundWindow + GetWindowThreadProcessId（user32 只读，无新库）。
+// 窗口句柄在查询瞬间失效（进程已退出）视为失败如实上报。
+[[nodiscard]] std::shared_ptr<ForegroundProbe> CreateWin32ForegroundProbe();
+
+// 纯函数：状态可否做前台归属。仅 Active/Idle 可归属（用户可交互、窗口有归属意义）；
+// Locked（前台属安全桌面）/Disconnected（无交互）/Unknown（不知在场）不可归属。
+[[nodiscard]] bool IsForegroundAttributable(ActivityState state) noexcept;
+
+// 纯函数：可归属状态下由前台窗口存在性得归属种类（hasWindow -> Pid，否则 NoWindow）。
+[[nodiscard]] ForegroundAttribution ClassifyForegroundAttribution(
+    bool hasWindow) noexcept;
+
+// 前台归属样本（onSample 第三参）。attribution==Pid 时 pid 有效，其余恒 0。
+struct ForegroundAttributionInfo {
+    ForegroundAttribution attribution =
+        ForegroundAttribution::NotApplicable;
+    std::uint32_t pid = 0;
+};
+
+// 前台归属观测汇总（窗口级）。states 为状态计数（与 ObserveActivityContext 同语义；无会话
+// 叠加时 locked/disconnected 恒 0），归属计数合计 == states.samples：
+// attributedPid（Pid）+ noWindow（NoWindow）+ foregroundUnknown（Unknown）+
+// notApplicable（NotApplicable）。
+struct ActivityForegroundSummary {
+    ActivityContextSummary states;
+    std::size_t attributedPid = 0;      // Active/Idle 且前台窗口存在：pid 已知
+    std::size_t noWindow = 0;           // Active/Idle 且当前无前台窗口
+    std::size_t foregroundUnknown = 0;  // Active/Idle 但前台查询失败（不伪装 pid）
+    std::size_t notApplicable = 0;      // Locked/Disconnected/Unknown（不可归属）
+};
+
+// 前台归属观测（ACT-003）：逐样本先查会话（sessionProbe != nullptr 时叠加，语义同
+// ObserveActivityContext：会话或输入任一失败整样本 Unknown）再查输入，按
+// ClassifyActivity/ClassifyContextState 得最终状态；仅 Active/Idle 样本查询一次前台归属
+//（Locked/Disconnected/Unknown 不查询、计 notApplicable——不得伪造 pid），前台查询失败按
+// Unknown 降级。Active/Idle 回调派生 idleMs；Locked/Disconnected 透传输入派生的 idleMs
+//（展示参考）；Unknown 为 0。onSample(state, idleMs, attribution) 逐样本回调。
+// sampleInterval 为 0 时不等待（确定性测试用）；sampleCount == 0 -> Validation 拒绝。
+[[nodiscard]] common::Result<ActivityForegroundSummary> ObserveActivityForeground(
+    LastInputBackend& inputBackend, SessionProbe* sessionProbe,
+    ForegroundProbe& foregroundProbe, std::size_t sampleCount,
+    std::chrono::milliseconds sampleInterval, std::int64_t idleThresholdMs,
+    const std::function<void(ActivityState, std::int64_t,
+                             const ForegroundAttributionInfo&)>& onSample);
+
 } // namespace optimizer::activity

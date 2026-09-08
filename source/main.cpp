@@ -233,12 +233,16 @@ int RunConfigCommand(std::wstring_view path) {
 }
 
 int RunActivityCommand(int argc, wchar_t* argv[]) {
-    // --activity <s> [idle-secs] [--session]：用户输入活动观测（MOD-ACT-001，R0 只读、前台
-    // 有界）。每秒只读查询最近键鼠输入（GetLastInputInfo）并分类 Active/Idle/Unknown；
-    // --session（ACT-002）追加当前会话上下文：远程会话标志（SM_REMOTESESSION）＋锁屏
-    //（WTSSessionInfoEx SessionFlags）＋会话连接状态（WTSConnectState），断开会话/锁屏覆盖
-    // 输入态（Disconnected/Locked），会话或输入任一查询失败按 Unknown 降级不伪装。
-    // 无 Hook、无窗口/消息循环/后台线程、不采集输入内容。
+    // --activity <s> [idle-secs] [--session] [--foreground]：用户输入活动观测（MOD-ACT-001，
+    // R0 只读、前台有界）。每秒只读查询最近键鼠输入（GetLastInputInfo）并分类
+    // Active/Idle/Unknown；--session（ACT-002）追加当前会话上下文：远程会话标志
+    // （SM_REMOTESESSION）＋锁屏（WTSSessionInfoEx SessionFlags）＋会话连接状态
+    // （WTSConnectState），断开会话/锁屏覆盖输入态（Disconnected/Locked），会话或输入任一查询
+    // 失败按 Unknown 降级不伪装；--foreground（ACT-003）追加前台窗口归属：仅 Active/Idle 样本
+    // 查询一次前台窗口所属进程（GetForegroundWindow + GetWindowThreadProcessId）并输出
+    // fg=<pid>，无窗口输出 fg=none、查询失败 fg=unavailable；Locked/Disconnected/Unknown 不可
+    // 归属（不伪造 pid）。可与 --session 同时使用（顺序无关）。无 Hook、无窗口/消息循环/后台
+    // 线程、不采集输入内容与窗口标题。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 3 || !ParseUint32(argv[2], seconds) || seconds == 0 ||
@@ -250,10 +254,15 @@ int RunActivityCommand(int argc, wchar_t* argv[]) {
     std::uint32_t idleSecs = 15; // 默认空闲阈值 15 秒
     bool idleGiven = false;
     bool sessionContext = false;
+    bool foreground = false;
     for (int i = 3; i < argc; ++i) {
         const std::wstring_view arg(argv[i]);
         if (arg == L"--session") {
             sessionContext = true;
+            continue;
+        }
+        if (arg == L"--foreground") {
+            foreground = true;
             continue;
         }
         if (arg.size() >= 2 && arg[0] == L'-') {
@@ -288,8 +297,96 @@ int RunActivityCommand(int argc, wchar_t* argv[]) {
                        << L"; states may include locked/disconnected";
         }
     }
+    if (foreground) {
+        std::wcout
+            << L"\n  fg        : GetForegroundWindow + "
+               L"GetWindowThreadProcessId (window owning pid, read-only; "
+               L"active/idle samples only)";
+    }
     std::wcout << L"\n";
 
+    if (foreground) {
+        auto foregroundProbe =
+            optimizer::activity::CreateWin32ForegroundProbe();
+        std::size_t sampleIndex = 0;
+        const auto onSample =
+            [&seconds, &sampleIndex](
+                optimizer::activity::ActivityState state, std::int64_t idleMs,
+                const optimizer::activity::ForegroundAttributionInfo& info) {
+                ++sampleIndex;
+                std::wcout << L"  [" << sampleIndex << L"/" << seconds << L"] "
+                           << optimizer::activity::ActivityStateToString(state);
+                // 锁屏/断开/未知不带 idle（active/idle 才打印输入空闲毫秒）。
+                if (state == optimizer::activity::ActivityState::Active ||
+                    state == optimizer::activity::ActivityState::Idle) {
+                    std::wcout << L" (idle " << idleMs << L" ms)";
+                }
+                switch (info.attribution) {
+                    case optimizer::activity::ForegroundAttribution::Pid:
+                        std::wcout << L" fg=" << info.pid;
+                        break;
+                    case optimizer::activity::ForegroundAttribution::NoWindow:
+                        std::wcout << L" fg=none";
+                        break;
+                    case optimizer::activity::ForegroundAttribution::Unknown:
+                        std::wcout << L" fg=unavailable";
+                        break;
+                    default:
+                        // NotApplicable（Locked/Disconnected/Unknown）：不伪造前台。
+                        break;
+                }
+                std::wcout << L"\n";
+            };
+        optimizer::activity::SessionProbe* session = nullptr;
+        if (sessionContext) {
+            session = sessionProbe.get();
+        }
+        const auto result = optimizer::activity::ObserveActivityForeground(
+            *backend, session, *foregroundProbe, seconds,
+            std::chrono::milliseconds(1000),
+            static_cast<std::int64_t>(idleSecs) * 1000, onSample);
+        if (!result) {
+            const auto& error = result.ErrorValue();
+            std::wcerr << L"  observation failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        const auto& summary = result.Value();
+        if (sessionContext) {
+            std::wcout << L"  summary  : active " << summary.states.active
+                       << L" / idle " << summary.states.idle << L" / locked "
+                       << summary.states.locked << L" / disconnected "
+                       << summary.states.disconnected << L" / unknown "
+                       << summary.states.unknown << L"\n";
+        } else {
+            std::wcout << L"  summary  : active " << summary.states.active
+                       << L" / idle " << summary.states.idle << L" / unknown "
+                       << summary.states.unknown << L"\n";
+        }
+        std::wcout << L"  fg        : pid " << summary.attributedPid
+                   << L" / none " << summary.noWindow << L" / unavailable "
+                   << summary.foregroundUnknown << L" / n/a "
+                   << summary.notApplicable << L"\n";
+        if (summary.states.unknown == summary.states.samples &&
+            summary.states.samples > 0) {
+            std::wcout
+                << L"  -> "
+                << (sessionContext
+                        ? L"input/session query unavailable; degraded to unknown, "
+                          L"not Active/Idle/Locked/Disconnected"
+                        : L"last-input query unavailable (non-interactive "
+                          L"session?); degraded to unknown, not Active/Idle")
+                << L"\n";
+        } else if (summary.foregroundUnknown > 0 &&
+                   summary.foregroundUnknown ==
+                       summary.states.active + summary.states.idle) {
+            std::wcout
+                << L"  -> foreground query unavailable on active/idle samples; "
+                   L"pid not fabricated\n";
+        }
+        return 0;
+    }
     std::size_t sampleIndex = 0;
     const auto onSample =
         [&seconds, &sampleIndex](optimizer::activity::ActivityState state,
@@ -2504,13 +2601,17 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --status     Show one read-only memory snapshot\n"
         << L"  CppOptimizer.exe --observe <s> [threshold] Sample each second for 1..60 s;\n"
         << L"                             optional low-load threshold 0..100 (default 50)\n"
-        << L"  CppOptimizer.exe --activity <s> [idle-secs] [--session]  Observe user input\n"
-        << L"                             activity (read-only GetLastInputInfo; no hooks)\n"
-        << L"                             for 1..60 s; idle threshold 1..3600 s (default\n"
+        << L"  CppOptimizer.exe --activity <s> [idle-secs] [--session] [--foreground]  Observe\n"
+        << L"                             user input activity (read-only "
+           L"GetLastInputInfo; no\n"
+        << L"                             hooks) for 1..60 s; idle threshold 1..3600 s (default\n"
         << L"                             15); outputs per-second Active/Idle/Unknown\n"
-        << L"                             states. --session (ACT-002) adds read-only\n"
-        << L"                             session context: remote/local, locked (WTS\n"
-        << L"                             SessionFlags) and disconnected link states\n"
+        << L"                             states. --session (ACT-002) adds read-only session\n"
+        << L"                             context: remote/local, locked (WTS SessionFlags)\n"
+        << L"                             and disconnected link states. --foreground (ACT-003)\n"
+        << L"                             adds the foreground window owning pid\n"
+        << L"                             (GetForegroundWindow/GetWindowThreadProcessId) on\n"
+        << L"                             active/idle samples only\n"
 
         << L"  CppOptimizer.exe --log <module> <message...> Write one Info log line to stderr\n"
         << L"                             (read-only, foreground, bounded)\n"
@@ -2615,7 +2716,7 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argc == 3 && std::wstring_view(argv[1]) == L"--config") {
             return RunConfigCommand(argv[2]);
         }
-        if ((argc >= 3 && argc <= 5) &&
+        if ((argc >= 3 && argc <= 6) &&
             std::wstring_view(argv[1]) == L"--activity") {
             return RunActivityCommand(argc, argv);
         }

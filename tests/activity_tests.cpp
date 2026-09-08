@@ -29,6 +29,14 @@ using optimizer::activity::SessionLinkState;
 using optimizer::activity::SessionLinkStateToString;
 using optimizer::activity::SessionProbe;
 using optimizer::activity::LinkStateFromWtsValue;
+using optimizer::activity::ActivityForegroundSummary;
+using optimizer::activity::ForegroundProbe;
+using optimizer::activity::ForegroundSample;
+using optimizer::activity::ForegroundAttribution;
+using optimizer::activity::ForegroundAttributionInfo;
+using optimizer::activity::IsForegroundAttributable;
+using optimizer::activity::ClassifyForegroundAttribution;
+using optimizer::activity::ObserveActivityForeground;
 
 // 可注入 fake：按注入序列返回样本，指定下标强制查询失败（Unknown 降级路径）。
 class FakeActivityBackend final : public LastInputBackend {
@@ -179,6 +187,38 @@ SessionContext MakeContext(SessionLinkState link, bool locked = false,
     context.locked = locked;
     context.remoteSession = remote;
     return context;
+}
+
+// 可注入 fake 前台窗口后端：按注入序列返回样本，指定下标强制查询失败。
+class FakeForegroundProbe final : public ForegroundProbe {
+public:
+    std::vector<ForegroundSample> samples;
+    std::vector<std::size_t> failAt;
+
+    Result<ForegroundSample> Query() override {
+        const std::size_t index = queryCount;
+        ++queryCount;
+        for (const std::size_t fail : failAt) {
+            if (fail == index) {
+                return Result<ForegroundSample>::Failure(
+                    Error::FromWin32(5, "FakeForegroundProbe"));
+            }
+        }
+        if (index >= samples.size()) {
+            return Result<ForegroundSample>::Failure(
+                Error::Validation("FakeForegroundProbe", L"样本耗尽"));
+        }
+        return Result<ForegroundSample>::Success(samples[index]);
+    }
+
+    std::size_t queryCount = 0;
+};
+
+ForegroundSample MakeForeground(std::uint32_t pid) {
+    ForegroundSample sample;
+    sample.hasWindow = true;
+    sample.pid = pid;
+    return sample;
 }
 
 bool TestExtendedStateToString() {
@@ -361,6 +401,237 @@ bool TestContextWindowMixedCounts() {
            summary.unknown == 1 && calls == 4;
 }
 
+// ---------- ACT-003：前台窗口归属（ForegroundProbe/归属纯函数/前台观测窗口） ----------
+
+bool TestForegroundAttributableBoundary() {
+    // 仅 Active/Idle 可归属；Locked/Disconnected/Unknown 不可（锁屏属安全桌面、断开无
+    // 交互、失败不知在场——均不得做窗口归属）。
+    return IsForegroundAttributable(ActivityState::Active) &&
+           IsForegroundAttributable(ActivityState::Idle) &&
+           !IsForegroundAttributable(ActivityState::Unknown) &&
+           !IsForegroundAttributable(ActivityState::Locked) &&
+           !IsForegroundAttributable(ActivityState::Disconnected);
+}
+
+bool TestClassifyForegroundAttributionMapping() {
+    // 可归属状态下按前台窗口存在性映射：hasWindow -> Pid，无窗口 -> NoWindow。
+    return ClassifyForegroundAttribution(true) == ForegroundAttribution::Pid &&
+           ClassifyForegroundAttribution(false) ==
+               ForegroundAttribution::NoWindow;
+}
+
+bool TestForegroundWindowActiveIdleAttribution() {
+    // 会话叠加 + 前台：样本 0 Active + 窗口 pid=4242 -> Pid；样本 1 Idle + 无前台
+    // 窗口 -> NoWindow；idleMs 透传；三个后端查询次数与样本一一对应。
+    auto input = std::make_shared<FakeActivityBackend>();
+    input->samples.push_back({5000, 4500}); // idle 500ms < 1000 -> Active
+    input->samples.push_back({6000, 5000}); // idle 1000ms == 1000 -> Idle
+    auto session = std::make_shared<FakeSessionProbe>();
+    session->contexts.push_back(MakeContext(SessionLinkState::Active));
+    session->contexts.push_back(MakeContext(SessionLinkState::Active));
+    auto foreground = std::make_shared<FakeForegroundProbe>();
+    foreground->samples.push_back(MakeForeground(4242));
+    foreground->samples.push_back(ForegroundSample{}); // hasWindow=false
+    std::vector<ActivityState> states;
+    std::vector<ForegroundAttributionInfo> fgSeen;
+    const auto result = ObserveActivityForeground(
+        *input, session.get(), *foreground, 2, std::chrono::milliseconds(0),
+        1000,
+        [&states, &fgSeen](ActivityState state, std::int64_t,
+                           const ForegroundAttributionInfo& info) {
+            states.push_back(state);
+            fgSeen.push_back(info);
+        });
+    if (!result) {
+        return false;
+    }
+    const auto& summary = result.Value();
+    return summary.states.samples == 2 && summary.states.active == 1 &&
+           summary.states.idle == 1 && summary.states.unknown == 0 &&
+           summary.attributedPid == 1 && summary.noWindow == 1 &&
+           summary.foregroundUnknown == 0 && summary.notApplicable == 0 &&
+           states.size() == 2 && states[0] == ActivityState::Active &&
+           states[1] == ActivityState::Idle &&
+           fgSeen[0].attribution == ForegroundAttribution::Pid &&
+           fgSeen[0].pid == 4242 &&
+           fgSeen[1].attribution == ForegroundAttribution::NoWindow &&
+           fgSeen[1].pid == 0 && input->queryCount == 2 &&
+           session->queryCount == 2 && foreground->queryCount == 2;
+}
+
+bool TestForegroundLockedNotQueried() {
+    // 锁屏样本（即使输入近）：状态 Locked，不可归属——前台后端不被查询、不伪造 pid。
+    auto input = std::make_shared<FakeActivityBackend>();
+    input->samples.push_back({5000, 4500}); // 若未锁会判 Active
+    auto session = std::make_shared<FakeSessionProbe>();
+    session->contexts.push_back(MakeContext(SessionLinkState::Active, true));
+    auto foreground = std::make_shared<FakeForegroundProbe>();
+    foreground->samples.push_back(MakeForeground(9999));
+    std::vector<ForegroundAttributionInfo> fgSeen;
+    const auto result = ObserveActivityForeground(
+        *input, session.get(), *foreground, 1, std::chrono::milliseconds(0),
+        1000,
+        [&fgSeen](ActivityState state, std::int64_t idleMs,
+                  const ForegroundAttributionInfo& info) {
+            if (state == ActivityState::Locked && idleMs == 500) {
+                fgSeen.push_back(info);
+            }
+        });
+    if (!result) {
+        return false;
+    }
+    const auto& summary = result.Value();
+    return summary.states.samples == 1 && summary.states.locked == 1 &&
+           summary.notApplicable == 1 && summary.attributedPid == 0 &&
+           fgSeen.size() == 1 &&
+           fgSeen[0].attribution == ForegroundAttribution::NotApplicable &&
+           fgSeen[0].pid == 0 &&
+           foreground->queryCount == 0; // 锁屏不可归属：不查前台
+}
+
+bool TestForegroundInputFailureNotQueried() {
+    // 输入查询失败 -> Unknown：不可归属（不知在场不伪造窗口归属），前台不被查询。
+    auto input = std::make_shared<FakeActivityBackend>();
+    input->failAt.push_back(0);
+    auto foreground = std::make_shared<FakeForegroundProbe>();
+    foreground->samples.push_back(MakeForeground(9999));
+    const auto result = ObserveActivityForeground(
+        *input, nullptr, *foreground, 1, std::chrono::milliseconds(0), 1000,
+        nullptr);
+    if (!result) {
+        return false;
+    }
+    const auto& summary = result.Value();
+    return summary.states.samples == 1 && summary.states.unknown == 1 &&
+           summary.notApplicable == 1 && summary.attributedPid == 0 &&
+           foreground->queryCount == 0;
+}
+
+bool TestForegroundQueryFailureDegrades() {
+    // 可归属（Active）但前台查询失败：按 Unknown 降级不伪装 pid，计数 foregroundUnknown。
+    auto input = std::make_shared<FakeActivityBackend>();
+    input->samples.push_back({5000, 4500}); // Active
+    auto foreground = std::make_shared<FakeForegroundProbe>();
+    foreground->failAt.push_back(0);
+    std::vector<ForegroundAttributionInfo> fgSeen;
+    const auto result = ObserveActivityForeground(
+        *input, nullptr, *foreground, 1, std::chrono::milliseconds(0), 1000,
+        [&fgSeen](ActivityState state, std::int64_t idleMs,
+                  const ForegroundAttributionInfo& info) {
+            if (state == ActivityState::Active && idleMs == 500) {
+                fgSeen.push_back(info);
+            }
+        });
+    if (!result) {
+        return false;
+    }
+    const auto& summary = result.Value();
+    return summary.states.samples == 1 && summary.states.active == 1 &&
+           summary.foregroundUnknown == 1 && summary.attributedPid == 0 &&
+           fgSeen.size() == 1 &&
+           fgSeen[0].attribution == ForegroundAttribution::Unknown &&
+           fgSeen[0].pid == 0 && foreground->queryCount == 1;
+}
+
+bool TestForegroundSessionFailureDegrades() {
+    // 会话叠加下会话查询失败 -> 整样本 Unknown（即使输入/前台可查）：不可归属不查前台。
+    auto input = std::make_shared<FakeActivityBackend>();
+    input->samples.push_back({5000, 4500});
+    auto session = std::make_shared<FakeSessionProbe>();
+    session->failAt.push_back(0);
+    auto foreground = std::make_shared<FakeForegroundProbe>();
+    foreground->samples.push_back(MakeForeground(9999));
+    const auto result = ObserveActivityForeground(
+        *input, session.get(), *foreground, 1, std::chrono::milliseconds(0),
+        1000, nullptr);
+    if (!result) {
+        return false;
+    }
+    const auto& summary = result.Value();
+    return summary.states.samples == 1 && summary.states.unknown == 1 &&
+           summary.notApplicable == 1 && summary.attributedPid == 0 &&
+           input->queryCount == 1 && session->queryCount == 1 &&
+           foreground->queryCount == 0;
+}
+
+bool TestForegroundRejectsZeroSamples() {
+    // 零样本 Validation 拒绝且不查询任何后端。
+    auto input = std::make_shared<FakeActivityBackend>();
+    auto session = std::make_shared<FakeSessionProbe>();
+    auto foreground = std::make_shared<FakeForegroundProbe>();
+    const auto result = ObserveActivityForeground(
+        *input, session.get(), *foreground, 0, std::chrono::milliseconds(0),
+        1000, nullptr);
+    return !result && result.ErrorValue().domain == ErrorDomain::Validation &&
+           input->queryCount == 0 && session->queryCount == 0 &&
+           foreground->queryCount == 0;
+}
+
+bool TestForegroundMixedSequenceCounts() {
+    // 混合序列：Pid / NoWindow / Locked(NotApplicable) / 查询失败(Unknown 降级)
+    // 与状态计数、回调一一一致；前台仅对可归属样本查询。
+    auto input = std::make_shared<FakeActivityBackend>();
+    input->samples.push_back({5000, 4500}); // 样本 0：Active
+    input->samples.push_back({6000, 5000}); // 样本 1：Idle（idle==阈值）
+    input->samples.push_back({7000, 6500}); // 样本 2：Active（被锁屏覆盖）
+    input->samples.push_back({8000, 7500}); // 样本 3：Active（前台查询失败）
+    auto session = std::make_shared<FakeSessionProbe>();
+    session->contexts.push_back(MakeContext(SessionLinkState::Active));
+    session->contexts.push_back(MakeContext(SessionLinkState::Active));
+    session->contexts.push_back(MakeContext(SessionLinkState::Active, true));
+    session->contexts.push_back(MakeContext(SessionLinkState::Active));
+    auto foreground = std::make_shared<FakeForegroundProbe>();
+    foreground->samples.push_back(MakeForeground(1111));
+    foreground->samples.push_back(ForegroundSample{}); // 无前台窗口
+    foreground->failAt.push_back(2); // 样本 3 的前台查询（第 3 次）失败 -> Unknown 降级
+    std::vector<ActivityState> states;
+    std::vector<std::int64_t> idleSeen;
+    std::vector<ForegroundAttributionInfo> fgSeen;
+    const auto result = ObserveActivityForeground(
+        *input, session.get(), *foreground, 4, std::chrono::milliseconds(0),
+        1000,
+        [&states, &idleSeen, &fgSeen](ActivityState state, std::int64_t idleMs,
+                                      const ForegroundAttributionInfo& info) {
+            states.push_back(state);
+            idleSeen.push_back(idleMs);
+            fgSeen.push_back(info);
+        });
+    if (!result) {
+        return false;
+    }
+    const auto& summary = result.Value();
+    const auto& s = summary.states;
+    const bool counts = s.samples == 4 && s.active == 2 && s.idle == 1 &&
+                        s.locked == 1 && s.disconnected == 0 &&
+                        s.unknown == 0 && summary.attributedPid == 1 &&
+                        summary.noWindow == 1 && summary.foregroundUnknown == 1 &&
+                        summary.notApplicable == 1 &&
+                        summary.attributedPid + summary.noWindow +
+                                summary.foregroundUnknown +
+                                summary.notApplicable ==
+                            s.samples;
+    const bool samples = states.size() == 4 && idleSeen.size() == 4 &&
+                         fgSeen.size() == 4 &&
+                         states[0] == ActivityState::Active &&
+                         states[1] == ActivityState::Idle &&
+                         states[2] == ActivityState::Locked &&
+                         states[3] == ActivityState::Active &&
+                         idleSeen[2] == 500 && idleSeen[3] == 500 &&
+                         fgSeen[0].attribution == ForegroundAttribution::Pid &&
+                         fgSeen[0].pid == 1111 &&
+                         fgSeen[1].attribution ==
+                             ForegroundAttribution::NoWindow &&
+                         fgSeen[1].pid == 0 &&
+                         fgSeen[2].attribution ==
+                             ForegroundAttribution::NotApplicable &&
+                         fgSeen[2].pid == 0 &&
+                         fgSeen[3].attribution ==
+                             ForegroundAttribution::Unknown &&
+                         fgSeen[3].pid == 0;
+    return counts && samples && input->queryCount == 4 &&
+           session->queryCount == 4 && foreground->queryCount == 3;
+}
+
 } // namespace
 
 int wmain() {
@@ -395,5 +666,17 @@ int wmain() {
         &TestContextWindowInputFailureDegrades);
     run(L"context rejects zero samples", &TestContextRejectsZeroSamples);
     run(L"context window mixed counts", &TestContextWindowMixedCounts);
+    run(L"foreground attributable boundary", &TestForegroundAttributableBoundary);
+    run(L"classify foreground attribution mapping",
+        &TestClassifyForegroundAttributionMapping);
+    run(L"foreground window active/idle attribution",
+        &TestForegroundWindowActiveIdleAttribution);
+    run(L"foreground locked not queried", &TestForegroundLockedNotQueried);
+    run(L"foreground input failure not queried",
+        &TestForegroundInputFailureNotQueried);
+    run(L"foreground query failure degrades", &TestForegroundQueryFailureDegrades);
+    run(L"foreground session failure degrades", &TestForegroundSessionFailureDegrades);
+    run(L"foreground rejects zero samples", &TestForegroundRejectsZeroSamples);
+    run(L"foreground mixed sequence counts", &TestForegroundMixedSequenceCounts);
     return failed == 0 ? 0 : 1;
 }

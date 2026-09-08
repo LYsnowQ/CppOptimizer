@@ -88,6 +88,33 @@ public:
     }
 };
 
+// Win32 前台窗口后端：GetForegroundWindow + GetWindowThreadProcessId（user32 只读，
+// 无 Hook/无窗口/无消息循环/无后台线程、不读窗口标题与类名）。无前台窗口（NULL，如
+// 安全桌面/无交互窗口）不算失败，返回 Success{hasWindow=false}；窗口句柄查询瞬间失效
+//（进程已退出等）如实返回 Failure。
+class Win32ForegroundProbe final : public ForegroundProbe {
+public:
+    common::Result<ForegroundSample> Query() override {
+        const HWND foreground = ::GetForegroundWindow();
+        if (foreground == nullptr) {
+            ForegroundSample sample;
+            sample.hasWindow = false;
+            return common::Result<ForegroundSample>::Success(sample);
+        }
+        DWORD pid = 0;
+        const DWORD threadId = ::GetWindowThreadProcessId(foreground, &pid);
+        if (threadId == 0) {
+            return common::Result<ForegroundSample>::Failure(
+                common::Error::FromWin32(::GetLastError(),
+                                         "GetWindowThreadProcessId"));
+        }
+        ForegroundSample sample;
+        sample.hasWindow = true;
+        sample.pid = static_cast<std::uint32_t>(pid);
+        return common::Result<ForegroundSample>::Success(sample);
+    }
+};
+
 } // namespace
 
 const wchar_t* ActivityStateToString(ActivityState state) noexcept {
@@ -211,12 +238,116 @@ common::Result<ActivityContextSummary> ObserveActivityContext(
     return common::Result<ActivityContextSummary>::Success(summary);
 }
 
+bool IsForegroundAttributable(ActivityState state) noexcept {
+    return state == ActivityState::Active || state == ActivityState::Idle;
+}
+
+ForegroundAttribution ClassifyForegroundAttribution(bool hasWindow) noexcept {
+    return hasWindow ? ForegroundAttribution::Pid
+                     : ForegroundAttribution::NoWindow;
+}
+
+common::Result<ActivityForegroundSummary> ObserveActivityForeground(
+    LastInputBackend& inputBackend, SessionProbe* sessionProbe,
+    ForegroundProbe& foregroundProbe, std::size_t sampleCount,
+    std::chrono::milliseconds sampleInterval, std::int64_t idleThresholdMs,
+    const std::function<void(ActivityState, std::int64_t,
+                             const ForegroundAttributionInfo&)>& onSample) {
+    if (sampleCount == 0) {
+        return common::Result<ActivityForegroundSummary>::Failure(
+            common::Error::Validation(
+                "ObserveActivityForeground", L"sampleCount 必须为正"));
+    }
+    ActivityForegroundSummary summary;
+    for (std::size_t i = 0; i < sampleCount; ++i) {
+        // 会话上下文（可选叠加）：sessionProbe == nullptr 时不查询（无 --session 模式，
+        // 状态按纯输入判定，语义同 ObserveActivity）。
+        SessionContext context;
+        bool sessionOk = true;
+        if (sessionProbe != nullptr) {
+            const auto session = sessionProbe->Query();
+            if (!session) {
+                sessionOk = false;
+            } else {
+                context = session.Value();
+            }
+        }
+        const auto input = inputBackend.Query();
+
+        ActivityState state = ActivityState::Unknown;
+        std::int64_t idleMs = 0;
+        if (!input || !sessionOk) {
+            // 输入或会话任一查询失败：整样本 Unknown（在场未知时不得伪装）。
+            state = ActivityState::Unknown;
+        } else {
+            const auto& sample = input.Value();
+            const ActivityState inputState = ClassifyActivity(
+                sample.nowTick, sample.lastInputTick, idleThresholdMs);
+            state = (sessionProbe != nullptr)
+                        ? ClassifyContextState(inputState, context)
+                        : inputState;
+            idleMs = IdleMilliseconds(sample.nowTick, sample.lastInputTick);
+        }
+
+        // 前台归属：仅 Active/Idle 查询（Locked 前台属安全桌面、Disconnected 无交互、
+        // Unknown 不知在场——均不查不伪造 pid）；可归属但查询失败按 Unknown 降级。
+        ForegroundAttributionInfo attributionInfo;
+        if (IsForegroundAttributable(state)) {
+            const auto foreground = foregroundProbe.Query();
+            if (!foreground) {
+                attributionInfo.attribution = ForegroundAttribution::Unknown;
+                ++summary.foregroundUnknown;
+            } else if (foreground.Value().hasWindow) {
+                attributionInfo.attribution = ForegroundAttribution::Pid;
+                attributionInfo.pid = foreground.Value().pid;
+                ++summary.attributedPid;
+            } else {
+                attributionInfo.attribution = ForegroundAttribution::NoWindow;
+                ++summary.noWindow;
+            }
+        } else {
+            attributionInfo.attribution = ForegroundAttribution::NotApplicable;
+            ++summary.notApplicable;
+        }
+
+        ++summary.states.samples;
+        switch (state) {
+            case ActivityState::Active:
+                ++summary.states.active;
+                break;
+            case ActivityState::Idle:
+                ++summary.states.idle;
+                break;
+            case ActivityState::Locked:
+                ++summary.states.locked;
+                break;
+            case ActivityState::Disconnected:
+                ++summary.states.disconnected;
+                break;
+            default:
+                ++summary.states.unknown;
+                break;
+        }
+        if (onSample) {
+            onSample(state, idleMs, attributionInfo);
+        }
+        if (sampleInterval.count() > 0 && i + 1 < sampleCount) {
+            std::this_thread::sleep_for(sampleInterval);
+        }
+    }
+    return common::Result<ActivityForegroundSummary>::Success(summary);
+}
+
 std::shared_ptr<LastInputBackend> CreateWin32LastInputBackend() {
     return std::make_shared<Win32LastInputBackend>();
 }
 
 std::shared_ptr<SessionProbe> CreateWin32SessionProbe() {
     return std::make_shared<Win32SessionProbe>();
+}
+
+std::shared_ptr<ForegroundProbe> CreateWin32ForegroundProbe() {
+    return std::make_shared<Win32ForegroundProbe>();
 }
 
 std::int64_t TickDeltaMs(std::uint32_t fromTick,
