@@ -45,6 +45,7 @@ add_executable(CppOptimizer
     source/process/process_watcher.cpp
     source/activity/user_activity.cpp
     source/service/service_host.cpp
+    source/service/recovery_marker.cpp
     source/ipc/ipc_protocol.cpp
     source/ipc/ipc_transport.cpp
     source/ipc/ipc_session.cpp
@@ -317,6 +318,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         tests/service_tests.cpp
         source/common/error.cpp
         source/service/service_host.cpp
+        source/service/recovery_marker.cpp
     )
     target_include_directories(CppOptimizerServiceTests PRIVATE include)
     target_link_libraries(CppOptimizerServiceTests PRIVATE advapi32)

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -137,6 +137,9 @@
     <ClCompile Include="source\process\process_watcher.cpp" />
     <ClCompile Include="source\activity\user_activity.cpp" />
     <ClCompile Include="source\service\service_host.cpp" />
+    <ClCompile Include="source\service\recovery_marker.cpp" />
+    
+    
     <ClCompile Include="source\ipc\ipc_protocol.cpp" />
     <ClCompile Include="source\ipc\ipc_transport.cpp" />
     <ClCompile Include="source\ipc\ipc_session.cpp" />

@@ -18,6 +18,7 @@
 #include "priority/priority_booster.hpp"
 #include "process/process_watcher.hpp"
 #include "service/service_host.hpp"
+#include "service/recovery_marker.hpp"
 
 #include <windows.h>
 
@@ -1483,6 +1484,8 @@ struct ServiceHostDemoState {
     bool ipcNativeProbeOk = false;                // 启动探测通过（R0 baseline）
     bool ipcNativeProbeAnomaly = false;           // Native 探测异常（已触发锁存）
     bool ipcOsSupportAnomaly = false;             // 操作系统不支持（已触发锁存）
+    // IPC-018：上次异常退出且恢复未确认（recovery-state.json）——启动发现标记即锁存 Safe Mode。
+    bool ipcRecoveryUnconfirmed = false;          // 上次会话未正常结束且未确认
     std::size_t ipcAnomalyEntries = 0;            // 窗口内离散异常触发次数（汇总）
 };
 
@@ -1619,11 +1622,12 @@ std::optional<std::filesystem::path> FindIpcTokenFile(
     int argc, wchar_t* argv[], int start) noexcept;
 
 int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
-    // --service console <s> [config.toml] [--ipc-facts]：控制台托管演示（前台、有界、
-    // Ctrl+C 优雅停止）。可选 --ipc-facts 在负载窗口内同时作为受保护管道服务端常驻
-    // 受理 Agent 事实（SVC-002/003，R0）。可选 [config.toml]（紧跟在秒数后的首个
-    // 非选项参数）在 --ipc-facts 时经 [ipc] 节配置 Safe Mode 门禁窗口参数
-    // （IPC-014：阈值/窗口/冷却/开关；缺省与 SafeModeGuard 默认一致）。
+    // --service console <s> [config.toml] [--ipc-facts] [--confirm-recovery]：控制台托管演示
+    //（前台、有界、Ctrl+C 优雅停止）。可选 --ipc-facts 在负载窗口内同时作为受保护管道服务端
+    // 常驻受理 Agent 事实（SVC-002/003，R0）。可选 [config.toml]（紧跟在秒数后的首个非选项
+    // 参数）在 --ipc-facts 时经 [ipc] 节配置 Safe Mode 门禁窗口参数（IPC-014）。IPC-018：
+    // 会话开始写恢复标记、正常结束清除；上次异常退出未确认时锁存 Safe Mode（暂停受理），
+    // --confirm-recovery 显式确认后清除并继续（只读 R0 不受影响）。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
@@ -1640,10 +1644,13 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         flagsStart = 5;
     }
     bool ipcFacts = false;
+    bool confirmRecovery = false;
     for (int i = flagsStart; i < argc; ++i) {
-        if (std::wstring_view(argv[i]) == L"--ipc-facts") {
+        const std::wstring_view arg(argv[i]);
+        if (arg == L"--ipc-facts") {
             ipcFacts = true;
-            break;
+        } else if (arg == L"--confirm-recovery") {
+            confirmRecovery = true;
         }
     }
 
@@ -1674,6 +1681,9 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
 
     ServiceHostDemoState state;
     state.logger.SetStderrSink();
+    // IPC-018：恢复标记路径（会话开始写、正常结束清；异常退出留存供下次检测）。
+    const auto recoveryMarkerPath =
+        optimizer::service::DefaultRecoveryMarkerPath();
     if (ipcFacts) {
         state.ipcEnabled = true;
         state.ipcPipeName =
@@ -1789,6 +1799,34 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         } else {
             state.ipcNativeProbeOk = true;
         }
+        // IPC-018：上次异常退出且恢复未确认（docs/23 §6 触发项）。启动先查恢复标记：
+        // 标记存在 = 上次会话未正常结束（崩溃/被杀/失败返回）。--confirm-recovery 显式确认
+        // 先清除标记；否则视为离散异常锁存 Safe Mode（暂停受理，需下次确认后恢复）。随后写入
+        // 本次会话标记，正常结束（RunConsole 成功返回）时清除；失败/被杀则留存供下次检测。
+        if (confirmRecovery) {
+            (void)optimizer::service::ClearRecoveryMarker(recoveryMarkerPath);
+            state.logger.Write(
+                optimizer::logger::LogLevel::Info, L"service",
+                L"ipc  : recovery marker cleared (user confirmed)");
+        }
+        const auto markerSet = [&recoveryMarkerPath]() {
+            if (auto set = optimizer::service::IsRecoveryMarkerSet(
+                    recoveryMarkerPath);
+                set) {
+                return set.Value();
+            }
+            return false; // 读取 IO 失败按未设置（目录异常不阻断启动，见模块注释）
+        }();
+        if (markerSet && !confirmRecovery) {
+            state.ipcRecoveryUnconfirmed = true;
+            state.ipcSafeMode->OnAnomalyDetected();
+            ++state.ipcAnomalyEntries;
+            state.logger.Write(
+                optimizer::logger::LogLevel::Info, L"service",
+                L"ipc  : Safe Mode entered - 上次异常退出且恢复未确认"
+                L"（pass --confirm-recovery to acknowledge）");
+        }
+        (void)optimizer::service::WriteRecoveryMarker(recoveryMarkerPath);
     }
     optimizer::service::ServiceHost::Options options;
     options.identity.name = kServiceName;
@@ -1844,6 +1882,15 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                     ? L"  os       : unsupported (need Windows 10/11 x64) -> Safe "
                       L"Mode (agent intake paused for window)"
                     : L"  os       : windows 10/11 x64 supported");
+            if (state.ipcRecoveryUnconfirmed) {
+                optimizer::common::WriteConsoleLine(
+                    L"  recovery : last run exited abnormally (unconfirmed) -> "
+                    L"Safe Mode (intake paused); pass --confirm-recovery to "
+                    L"acknowledge");
+            } else if (confirmRecovery) {
+                optimizer::common::WriteConsoleLine(
+                    L"  recovery : acknowledged (marker cleared)");
+            }
         }
     }
     optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
@@ -1858,7 +1905,12 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             << optimizer::common::ToString(error.domain) << L":"
             << error.code << L"] " << error.message;
         optimizer::common::WriteConsoleLine(err.str());
+        // 会话未正常结束：保留恢复标记（供下次启动检测“上次异常退出”）。
         return 2;
+    }
+    // 正常结束（timeout / Ctrl+C 优雅停止）：清除本次会话恢复标记。
+    if (ipcFacts) {
+        (void)optimizer::service::ClearRecoveryMarker(recoveryMarkerPath);
     }
     std::wostringstream ticksLine;
     ticksLine << L"  ticks    : " << state.tickCount;
@@ -1894,6 +1946,9 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             }
             if (state.ipcOsSupportAnomaly) {
                 safeLine << L", unsupported os/build";
+            }
+            if (state.ipcRecoveryUnconfirmed) {
+                safeLine << L", recovery unconfirmed";
             }
             optimizer::common::WriteConsoleLine(safeLine.str());
         }
@@ -2827,12 +2882,16 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --service uninstall           Remove the Windows service\n"
         << L"                             (SCM, requires administrator)\n"
         << L"  CppOptimizer.exe --service console <s> [config.toml] [--ipc-facts]\n"
-        << L"                             [--ipc-token <t>] [--ipc-token-file [<path>]]\n"
+        << L"                             [--confirm-recovery] [--ipc-token <t>]\n"
+        << L"                             [--ipc-token-file [<path>]]\n"
         << L"                             [--ipc-allow-user <SID>]  Host the R0 workload\n"
         << L"                             in console mode for 1..60 s (foreground; Ctrl+C\n"
         << L"                             to stop). --ipc-facts also serves Agent facts\n"
         << L"                             frames via the protected pipe continuously\n"
         << L"                             (optional session token / user SID allow-list).\n"
+        << L"                             --confirm-recovery (IPC-018) acknowledges an\n"
+        << L"                             unclean previous run (recovery-state.json marker)\n"
+        << L"                             and clears the intake Safe Mode latch.\n"
         << L"                             Optional [config.toml] (first non-option arg)\n"
         << L"                             sets the Safe Mode intake gate from [ipc]\n"
         << L"                             (failures / window / cooldown / enabled;\n"

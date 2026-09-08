@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="源文件">
@@ -122,24 +122,10 @@
     <ClCompile Include="source\service\service_host.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="source\ipc\ipc_protocol.cpp">
+    <ClCompile Include="source\service\recovery_marker.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="source\ipc\ipc_transport.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="source\ipc\ipc_session.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="source\ipc\ipc_facts.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="source\ipc\ipc_credentials.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="CppOptimizer.slnx" />
+    
     <None Include="README.md" />
     <None Include="SECURITY.md" />
     <None Include="CONTRIBUTING.md" />

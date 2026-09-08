@@ -1,11 +1,17 @@
 ﻿#include "service/service_host.hpp"
+#include "service/recovery_marker.hpp"
 
 #include <chrono>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <windows.h>
 
 namespace {
 
@@ -26,6 +32,10 @@ using optimizer::service::ServiceStatusReport;
 using optimizer::service::StateToString;
 using optimizer::service::UninstallService;
 using optimizer::service::ValidateStateTransition;
+using optimizer::service::ClearRecoveryMarker;
+using optimizer::service::DefaultRecoveryMarkerPath;
+using optimizer::service::IsRecoveryMarkerSet;
+using optimizer::service::WriteRecoveryMarker;
 
 // ---------- SCM fake（记录上报序列，可注入控制码与失败） ----------
 
@@ -611,6 +621,63 @@ bool TestSafeModeClearAnomalyKeepsCountingIndependent() {
            guard.ShouldAcceptClients() && !guard.IsAnomalyLatched();
 }
 
+// ---------- IPC-018：恢复标记（异常退出未确认，recovery-state.json） ----------
+
+std::filesystem::path TempMarkerPath() {
+    // 测试专用唯一临时路径（每次调用新建，测试结束由各用例清理）。
+    static std::uint64_t counter = 0;
+    ++counter;
+    std::error_code ec;
+    auto dir = std::filesystem::temp_directory_path(ec);
+    if (ec) {
+        dir = std::filesystem::path(L".");
+    }
+    return dir / (L"cppopt_recovery_test_" +
+                  std::to_wstring(::GetCurrentProcessId()) + L"_" +
+                  std::to_wstring(counter) + L".json");
+}
+
+bool TestRecoveryMarkerWriteExistsClearRoundTrip() {
+    const auto path = TempMarkerPath();
+    if (!WriteRecoveryMarker(path)) {
+        return false;
+    }
+    const auto set = IsRecoveryMarkerSet(path);
+    if (!set || !set.Value()) {
+        return false;
+    }
+    if (!ClearRecoveryMarker(path)) {
+        return false;
+    }
+    const auto cleared = IsRecoveryMarkerSet(path);
+    std::error_code ec;
+    std::filesystem::remove(path, ec); // 兜底清理
+    return cleared && !cleared.Value();
+}
+
+bool TestRecoveryMarkerAbsentFileNotSet() {
+    const auto path = TempMarkerPath();
+    std::error_code ec;
+    std::filesystem::remove(path, ec); // 确保不存在
+    const auto set = IsRecoveryMarkerSet(path);
+    std::error_code ec2;
+    std::filesystem::remove(path, ec2);
+    return set && !set.Value();
+}
+
+bool TestRecoveryMarkerMalformedContentNotSet() {
+    // 目录内其它文件（内容非本标记信封）不得被误认为恢复标记。
+    const auto path = TempMarkerPath();
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << "not-a-recovery-marker\n";
+    }
+    const auto set = IsRecoveryMarkerSet(path);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    return set && !set.Value();
+}
+
 } // namespace
 
 int wmain() {
@@ -669,5 +736,10 @@ int wmain() {
         &TestSafeModeAnomalyIgnoresRejectionsWhileLatched);
     run(L"safe mode clear anomaly keeps counting independent",
         &TestSafeModeClearAnomalyKeepsCountingIndependent);
+    run(L"recovery marker write exists clear round trip",
+        &TestRecoveryMarkerWriteExistsClearRoundTrip);
+    run(L"recovery marker absent file not set", &TestRecoveryMarkerAbsentFileNotSet);
+    run(L"recovery marker malformed content not set",
+        &TestRecoveryMarkerMalformedContentNotSet);
     return failed == 0 ? 0 : 1;
 }
