@@ -2062,7 +2062,8 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     //   [--ipc-token-file [<path>]]：Agent 运行实体演示（IPC-011，前台有界、周期上报）。
     // 在 s 秒窗口内每 interval 毫秒采集一次真实内存观测并经受保护命名管道上报
     // FactsSnapshot（每次独立连接：请求-应答配对；宿主离线/Safe Mode 暂停等连接失败
-    // 有界重试与退避，计入 connect failures 后继续；窗口到期返回汇总）。
+    // 有界重试与退避，计入 connect failures 后继续；窗口到期返回汇总）。ACT-005：每周期
+    // 另附用户活动观测 user_idle_seconds（GetLastInputInfo 只读；查询失败省略不伪装）。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
@@ -2115,8 +2116,12 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
         hasToken = true;
     }
 
-    // 每周期构造一帧真实内存事实（QueryMemoryStatus 只读；可选 agent_token 凭据，
-    // 不回显明文）。requestId 单调递增，重试沿用当次 id（与应答配对）。
+    // 每周期构造一帧真实内存事实（QueryMemoryStatus 只读；ACT-005 起另附用户活动观测
+    // user_idle_seconds——GetLastInputInfo 只读，距最近键鼠输入秒数，锁屏/断开时钟冻结自然
+    // 增长；查询失败省略该键不伪装）。可选 agent_token 凭据不回显明文。requestId 单调递增，
+    // 重试沿用当次 id（与应答配对）。
+    auto lastInputBackend =
+        optimizer::activity::CreateWin32LastInputBackend();
     std::uint32_t nextRequestId = 0;
     const auto buildRequest =
         [&]() -> optimizer::common::Result<optimizer::ipc::IpcFrameRequest> {
@@ -2139,6 +2144,16 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
         facts.push_back(optimizer::ipc::IpcFact{
             "memory_load_percent",
             std::to_string(memory.memoryLoadPercent)});
+        // 用户活动观测（ACT-005）：查询成功才附带（不伪装）；失败省略该键。
+        if (auto input = lastInputBackend->Query()) {
+            const auto& sample = input.Value();
+            const std::int64_t idleSeconds =
+                optimizer::activity::IdleMilliseconds(
+                    sample.nowTick, sample.lastInputTick) /
+                1000;
+            facts.push_back(optimizer::ipc::IpcFact{
+                "user_idle_seconds", std::to_string(idleSeconds)});
+        }
         facts.push_back(
             optimizer::ipc::IpcFact{"observer", "CppOptimizer agent demo"});
         if (hasToken) {
@@ -2180,6 +2195,9 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     std::wcout << L"  report   : every " << intervalMs
                << L" ms (grow to " << effectiveCapMs
                << L" ms after repeated failures), up to 3 connect attempts per report\n";
+    std::wcout
+        << L"  facts    : memory (total/available/load) + user_idle_seconds "
+           L"(ACT-005, GetLastInputInfo read-only; omitted on query failure)\n";
     if (hasToken) {
         std::wcout << L"  auth     : session token supplied (hidden)\n";
     }

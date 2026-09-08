@@ -732,6 +732,30 @@ bool TestFactsSchemaRejectsAvailableGtTotal() {
     return !result && result.ErrorValue().domain == ErrorDomain::Validation;
 }
 
+bool TestFactsSchemaAcceptsUserIdleSeconds() {
+    // ACT-005：user_idle_seconds 为已注册数值键（无符号十进制整数）。
+    // 单键即可满足“至少一条非凭据事实”；边界与混合载荷均接受。
+    const std::vector<IpcFact> zero = {{"user_idle_seconds", "0"}};
+    if (!ValidateFactsV1Schema(zero)) {
+        return false;
+    }
+    const std::vector<IpcFact> large = {{"user_idle_seconds", "4294967295"}};
+    if (!ValidateFactsV1Schema(large)) {
+        return false;
+    }
+    const std::vector<IpcFact> mixed = {
+        {"client_pid", "123"}, {"memory_total_mb", "16384"},
+        {"user_idle_seconds", "7"}, {"observer", "demo"}};
+    return static_cast<bool>(ValidateFactsV1Schema(mixed));
+}
+
+bool TestFactsSchemaRejectsUserIdleSecondsOverflow() {
+    // 超出 uint32 的 user_idle_seconds 整体拒绝（数值键统一约束）。
+    const std::vector<IpcFact> overflow = {{"user_idle_seconds", "4294967296"}};
+    const auto result = ValidateFactsV1Schema(overflow);
+    return !result && result.ErrorValue().domain == ErrorDomain::Validation;
+}
+
 bool TestFactsSchemaRejectsEmptyObserver() {
     const std::vector<IpcFact> facts = {{"observer", ""}};
     const auto result = ValidateFactsV1Schema(facts);
@@ -2291,6 +2315,10 @@ int wmain() {
     run(L"facts schema rejects out of range", &TestFactsSchemaRejectsOutOfRange);
     run(L"facts schema rejects available gt total",
         &TestFactsSchemaRejectsAvailableGtTotal);
+    run(L"facts schema accepts user idle seconds",
+        &TestFactsSchemaAcceptsUserIdleSeconds);
+    run(L"facts schema rejects user idle seconds overflow",
+        &TestFactsSchemaRejectsUserIdleSecondsOverflow);
     run(L"facts schema rejects empty observer", &TestFactsSchemaRejectsEmptyObserver);
     run(L"facts schema token rules", &TestFactsSchemaTokenRules);
     run(L"facts token excluded from summary", &TestFactsTokenExcludedFromSummary);

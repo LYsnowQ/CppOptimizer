@@ -75,6 +75,9 @@ struct IpcFact {
 //   - memory_total_mb      无符号十进制整数,>= 1
 //   - memory_available_mb  无符号十进制整数,>= 0;与 memory_total_mb 同现时须 <= total
 //   - memory_load_percent  无符号十进制整数,0..100(内存负载,GlobalMemoryStatusEx 口径)
+//   - user_idle_seconds    无符号十进制整数(ACT-005:上报方当前会话距最近键鼠输入的
+//                          秒数,GetLastInputInfo 口径,锁屏/断开时输入时钟冻结自然增长;
+//                          查询失败时上报方应省略该键——不伪装,本层不解释)
 //   - observer             UTF-8 文本,非空(上报方自述,用于调试/审计)
 //   - agent_token          ASCII 会话凭据(IPC-005,1..kMaxFactsTokenBytes);服务端
 //                          Options.expectedToken 配置时才校验(缺失/不匹配回

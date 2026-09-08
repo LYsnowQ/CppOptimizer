@@ -276,7 +276,8 @@ common::Result<void> ValidateFactsV1Schema(std::span<const IpcFact> facts) {
         const bool knownNumeric =
             fact.key == "client_pid" || fact.key == "memory_total_mb" ||
             fact.key == "memory_available_mb" ||
-            fact.key == "memory_load_percent";
+            fact.key == "memory_load_percent" ||
+            fact.key == "user_idle_seconds";
         if (!knownNumeric) {
             return common::Result<void>::Failure(FactsValidationError(
                 L"未知事实键：" +
