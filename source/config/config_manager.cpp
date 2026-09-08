@@ -463,6 +463,16 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
                     static_cast<std::int32_t>(*v);
             }
         }
+        // halt_after_action_failures：0 = 关闭 R1 动作连续失败停摆（IPC-017）；
+        // 1..10000 次连续 R1 动作失败后执行器停摆。越界属语义错误在下方统一拒绝。
+        if (const auto v =
+                (*section)["halt_after_action_failures"].value<std::int64_t>()) {
+            if (*v >= std::numeric_limits<std::int32_t>::min() &&
+                *v <= std::numeric_limits<std::int32_t>::max()) {
+                snapshot.policy.haltAfterActionFailures =
+                    static_cast<std::int32_t>(*v);
+            }
+        }
     }
     // 阈值有序性与范围校验：无论节是否存在，默认值恒合法；
     // 违序/越界配置是语义错误，直接拒绝（错误阈值会产生错误决策）。
@@ -474,13 +484,16 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
           snapshot.policy.comfortableMarginPercent <= 100) ||
         snapshot.policy.cooldownMs < 0 ||
         snapshot.policy.userAwayIdleSeconds < 0 ||
-        snapshot.policy.userAwayIdleSeconds > 86400) {
+        snapshot.policy.userAwayIdleSeconds > 86400 ||
+        snapshot.policy.haltAfterActionFailures < 0 ||
+        snapshot.policy.haltAfterActionFailures > 10000) {
         return common::Result<ConfigSnapshot>::Failure(
             common::Error::Validation(
                 "LoadConfig",
                 L"[policy] thresholds must satisfy "
                 L"0 <= tight < adequate < comfortable <= 100, cooldown_ms >= 0, "
-                L"user_away_idle_seconds in 0..86400 (0 = gate off)"));
+                L"user_away_idle_seconds in 0..86400 (0 = gate off), "
+                L"halt_after_action_failures in 0..10000 (0 = off)"));
     }
 
     // [ipc]：Safe Mode 门禁窗口参数（Agent 受理侧；缺省与 SafeModeGuard::Options 一致）。

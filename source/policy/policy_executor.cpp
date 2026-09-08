@@ -19,16 +19,42 @@ PolicyExecutor::~PolicyExecutor() noexcept {
 common::Result<ExecutorEffect> PolicyExecutor::ApplyDecision(
     const PolicyDecision& decision, const ExecutorTarget& target) {
     ExecutorEffect effect;
+    // IPC-017：R1 动作连续失败停摆（Safe Mode 类语义：只读咨询、不再触碰系统）。
+    // 停摆期间不再调用后端；返回成功但附 skipped 说明（决策展示不受影响）。
+    if (halted_) {
+        effect.skipped =
+            L"execution halted: " +
+            std::to_wstring(config_.consecutiveActionFailuresToHalt) +
+            L" consecutive R1 action failures (Safe Mode-like; advisory only)";
+        return common::Result<ExecutorEffect>::Success(std::move(effect));
+    }
     auto priorityResult = ReconcilePriority(decision, target, effect);
     if (!priorityResult) {
+        // 失败不伪装成功；连续计数达阈值即停摆（R1 动作不再空转重试）。
+        if (config_.consecutiveActionFailuresToHalt > 0) {
+            ++consecutiveActionFailures_;
+            if (consecutiveActionFailures_ >=
+                config_.consecutiveActionFailuresToHalt) {
+                halted_ = true;
+            }
+        }
         return common::Result<ExecutorEffect>::Failure(
             priorityResult.ErrorValue());
     }
     auto powerResult = ReconcilePower(target, effect);
     if (!powerResult) {
+        if (config_.consecutiveActionFailuresToHalt > 0) {
+            ++consecutiveActionFailures_;
+            if (consecutiveActionFailures_ >=
+                config_.consecutiveActionFailuresToHalt) {
+                halted_ = true;
+            }
+        }
         return common::Result<ExecutorEffect>::Failure(
             powerResult.ErrorValue());
     }
+    // 成功（含无需动作）：重置连续计数（“连续”语义——成功即断开失败序列）。
+    consecutiveActionFailures_ = 0;
     return common::Result<ExecutorEffect>::Success(std::move(effect));
 }
 
@@ -129,6 +155,15 @@ bool PolicyExecutor::IsPriorityHeld() const noexcept {
 
 bool PolicyExecutor::IsPowerHeld() const noexcept {
     return powerHeld_;
+}
+
+bool PolicyExecutor::IsHalted() const noexcept {
+    return halted_;
+}
+
+void PolicyExecutor::ResetHalt() noexcept {
+    halted_ = false;
+    consecutiveActionFailures_ = 0;
 }
 
 } // namespace optimizer::policy

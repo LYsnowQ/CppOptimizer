@@ -21,6 +21,11 @@ struct ExecutorConfig {
         config::PriorityLevel::AboveNormal;       // [priority].max_level
     bool powerExecutionRequired = false;          // [power].execution_required
     std::wstring powerReason = L"CppOptimizer policy: game running (R1)";
+    // R1 动作连续失败停摆（IPC-017，docs/23 §6“同一动作连续失败超过阈值”执行器侧）：
+    // >0 时 ApplyDecision 连续 N 次因 R1 动作失败（优先级/电源获取或释放出错）后执行器进入
+    // halted——不再调用任何后端（决策仍由 PolicyEvaluator 产出展示，纯咨询），直到 ResetHalt。
+    // 任何一次 ApplyDecision 成功（含无需动作）重置连续计数。0 = 关闭（缺省，零回归）。
+    std::size_t consecutiveActionFailuresToHalt = 0; // [policy].halt_after_action_failures
 };
 
 // 游戏目标身份（由 ProcessWatcher 观测提供）。
@@ -74,6 +79,13 @@ public:
     [[nodiscard]] bool IsPriorityHeld() const noexcept;
     [[nodiscard]] bool IsPowerHeld() const noexcept;
 
+    // 是否处于 R1 动作连续失败停摆（IPC-017）。停摆期间 ApplyDecision 不再调用后端，
+    // 返回 Success{skipped=说明}（决策保持纯咨询），直至 ResetHalt。
+    [[nodiscard]] bool IsHalted() const noexcept;
+
+    // 清除停摆并复位连续失败计数（下一次 ApplyDecision 按正常路径执行）。
+    void ResetHalt() noexcept;
+
 private:
     // 期望状态对账：优先级提升（决策要求 && 游戏运行 && 门禁开启）。
     [[nodiscard]] common::Result<void> ReconcilePriority(
@@ -89,6 +101,8 @@ private:
     bool powerHeld_ = false;
     std::string priorityGameId_; // 当前已提升的 gameId（空 = 未持有）
     std::uint32_t priorityPid_ = 0;
+    std::size_t consecutiveActionFailures_ = 0; // 连续 R1 动作失败计数（IPC-017）
+    bool halted_ = false;                       // R1 动作停摆中（IPC-017）
 };
 
 } // namespace optimizer::policy

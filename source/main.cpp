@@ -235,6 +235,13 @@ int RunConfigCommand(std::wstring_view path) {
     } else {
         std::wcout << L" user-away off";
     }
+    if (c.policy.haltAfterActionFailures > 0) {
+        std::wcout << L" halt ";
+        std::wcout << L"on (after " << c.policy.haltAfterActionFailures
+                   << L" action failures)";
+    } else {
+        std::wcout << L" halt off";
+    }
     std::wcout << L"\n";
     std::wcout << L"  games      : " << c.games.size() << L" rule(s)\n";
     return 0;
@@ -707,6 +714,8 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     executorConfig.priorityMaxLevel = priorityConfig.maxLevel;
     executorConfig.powerExecutionRequired =
         configLoaded && powerConfig.executionRequired;
+    executorConfig.consecutiveActionFailuresToHalt = static_cast<std::size_t>(
+        std::max(0, policyConfig.haltAfterActionFailures));
     optimizer::priority::PriorityBooster::Options boosterOptions;
     boosterOptions.maxLevel = executorConfig.priorityMaxLevel;
     auto powerLocker = std::make_shared<optimizer::power::PowerLocker>(
@@ -727,8 +736,13 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
                    << L", power "
                    << (executorConfig.powerExecutionRequired
                            ? L"on"
-                           : L"off (gated)")
-                   << L"\n";
+                           : L"off (gated)");
+        if (executorConfig.consecutiveActionFailuresToHalt > 0) {
+            std::wcout << L", halt after "
+                       << executorConfig.consecutiveActionFailuresToHalt
+                       << L" consecutive action failures";
+        }
+        std::wcout << L"\n";
     } else {
         std::wcout
             << L"Policy decision (read-only advisory, no system changes)\n";

@@ -65,7 +65,8 @@ struct ToggleConfig {
 
 // [policy] 节：策略分级阈值与防抖冷却期。数值语义见 optimizer::policy。
 // 合法约束：0 <= tight < adequate < comfortable <= 100，cooldown_ms >= 0；
-// user_away_idle_seconds 为 0..86400（0 = 关闭用户在场门禁，保守默认）。
+// user_away_idle_seconds 为 0..86400（0 = 关闭用户在场门禁，保守默认）；
+// halt_after_action_failures 为 0..10000（0 = 关闭 R1 动作连续失败停摆）。
 // 违反约束属语义错误，LoadConfig 直接拒绝（错误阈值会产生错误决策）。
 struct PolicyConfig {
     std::int32_t comfortableMarginPercent = 30;
@@ -75,6 +76,9 @@ struct PolicyConfig {
     // 用户在场门禁（ACT-004）：0 = 关闭（默认，零回归）；>0 秒无键鼠输入视用户不在场
     //（AFK；锁屏/断开因输入时钟冻结自然落入），抑制优化建议（NoOp user_away）。
     std::int32_t userAwayIdleSeconds = 0;
+    // R1 动作连续失败停摆（IPC-017）：0 = 关闭（默认，零回归）；>0 次连续 R1 动作失败
+    //（优先级/电源获取或释放出错）后执行器停摆，不再调用后端（决策保持纯咨询）。
+    std::int32_t haltAfterActionFailures = 0;
 };
 
 // [ipc] 节下 Safe Mode 门禁（Agent 受理侧的“身份/凭据失败异常”触发项）窗口参数。

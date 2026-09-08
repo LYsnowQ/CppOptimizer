@@ -290,6 +290,50 @@ bool TestLoadConfigPolicyRejectsOversizedUserAway() {
     return !result.HasValue();
 }
 
+bool TestLoadConfigPolicyHaltFailuresDefaultsAndParse() {
+    // IPC-017：halt_after_action_failures 默认 0（关闭）；显式值解析生效。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path, "version = 1\n")) {
+        return false;
+    }
+    auto defaults = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!defaults.HasValue() || defaults.Value().policy.haltAfterActionFailures != 0) {
+        return false;
+    }
+    const std::wstring path2 = MakeTempConfigPath();
+    if (!WriteTempConfig(path2,
+                         "[policy]\nhalt_after_action_failures = 5\n")) {
+        return false;
+    }
+    auto parsed = optimizer::config::LoadConfig(path2);
+    std::filesystem::remove(std::filesystem::path(path2));
+    return parsed.HasValue() &&
+           parsed.Value().policy.haltAfterActionFailures == 5;
+}
+
+bool TestLoadConfigPolicyRejectsInvalidHaltFailures() {
+    // 负值 / 超 10000 属语义错误，直接拒绝。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[policy]\nhalt_after_action_failures = -1\n")) {
+        return false;
+    }
+    auto negative = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (negative.HasValue()) {
+        return false;
+    }
+    const std::wstring path2 = MakeTempConfigPath();
+    if (!WriteTempConfig(path2,
+                         "[policy]\nhalt_after_action_failures = 10001\n")) {
+        return false;
+    }
+    auto oversized = optimizer::config::LoadConfig(path2);
+    std::filesystem::remove(std::filesystem::path(path2));
+    return !oversized.HasValue();
+}
+
 bool TestLoadConfigPolicyZeroCooldown() {
     // 冷却期 0 合法（不做防抖）。
     const std::wstring path = MakeTempConfigPath();
@@ -693,6 +737,10 @@ int wmain() {
         &TestLoadConfigPolicyRejectsNegativeUserAway);
     run(L"Load config rejects oversized user away seconds",
         &TestLoadConfigPolicyRejectsOversizedUserAway);
+    run(L"Load config halt failures defaults and parse",
+        &TestLoadConfigPolicyHaltFailuresDefaultsAndParse);
+    run(L"Load config rejects invalid halt failures",
+        &TestLoadConfigPolicyRejectsInvalidHaltFailures);
     run(L"Load config ipc safe mode defaults", &TestLoadConfigIpcSafeModeDefaults);
     run(L"Load config ipc safe mode section", &TestLoadConfigIpcSafeModeSection);
     run(L"Load config ipc safe mode disabled", &TestLoadConfigIpcSafeModeDisabled);

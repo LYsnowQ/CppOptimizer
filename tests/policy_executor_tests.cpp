@@ -519,6 +519,145 @@ bool TestPowerAcquireFailureNotDisguised() {
     return !executor.IsPowerHeld() && h.power->open.empty();
 }
 
+// ---------- IPC-017：R1 动作连续失败停摆（同一动作连续失败超阈值，docs/23 §6） ----------
+
+bool TestConsecutiveFailuresHaltDisabledByDefault() {
+    // 阈值默认 0 = 关闭：连续失败不触发停摆（零回归），每次仍如实报错并重试。
+    Harness h;
+    h.priority->creationByPid[100] = 111;
+    PolicyExecutor executor = h.Make(); // threshold 0
+    for (int i = 0; i < 6; ++i) {
+        h.priority->failNextOpen = true;
+        if (executor.ApplyDecision(
+                MakeDecision(PolicyAction::SuggestPriorityBoost, "prio_boost"),
+                MakeTarget(true, 100, 111))
+                .HasValue()) {
+            return false;
+        }
+    }
+    return !executor.IsHalted();
+}
+
+bool TestConsecutiveFailuresHaltAtThreshold() {
+    // 阈值 3：连续 3 次 R1 动作失败后停摆；停摆后不再调用后端，返回 success+skipped。
+    Harness h;
+    h.priority->creationByPid[100] = 111;
+    h.config.consecutiveActionFailuresToHalt = 3;
+    PolicyExecutor executor = h.Make();
+    for (int i = 0; i < 3; ++i) {
+        h.priority->failNextOpen = true;
+        if (executor.ApplyDecision(
+                MakeDecision(PolicyAction::SuggestPriorityBoost, "prio_boost"),
+                MakeTarget(true, 100, 111))
+                .HasValue()) {
+            return false;
+        }
+    }
+    if (!executor.IsHalted()) {
+        return false;
+    }
+    const std::size_t opensBefore = [&h]() {
+        std::size_t opens = 0;
+        for (const auto& op : h.priority->ops) {
+            if (op == "open") {
+                ++opens;
+            }
+        }
+        return opens;
+    }();
+    // 停摆后第 4 次调用（后端已不注入失败）：不再触碰后端，返回 success + skipped。
+    const auto after = executor.ApplyDecision(
+        MakeDecision(PolicyAction::SuggestPriorityBoost, "prio_boost"),
+        MakeTarget(true, 100, 111));
+    if (!after || after.Value().skipped.find(L"halted") ==
+                      std::wstring::npos) {
+        return false;
+    }
+    std::size_t opensAfter = 0;
+    for (const auto& op : h.priority->ops) {
+        if (op == "open") {
+            ++opensAfter;
+        }
+    }
+    return opensAfter == opensBefore && !executor.IsPriorityHeld();
+}
+
+bool TestConsecutiveFailuresSuccessResetsCounter() {
+    // 成功（含无需动作）断开失败序列：2 次失败 -> 1 次成功 -> 再 2 次失败仍未达阈值 3。
+    Harness h;
+    h.priority->creationByPid[100] = 111;
+    h.config.consecutiveActionFailuresToHalt = 3;
+    PolicyExecutor executor = h.Make();
+    for (int i = 0; i < 2; ++i) {
+        h.priority->failNextOpen = true;
+        if (executor.ApplyDecision(
+                MakeDecision(PolicyAction::SuggestPriorityBoost, "prio_boost"),
+                MakeTarget(true, 100, 111))
+                .HasValue()) {
+            return false;
+        }
+    }
+    // 成功（无需动作也算成功）：复位连续计数。
+    const auto ok = executor.ApplyDecision(
+        MakeDecision(PolicyAction::NoOp, "mem_ok"), MakeTarget(false));
+    if (!ok || executor.IsHalted()) {
+        return false;
+    }
+    for (int i = 0; i < 2; ++i) {
+        h.priority->failNextOpen = true;
+        if (executor.ApplyDecision(
+                MakeDecision(PolicyAction::SuggestPriorityBoost, "prio_boost"),
+                MakeTarget(true, 100, 111))
+                .HasValue()) {
+            return false;
+        }
+    }
+    // 复位后仅累计 2 次：仍 Normal（未达阈值 3）。
+    return !executor.IsHalted();
+}
+
+bool TestConsecutiveFailuresThresholdOne() {
+    // 阈值 1：单次 R1 动作失败即停摆。
+    Harness h;
+    h.priority->creationByPid[100] = 111;
+    h.config.consecutiveActionFailuresToHalt = 1;
+    PolicyExecutor executor = h.Make();
+    h.priority->failNextOpen = true;
+    if (executor.ApplyDecision(
+            MakeDecision(PolicyAction::SuggestPriorityBoost, "prio_boost"),
+            MakeTarget(true, 100, 111))
+            .HasValue()) {
+        return false;
+    }
+    return executor.IsHalted();
+}
+
+bool TestResetHaltClearsHaltedExecutor() {
+    // ResetHalt 清除停摆与计数：下一次 ApplyDecision 恢复正常执行。
+    Harness h;
+    h.priority->creationByPid[100] = 111;
+    h.config.consecutiveActionFailuresToHalt = 2;
+    PolicyExecutor executor = h.Make();
+    for (int i = 0; i < 2; ++i) {
+        h.priority->failNextOpen = true;
+        if (executor.ApplyDecision(
+                MakeDecision(PolicyAction::SuggestPriorityBoost, "prio_boost"),
+                MakeTarget(true, 100, 111))
+                .HasValue()) {
+            return false;
+        }
+    }
+    if (!executor.IsHalted()) {
+        return false;
+    }
+    executor.ResetHalt();
+    const auto result = executor.ApplyDecision(
+        MakeDecision(PolicyAction::SuggestPriorityBoost, "prio_boost"),
+        MakeTarget(true, 100, 111));
+    return !executor.IsHalted() && result &&
+           result.Value().priorityBoosted && executor.IsPriorityHeld();
+}
+
 // ---------- RAII ----------
 
 bool TestReleaseAllReleasesBoth() {
@@ -585,6 +724,14 @@ int wmain() {
         &TestReleaseFailureReportedAndRetryable);
     run(L"power acquire failure not disguised",
         &TestPowerAcquireFailureNotDisguised);
+    run(L"consecutive failures halt disabled by default",
+        &TestConsecutiveFailuresHaltDisabledByDefault);
+    run(L"consecutive failures halt at threshold",
+        &TestConsecutiveFailuresHaltAtThreshold);
+    run(L"consecutive failures success resets counter",
+        &TestConsecutiveFailuresSuccessResetsCounter);
+    run(L"consecutive failures threshold one", &TestConsecutiveFailuresThresholdOne);
+    run(L"reset halt clears halted executor", &TestResetHaltClearsHaltedExecutor);
     run(L"release all releases both", &TestReleaseAllReleasesBoth);
     run(L"no game no action", &TestNoGameNoAction);
     return failed == 0 ? 0 : 1;
