@@ -1464,9 +1464,11 @@ struct ServiceHostDemoState {
     bool ipcAuthRejected = false;                 // 最近一次 ServeOne 是否以身份/凭据拒绝结束
     std::size_t ipcSafeModeEntries = 0;           // 窗口内进入 Safe Mode 次数（汇总）
     std::size_t ipcRejectedClients = 0;           // 窗口内身份/凭据拒绝客户端数（汇总）
-    // IPC-015：离散异常触发（Native capability 探测异常）——启动只读探测，异常锁存 Safe Mode。
+    // IPC-015/016：离散异常触发（Native capability 探测异常、不支持 OS/build）——启动只读检查，
+    // 异常锁存 Safe Mode。
     bool ipcNativeProbeOk = false;                // 启动探测通过（R0 baseline）
-    bool ipcNativeProbeAnomaly = false;           // 启动探测异常（已触发锁存）
+    bool ipcNativeProbeAnomaly = false;           // Native 探测异常（已触发锁存）
+    bool ipcOsSupportAnomaly = false;             // 操作系统不支持（已触发锁存）
     std::size_t ipcAnomalyEntries = 0;            // 窗口内离散异常触发次数（汇总）
 };
 
@@ -1722,10 +1724,11 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         state.ipcSession = std::make_shared<optimizer::ipc::IpcSession>(
             optimizer::ipc::CreateWin32ServerBackend(state.ipcPipeName),
             ipcOptions);
-        // IPC-015：Native capability 探测异常（docs/23 §6 触发项）。受理 Agent 前做一次只读
-        // R0 baseline 探测：探测失败或核心只读能力缺失（ntdll 加载失败 / NtQuerySystemInformation
-        // 或状态码转换不可用）视为持续状态异常——离散异常锁存 Safe Mode，整个窗口暂停受理新
-        // Agent（R0 负载/日志照常）；探测正常则 banner 标注 ok。
+        // IPC-015/016：启动环境离散异常（docs/23 §6 触发项：Native capability 探测异常、
+        // 不支持的 OS/build）。受理 Agent 前做一次只读启动基线检查：Native 探测失败或核心只读
+        // 能力缺失（ntdll 加载失败 / NtQuerySystemInformation / 状态码转换不可用），或操作系统
+        // 不受支持（非 Win10/11 x64，RtlGetVersion + GetNativeSystemInfo 只读判定）——任一
+        // 异常即离散异常锁存 Safe Mode，整个窗口暂停受理新 Agent（R0 负载/日志照常）。
         const auto nativeProbe =
             optimizer::platform::NativeApi::Instance().Probe();
         bool nativeAnomaly = false;
@@ -1738,14 +1741,37 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                 !capabilities.querySystemInformation ||
                 !capabilities.ntStatusConversion;
         }
-        if (nativeAnomaly) {
-            state.ipcNativeProbeAnomaly = true;
+        bool osSupportAnomaly = false;
+        if (auto osVersion =
+                optimizer::platform::QueryOsVersion(); osVersion) {
+            osSupportAnomaly =
+                optimizer::platform::ClassifyOsSupport(
+                    osVersion.Value(),
+                    optimizer::platform::IsNativeX64()) !=
+                optimizer::platform::OsSupport::Supported;
+        } else {
+            osSupportAnomaly = true; // 版本查询失败：保守视为异常（不伪装支持）
+        }
+        const bool startupAnomaly = nativeAnomaly || osSupportAnomaly;
+        if (startupAnomaly) {
             state.ipcSafeMode->OnAnomalyDetected();
             ++state.ipcAnomalyEntries;
-            state.logger.Write(
-                optimizer::logger::LogLevel::Info, L"service",
-                L"ipc  : Safe Mode entered - Native capability 探测异常"
-                L"（R0 baseline 缺失），暂停受理新 Agent");
+            if (nativeAnomaly) {
+                state.ipcNativeProbeAnomaly = true;
+                state.logger.Write(
+                    optimizer::logger::LogLevel::Info, L"service",
+                    L"ipc  : Safe Mode entered - Native capability 探测异常"
+                    L"（R0 baseline 缺失）");
+            }
+            if (osSupportAnomaly) {
+                state.ipcOsSupportAnomaly = true;
+                state.logger.Write(
+                    optimizer::logger::LogLevel::Info, L"service",
+                    L"ipc  : Safe Mode entered - 操作系统不受支持"
+                    L"（需 Windows 10/11 x64）");
+            }
+            state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
+                               L"ipc  : 暂停受理新 Agent（启动环境异常锁存）");
         } else {
             state.ipcNativeProbeOk = true;
         }
@@ -1799,6 +1825,11 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                     ? L"  native   : probe anomaly -> Safe Mode (agent intake "
                       L"paused for window)"
                     : L"  native   : probe ok (R0 read-only baseline)");
+            optimizer::common::WriteConsoleLine(
+                state.ipcOsSupportAnomaly
+                    ? L"  os       : unsupported (need Windows 10/11 x64) -> Safe "
+                      L"Mode (agent intake paused for window)"
+                    : L"  os       : windows 10/11 x64 supported");
         }
     }
     optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
@@ -1844,9 +1875,11 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             safeLine << L"  safe mode: entered " << state.ipcSafeModeEntries
                      << L" time(s), rejected clients "
                      << state.ipcRejectedClients;
-            if (state.ipcAnomalyEntries > 0) {
-                safeLine << L", native probe anomaly "
-                         << state.ipcAnomalyEntries;
+            if (state.ipcNativeProbeAnomaly) {
+                safeLine << L", native probe anomaly";
+            }
+            if (state.ipcOsSupportAnomaly) {
+                safeLine << L", unsupported os/build";
             }
             optimizer::common::WriteConsoleLine(safeLine.str());
         }

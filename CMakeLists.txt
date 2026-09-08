@@ -105,6 +105,24 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
     endif()
     add_test(NAME CommonTests COMMAND CppOptimizerCommonTests)
 
+    add_executable(CppOptimizerPlatformTests
+        tests/platform_tests.cpp
+        source/common/error.cpp
+        source/platform/native_api.cpp
+    )
+    target_include_directories(CppOptimizerPlatformTests PRIVATE include)
+    target_compile_features(CppOptimizerPlatformTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerPlatformTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerPlatformTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerPlatformTests PRIVATE -municode)
+    endif()
+    add_test(NAME PlatformTests COMMAND CppOptimizerPlatformTests)
+
     add_executable(CppOptimizerMemoryTests
         tests/memory_tests.cpp
         source/common/error.cpp
