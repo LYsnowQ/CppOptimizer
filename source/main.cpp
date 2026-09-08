@@ -2084,7 +2084,9 @@ std::wstring FindIpcSuffix(int argc, wchar_t* argv[], int start) noexcept {
                                   arg == L"--frames" ||
                                   arg == L"--instances" ||
                                   arg == L"--interval-ms" ||
-                                  arg == L"--max-interval-ms";
+                                  arg == L"--max-interval-ms" ||
+                                  arg == L"--away-after-seconds" ||
+                                  arg == L"--away-cap-ms";
         if (!skipNextValue && isOptionFlag) {
             skipNextValue = true;
             continue;
@@ -2112,7 +2114,9 @@ bool HasIpcSessionFlag(int argc, wchar_t* argv[], int start) noexcept {
                                      arg == L"--frames" ||
                                      arg == L"--instances" ||
                                      arg == L"--interval-ms" ||
-                                     arg == L"--max-interval-ms";
+                                     arg == L"--max-interval-ms" ||
+                                     arg == L"--away-after-seconds" ||
+                                     arg == L"--away-cap-ms";
         if (!skipNextValue && optionWithValue) {
             skipNextValue = true;
             continue;
@@ -2269,6 +2273,35 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
         intervalCapMs != 0
             ? intervalCapMs
             : (intervalMs * 3 > 5000u ? intervalMs * 3 : 5000u);
+    // ACT-007 在场感知节奏（可选）：--away-after-seconds <1..86400> 用户空闲达该秒数即放大
+    // 上报间隔至 --away-cap-ms（缺省 = effectiveCapMs，与失败退避同封顶）；未配置 = 关闭。
+    std::int64_t awayAfterSeconds = 0;
+    std::int64_t awayStepSeconds = 1;
+    std::uint32_t awayCapMs = 0;
+    for (int i = 4; i + 1 < argc; ++i) {
+        if (std::wstring_view(argv[i]) == L"--away-after-seconds") {
+            std::uint32_t value = 0;
+            if (!ParseUint32(argv[i + 1], value) || value == 0 ||
+                value > 86400) {
+                std::wcerr
+                    << L"  --away-after-seconds must be in 1..86400\n";
+                return 2;
+            }
+            awayAfterSeconds = value;
+        } else if (std::wstring_view(argv[i]) == L"--away-cap-ms") {
+            std::uint32_t value = 0;
+            if (!ParseUint32(argv[i + 1], value) || value < intervalMs ||
+                value > 60000) {
+                std::wcerr << L"  --away-cap-ms must be in [" << intervalMs
+                           << L"..60000]\n";
+                return 2;
+            }
+            awayCapMs = value;
+        }
+    }
+    if (awayAfterSeconds > 0 && awayCapMs == 0) {
+        awayCapMs = effectiveCapMs; // 缺省封顶 = 失败退避同款
+    }
     std::wstring token;
     bool hasToken = false;
     if (FindIpcToken(argc, argv, 4, token)) {
@@ -2362,6 +2395,28 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     reportOptions.ioTimeout = std::chrono::milliseconds(3000);
     reportOptions.maxConnectAttempts = 3;
     reportOptions.reconnectBackoff = std::chrono::milliseconds(300);
+    // ACT-007 在场退避选项（0 = 关闭缺省，零回归）。
+    reportOptions.userAwayAfterSeconds = awayAfterSeconds;
+    reportOptions.userAwayStepSeconds = awayStepSeconds;
+    reportOptions.userAwayCap = std::chrono::milliseconds(awayCapMs);
+    // idle 采样回调：复用 activity 只读后端（查询失败按在场——测量缺失不节流）。
+    std::function<optimizer::common::Result<std::int64_t>()> idleProvider;
+    if (awayAfterSeconds > 0) {
+        idleProvider =
+            [backend = lastInputBackend]()
+            -> optimizer::common::Result<std::int64_t> {
+                auto query = backend->Query();
+                if (!query) {
+                    return optimizer::common::Result<std::int64_t>::Failure(
+                        query.ErrorValue());
+                }
+                const auto& sample = query.Value();
+                return optimizer::common::Result<std::int64_t>::Success(
+                    optimizer::activity::IdleMilliseconds(
+                        sample.nowTick, sample.lastInputTick) /
+                    1000);
+            };
+    }
 
     std::wcout << L"Agent (periodic reporter, foreground bounded, " << seconds
                << L" s)\n";
@@ -2369,6 +2424,11 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     std::wcout << L"  report   : every " << intervalMs
                << L" ms (grow to " << effectiveCapMs
                << L" ms after repeated failures), up to 3 connect attempts per report\n";
+    if (awayAfterSeconds > 0) {
+        std::wcout << L"  away     : user idle >= " << awayAfterSeconds
+                   << L" s -> grow to " << awayCapMs
+                   << L" ms (presence-aware pacing, ACT-007; resume on input)\n";
+    }
     std::wcout
         << L"  facts    : memory (total/available/load) + user_idle_seconds "
            L"(ACT-005, GetLastInputInfo read-only; omitted on query failure)\n";
@@ -2378,7 +2438,8 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
 
     auto backend = optimizer::ipc::CreateWin32ClientBackend();
     auto result = optimizer::ipc::RunPeriodicReporter(backend, reportOptions,
-                                                      buildRequest);
+                                                      buildRequest,
+                                                      idleProvider);
     if (!result) {
         const auto& error = result.ErrorValue();
         std::wcerr << L"  agent run failed ["
@@ -2899,14 +2960,18 @@ void PrintUsage() {
         << L"  CppOptimizer.exe CppOptimizerService  Service entry (started by SCM;\n"
         << L"                             equivalent to --service service)\n"
         << L"  CppOptimizer.exe --agent run <s> [suffix] [--interval-ms <50..10000>]\n"
-        << L"                             [--max-interval-ms <n>] [--ipc-token <t>]\n"
+        << L"                             [--max-interval-ms <n>] [--away-after-seconds <n>]\n"
+        << L"                             [--away-cap-ms <n>] [--ipc-token <t>]\n"
         << L"                             [--ipc-token-file [<path>]]  Agent reporter\n"
         << L"                             (foreground, bounded): every interval ms collect\n"
         << L"                             real memory facts and report over the protected\n"
         << L"                             pipe for 1..60 s; bounded connect retries/backoff\n"
         << L"                             per report; repeated failures grow the gap up to\n"
         << L"                             max-interval-ms (default max(3x, 5 s)); optional\n"
-        << L"                             session token; window-summary output\n"
+        << L"                             session token; window-summary output.\n"
+        << L"                             --away-after-seconds (ACT-007): when user idle\n"
+        << L"                             reaches N s grow the gap up to --away-cap-ms\n"
+        << L"                             (default max(3x,5s)); resume on input\n"
         << L"  CppOptimizer.exe --ipc-pipe server <s> [suffix] [--session]\n"
         << L"                             [--instances <1..8>] [--ipc-token <t>]\n"
         << L"                             Protected pipe server for 1..60 s: serve one\n"

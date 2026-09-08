@@ -46,6 +46,8 @@ using optimizer::ipc::IpcClientVerdict;
 using optimizer::ipc::IpcFrameRequest;
 using optimizer::ipc::IpcPeriodicReportOptions;
 using optimizer::ipc::IpcReportGapAfterFailures;
+using optimizer::ipc::IpcReportGapAfterUserIdle;
+using optimizer::ipc::IpcReportNextGap;
 using optimizer::ipc::RunPeriodicReporter;
 using optimizer::ipc::RunConcurrentServer;
 using optimizer::ipc::kIpcHeaderSize;
@@ -2295,6 +2297,101 @@ bool TestReportGapPureDefensiveCapZero() {
     return g == milliseconds(1000);
 }
 
+// ---------- 在场感知节奏（ACT-007，IpcReportGapAfterUserIdle / IpcReportNextGap） ----------
+
+bool TestUserIdleGapPureBasics() {
+    using namespace std::chrono;
+    // 在场（idle < 阈值）或未配置（cap/after<=0）= 基础间隔。
+    if (IpcReportGapAfterUserIdle(0, milliseconds(1000), 5, 1,
+                                  milliseconds(5000)) !=
+        milliseconds(1000)) {
+        return false;
+    }
+    if (IpcReportGapAfterUserIdle(4, milliseconds(1000), 5, 1,
+                                  milliseconds(5000)) !=
+        milliseconds(1000)) {
+        return false;
+    }
+    if (IpcReportGapAfterUserIdle(10, milliseconds(1000), 0, 1,
+                                  milliseconds(5000)) !=
+        milliseconds(1000)) {
+        return false; // awayAfterSeconds=0：关闭
+    }
+    if (IpcReportGapAfterUserIdle(10, milliseconds(1000), 5, 1,
+                                  milliseconds(0)) !=
+        milliseconds(1000)) {
+        return false; // awayCap=0：关闭
+    }
+    // 恰好达阈值（== 即离场）：首个周期放大一次（2x）。
+    return IpcReportGapAfterUserIdle(5, milliseconds(1000), 5, 1,
+                                     milliseconds(5000)) ==
+           milliseconds(2000);
+}
+
+bool TestUserIdleGapPureGrowthAndCap() {
+    using namespace std::chrono;
+    // idle 超过阈值越久放大越多并封顶；步进可调。
+    if (IpcReportGapAfterUserIdle(6, milliseconds(1000), 5, 1,
+                                  milliseconds(5000)) !=
+        milliseconds(4000)) {
+        return false; // steps=2 -> 2x2x
+    }
+    if (IpcReportGapAfterUserIdle(60, milliseconds(1000), 5, 1,
+                                  milliseconds(5000)) !=
+        milliseconds(5000)) {
+        return false; // 封顶
+    }
+    // 步进=3：idle 8 -> elapsed 3 -> steps=1+1=2；idle 7 -> elapsed2 -> steps=1。
+    if (IpcReportGapAfterUserIdle(7, milliseconds(1000), 5, 3,
+                                  milliseconds(10000)) !=
+        milliseconds(2000)) {
+        return false;
+    }
+    if (IpcReportGapAfterUserIdle(8, milliseconds(1000), 5, 3,
+                                  milliseconds(10000)) !=
+        milliseconds(4000)) {
+        return false;
+    }
+    // base 超 cap 恒 cap；步进防御（<=0 按 1）。
+    if (IpcReportGapAfterUserIdle(100, milliseconds(1000), 5, 0,
+                                  milliseconds(300)) !=
+        milliseconds(300)) {
+        return false;
+    }
+    return IpcReportGapAfterUserIdle(5, milliseconds(5000), 5, 1,
+                                     milliseconds(300)) ==
+           milliseconds(300);
+}
+
+bool TestUserIdleNextGapCombinesWithFailures() {
+    using namespace std::chrono;
+    // 无失败 + 在场（idle 缺失/nullopt 也按在场）：base。
+    if (IpcReportNextGap(0, milliseconds(1000), milliseconds(0), std::nullopt,
+                         0, 1, milliseconds(0)) !=
+        milliseconds(1000)) {
+        return false;
+    }
+    // 离场放大生效：无失败 + idle 10（阈值 5）-> 4x（cap 5000 内）。
+    const auto awayOnly = IpcReportNextGap(
+        0, milliseconds(1000), milliseconds(0), std::int64_t(6), 5, 1,
+        milliseconds(5000));
+    if (awayOnly != milliseconds(4000)) {
+        return false;
+    }
+    // 失败退避更大时取失败侧（两者取大）。
+    const auto failBigger = IpcReportNextGap(
+        2, milliseconds(1000), milliseconds(8000), std::int64_t(6), 5, 1,
+        milliseconds(3000));
+    if (failBigger != milliseconds(4000)) {
+        return false; // 失败 4s > 离场 3s(封顶)
+    }
+    // 离场更大时取离场侧。
+    const auto awayBigger = IpcReportNextGap(
+        1, milliseconds(1000), milliseconds(3000), std::int64_t(60), 5, 1,
+        milliseconds(8000));
+    return awayBigger == milliseconds(8000);
+}
+
 } // namespace
 
 int wmain() {
@@ -2462,5 +2559,9 @@ int wmain() {
     run(L"report gap pure basics", &TestReportGapPureBasics);
     run(L"report gap pure overflow safe", &TestReportGapPureOverflowSafe);
     run(L"report gap pure defensive cap zero", &TestReportGapPureDefensiveCapZero);
+    run(L"user idle gap pure basics", &TestUserIdleGapPureBasics);
+    run(L"user idle gap pure growth and cap", &TestUserIdleGapPureGrowthAndCap);
+    run(L"user idle next gap combines with failures",
+        &TestUserIdleNextGapCombinesWithFailures);
     return failed == 0 ? 0 : 1;
 }

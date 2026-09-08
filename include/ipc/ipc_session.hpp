@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -248,6 +249,10 @@ struct IpcConcurrentSummary {
 // 自适应节奏（IPC-012）：intervalCap>0 时连续失败会使“下一周期间隔”按
 // IpcReportGapAfterFailures 指数放大至 intervalCap（Safe Mode 暂停等长离线下不空转高频
 // 空试），上报成功即回到 interval；intervalCap==0 表示关闭放大（恒用 interval，缺省）。
+// 在场感知节奏（ACT-007）：userAwayCap>0 且 userAwayAfterSeconds>0 时，idleProvider 采样
+// 的空闲（距最近键鼠输入秒数）达到离场阈值即按 IpcReportGapAfterUserIdle 放大“下一周期
+// 间隔”至 userAwayCap（用户离场/锁屏时不高频上报）；空闲回落即回基础间隔。与失败退避正交，
+// 取两者较大者（IpcReportNextGap）。
 struct IpcPeriodicReportOptions {
     std::wstring pipePath;      // 受保护管道名
     std::chrono::milliseconds window = std::chrono::milliseconds(0);
@@ -256,6 +261,10 @@ struct IpcPeriodicReportOptions {
     std::chrono::milliseconds ioTimeout = std::chrono::milliseconds(3000);
     std::size_t maxConnectAttempts = 3;  // 单次上报的连接/传输尝试上限
     std::chrono::milliseconds reconnectBackoff = std::chrono::milliseconds(300);
+    // ACT-007 在场退避：空闲达到 userAwayAfterSeconds 秒视为离场，间隔放大至 userAwayCap。
+    std::int64_t userAwayAfterSeconds = 0;    // 0 = 关闭在场退避（缺省，零回归）
+    std::int64_t userAwayStepSeconds = 1;     // 离场放大步进（秒/级；<=0 按 1 防御）
+    std::chrono::milliseconds userAwayCap = std::chrono::milliseconds(0); // 0 = 关闭
 };
 
 // 连续 N 次失败后的下一上报间隔（自适应节奏，IPC-012）：N==0 返回 base；N>=1 返回
@@ -264,6 +273,28 @@ struct IpcPeriodicReportOptions {
 [[nodiscard]] std::chrono::milliseconds IpcReportGapAfterFailures(
     std::size_t consecutiveFailures, std::chrono::milliseconds base,
     std::chrono::milliseconds cap) noexcept;
+
+// 用户离场后的下一上报间隔（在场感知节奏，ACT-007）：
+//   idleSeconds < awayAfterSeconds            -> base（在场，正常节奏）
+//   idleSeconds >= awayAfterSeconds           -> min(awayCap, base * 2^steps)，
+//       steps = 1 + (idleSeconds - awayAfterSeconds) / awayStepSeconds
+//   awayCap <= 0 或 awayAfterSeconds <= 0     -> base（关闭，零回归）
+//   awayStepSeconds <= 0 按 1 处理（防御）；乘法溢出安全；base >= awayCap 恒 awayCap。
+// 锁屏/断开时输入时钟冻结、idle 单调增长 -> 持续放大至封顶（与 ACT-002/004 语义一致）。
+[[nodiscard]] std::chrono::milliseconds IpcReportGapAfterUserIdle(
+    std::int64_t idleSeconds, std::chrono::milliseconds base,
+    std::int64_t awayAfterSeconds, std::int64_t awayStepSeconds,
+    std::chrono::milliseconds awayCap) noexcept;
+
+// 组合“下一上报间隔”：取失败退避（IPC-012）与在场退避（ACT-007）的较大者。
+// failureCap <= 0（未配置失败退避）时失败侧恒 base；idleSeconds == nullopt（在场未知/查询
+// 失败）按在场处理（测量缺失不节流）；awayCap <= 0 或 awayAfterSeconds <= 0 时在场侧恒 base。
+// 纯函数，可确定性测试。
+[[nodiscard]] std::chrono::milliseconds IpcReportNextGap(
+    std::size_t consecutiveFailures, std::chrono::milliseconds base,
+    std::chrono::milliseconds failureCap,
+    std::optional<std::int64_t> idleSeconds, std::int64_t awayAfterSeconds,
+    std::int64_t awayStepSeconds, std::chrono::milliseconds awayCap) noexcept;
 
 
 struct IpcPeriodicReportSummary {
@@ -275,6 +306,7 @@ struct IpcPeriodicReportSummary {
 [[nodiscard]] common::Result<IpcPeriodicReportSummary> RunPeriodicReporter(
     std::shared_ptr<IpcClientBackend> backend,
     const IpcPeriodicReportOptions& options,
-    const std::function<common::Result<IpcFrameRequest>()>& requestFactory);
+    const std::function<common::Result<IpcFrameRequest>()>& requestFactory,
+    const std::function<common::Result<std::int64_t>()>& idleProvider = {});
 
 } // namespace optimizer::ipc

@@ -740,10 +740,63 @@ std::chrono::milliseconds IpcReportGapAfterFailures(
     return std::chrono::milliseconds(gap);
 }
 
+std::chrono::milliseconds IpcReportGapAfterUserIdle(
+    std::int64_t idleSeconds, std::chrono::milliseconds base,
+    std::int64_t awayAfterSeconds, std::int64_t awayStepSeconds,
+    std::chrono::milliseconds awayCap) noexcept {
+    if (awayCap.count() <= 0 || awayAfterSeconds <= 0 ||
+        idleSeconds < awayAfterSeconds) {
+        return base; // 关闭或在场：基础节奏
+    }
+    if (awayStepSeconds <= 0) {
+        awayStepSeconds = 1; // 防御
+    }
+    auto gap = base.count();
+    if (gap > awayCap.count()) {
+        return awayCap;
+    }
+    // steps = 1 + (idle - awayAfter)/awayStep（进入离场的首个周期即放大一次）。
+    const std::int64_t steps =
+        1 + (idleSeconds - awayAfterSeconds) / awayStepSeconds;
+    for (std::int64_t i = 0; i < steps && gap < awayCap.count(); ++i) {
+        if (gap > awayCap.count() / 2) {
+            gap = awayCap.count(); // 防乘法溢出：下次翻倍必超上限直接封顶
+            break;
+        }
+        gap *= 2;
+        if (gap > awayCap.count()) {
+            gap = awayCap.count();
+        }
+    }
+    return std::chrono::milliseconds(gap);
+}
+
+std::chrono::milliseconds IpcReportNextGap(
+    std::size_t consecutiveFailures, std::chrono::milliseconds base,
+    std::chrono::milliseconds failureCap,
+    std::optional<std::int64_t> idleSeconds, std::int64_t awayAfterSeconds,
+    std::int64_t awayStepSeconds, std::chrono::milliseconds awayCap) noexcept {
+    const bool failureGapEnabled =
+        failureCap.count() > 0 && failureCap > base && consecutiveFailures > 0;
+    const auto failureGap =
+        failureGapEnabled
+            ? IpcReportGapAfterFailures(consecutiveFailures, base, failureCap)
+            : base;
+    std::chrono::milliseconds awayGap = base;
+    if (awayCap.count() > 0 && awayAfterSeconds > 0 &&
+        idleSeconds.has_value()) {
+        awayGap = IpcReportGapAfterUserIdle(*idleSeconds, base,
+                                            awayAfterSeconds,
+                                            awayStepSeconds, awayCap);
+    }
+    return failureGap > awayGap ? failureGap : awayGap;
+}
+
 common::Result<IpcPeriodicReportSummary> RunPeriodicReporter(
     std::shared_ptr<IpcClientBackend> backend,
     const IpcPeriodicReportOptions& options,
-    const std::function<common::Result<IpcFrameRequest>()>& requestFactory) {
+    const std::function<common::Result<IpcFrameRequest>()>& requestFactory,
+    const std::function<common::Result<std::int64_t>()>& idleProvider) {
     if (options.window.count() <= 0 || options.interval.count() <= 0 ||
         options.ioTimeout.count() <= 0 || options.maxConnectAttempts == 0) {
         return common::Result<IpcPeriodicReportSummary>::Failure(
@@ -761,8 +814,10 @@ common::Result<IpcPeriodicReportSummary> RunPeriodicReporter(
     const auto deadline = std::chrono::steady_clock::now() + options.window;
     auto nextSlot = std::chrono::steady_clock::now();
     std::size_t consecutiveFailures = 0; // 连续失败数（自适应节奏输入）
-    const bool adaptivePacing =
-        options.intervalCap.count() > 0 && options.intervalCap > options.interval;
+    // ACT-007 在场退避：仅当配置离场阈值/封顶且提供了 idle 采样回调时启用。
+    const bool awayPacing =
+        options.userAwayCap.count() > 0 &&
+        options.userAwayAfterSeconds > 0 && static_cast<bool>(idleProvider);
     for (;;) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
@@ -805,15 +860,23 @@ common::Result<IpcPeriodicReportSummary> RunPeriodicReporter(
         if (!delivered) {
             ++summary.connectFailures; // 可恢复失败：继续下一周期
         }
-        // 自适应节奏（IPC-012）：成功后回基础间隔；连续失败指数放大至 intervalCap
-        //（Safe Mode 暂停等长离线下不空转高频空试），上报成功即复位计数。
+        // 节奏推进（IPC-012 ∩ ACT-007）：成功后回基础间隔；连续失败指数放大至
+        // intervalCap；用户离场时在场退避放大至 userAwayCap——两者取较大者；
+        // 上报成功复位失败计数；idle 回落即回基础节奏。
         consecutiveFailures = delivered ? 0 : consecutiveFailures + 1;
+        std::optional<std::int64_t> idleSeconds;
+        if (awayPacing) {
+            if (auto idle = idleProvider()) {
+                idleSeconds = idle.Value();
+            }
+            // 采样失败/未知按在场处理（测量缺失不节流）。
+        }
         nextSlot = std::chrono::steady_clock::now() +
-                   (adaptivePacing && consecutiveFailures > 0
-                        ? IpcReportGapAfterFailures(
-                              consecutiveFailures, options.interval,
-                              options.intervalCap)
-                        : options.interval);
+                   IpcReportNextGap(consecutiveFailures, options.interval,
+                                    options.intervalCap, idleSeconds,
+                                    options.userAwayAfterSeconds,
+                                    options.userAwayStepSeconds,
+                                    options.userAwayCap);
     }
     backend->Close();
     return common::Result<IpcPeriodicReportSummary>::Success(
