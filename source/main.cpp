@@ -1464,6 +1464,10 @@ struct ServiceHostDemoState {
     bool ipcAuthRejected = false;                 // 最近一次 ServeOne 是否以身份/凭据拒绝结束
     std::size_t ipcSafeModeEntries = 0;           // 窗口内进入 Safe Mode 次数（汇总）
     std::size_t ipcRejectedClients = 0;           // 窗口内身份/凭据拒绝客户端数（汇总）
+    // IPC-015：离散异常触发（Native capability 探测异常）——启动只读探测，异常锁存 Safe Mode。
+    bool ipcNativeProbeOk = false;                // 启动探测通过（R0 baseline）
+    bool ipcNativeProbeAnomaly = false;           // 启动探测异常（已触发锁存）
+    std::size_t ipcAnomalyEntries = 0;            // 窗口内离散异常触发次数（汇总）
 };
 
 optimizer::common::Result<void> ServiceWorkloadTick(
@@ -1485,8 +1489,15 @@ optimizer::common::Result<void> ServiceWorkloadTick(
         state.ipcAuthRejected = false; // 每轮受理前复位（verdictObserver 按结论置位）
         // Safe Mode（IPC-010）：冷却期暂停受理新 Agent，R0 观测/日志照常。
         if (state.ipcSafeMode && !state.ipcSafeMode->ShouldAcceptClients()) {
-            state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
-                               L"ipc  : Safe Mode 冷却中，暂停受理 Agent");
+            if (state.ipcSafeMode->IsAnomalyLatched()) {
+                state.logger.Write(
+                    optimizer::logger::LogLevel::Info, L"service",
+                    L"ipc  : Safe Mode（Native 探测异常锁存）保持，暂停受理 Agent");
+            } else {
+                state.logger.Write(optimizer::logger::LogLevel::Info,
+                                   L"service",
+                                   L"ipc  : Safe Mode 冷却中，暂停受理 Agent");
+            }
             return optimizer::common::Result<void>::Success();
         }
         auto served = state.ipcSession->ServeOne(
@@ -1711,6 +1722,33 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         state.ipcSession = std::make_shared<optimizer::ipc::IpcSession>(
             optimizer::ipc::CreateWin32ServerBackend(state.ipcPipeName),
             ipcOptions);
+        // IPC-015：Native capability 探测异常（docs/23 §6 触发项）。受理 Agent 前做一次只读
+        // R0 baseline 探测：探测失败或核心只读能力缺失（ntdll 加载失败 / NtQuerySystemInformation
+        // 或状态码转换不可用）视为持续状态异常——离散异常锁存 Safe Mode，整个窗口暂停受理新
+        // Agent（R0 负载/日志照常）；探测正常则 banner 标注 ok。
+        const auto nativeProbe =
+            optimizer::platform::NativeApi::Instance().Probe();
+        bool nativeAnomaly = false;
+        if (!nativeProbe) {
+            nativeAnomaly = true;
+        } else {
+            const auto& capabilities = nativeProbe.Value();
+            nativeAnomaly =
+                !capabilities.ntdllLoaded ||
+                !capabilities.querySystemInformation ||
+                !capabilities.ntStatusConversion;
+        }
+        if (nativeAnomaly) {
+            state.ipcNativeProbeAnomaly = true;
+            state.ipcSafeMode->OnAnomalyDetected();
+            ++state.ipcAnomalyEntries;
+            state.logger.Write(
+                optimizer::logger::LogLevel::Info, L"service",
+                L"ipc  : Safe Mode entered - Native capability 探测异常"
+                L"（R0 baseline 缺失），暂停受理新 Agent");
+        } else {
+            state.ipcNativeProbeOk = true;
+        }
     }
     optimizer::service::ServiceHost::Options options;
     options.identity.name = kServiceName;
@@ -1756,6 +1794,11 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                     L"  config   : " + consoleConfig.value().wstring() +
                     L" ([ipc] safe_mode)");
             }
+            optimizer::common::WriteConsoleLine(
+                state.ipcNativeProbeAnomaly
+                    ? L"  native   : probe anomaly -> Safe Mode (agent intake "
+                      L"paused for window)"
+                    : L"  native   : probe ok (R0 read-only baseline)");
         }
     }
     optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
@@ -1801,6 +1844,10 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             safeLine << L"  safe mode: entered " << state.ipcSafeModeEntries
                      << L" time(s), rejected clients "
                      << state.ipcRejectedClients;
+            if (state.ipcAnomalyEntries > 0) {
+                safeLine << L", native probe anomaly "
+                         << state.ipcAnomalyEntries;
+            }
             optimizer::common::WriteConsoleLine(safeLine.str());
         }
     }

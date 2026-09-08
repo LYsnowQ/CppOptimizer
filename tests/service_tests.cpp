@@ -527,6 +527,90 @@ bool TestSafeModeGuardBoundaryAndCooldown() {
            remaining <= std::chrono::milliseconds(200);
 }
 
+// ---------- IPC-015：离散异常触发（Native 探测异常等，锁存语义） ----------
+
+bool TestSafeModeAnomalyLatchesBeyondCooldown() {
+    // 离散异常触发即进入 Safe Mode 并锁存：即使远超冷却时长也不自动恢复。
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.cooldown = std::chrono::milliseconds(1000);
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    guard.OnAnomalyDetected();
+    if (guard.State() != SafeModeState::SafeMode ||
+        !guard.IsAnomalyLatched() || guard.ShouldAcceptClients()) {
+        return false;
+    }
+    clock.now += std::chrono::milliseconds(60000); // 远超计数冷却
+    return guard.State() == SafeModeState::SafeMode &&
+           !guard.ShouldAcceptClients() &&
+           guard.CooldownRemaining() == std::chrono::milliseconds(0) &&
+           guard.IsAnomalyLatched();
+}
+
+bool TestSafeModeAnomalyClearedExplicitly() {
+    // 显式 ClearAnomaly 回到 Normal 并恢复受理（异常已恢复/所有者确认）。
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    guard.OnAnomalyDetected();
+    guard.ClearAnomaly();
+    return guard.State() == SafeModeState::Normal &&
+           guard.ShouldAcceptClients() &&
+           !guard.IsAnomalyLatched() &&
+           guard.CooldownRemaining() == std::chrono::milliseconds(0);
+}
+
+bool TestSafeModeAnomalyDisabledNoOp() {
+    // enabled=false：离散异常触发不生效（恒 Normal，与计数触发一致）。
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.enabled = false;
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    guard.OnAnomalyDetected();
+    return guard.State() == SafeModeState::Normal &&
+           guard.ShouldAcceptClients() && !guard.IsAnomalyLatched();
+}
+
+bool TestSafeModeAnomalyIgnoresRejectionsWhileLatched() {
+    // 锁存期间的拒绝不参与计数：ClearAnomaly 后需重新累计才触发（防锁存期"攒失败"）。
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.cooldown = std::chrono::milliseconds(10000);
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    guard.OnAnomalyDetected();
+    for (int i = 0; i < 3; ++i) {
+        guard.OnClientRejected(); // 锁存中：忽略
+    }
+    guard.ClearAnomaly();
+    guard.OnClientRejected();
+    guard.OnClientRejected(); // 仅 2 次（阈值 3），不应触发
+    return guard.State() == SafeModeState::Normal &&
+           guard.ShouldAcceptClients();
+}
+
+bool TestSafeModeClearAnomalyKeepsCountingIndependent() {
+    // 计数触发进入的 Safe Mode 由冷却自动恢复；ClearAnomaly（无异常）不影响该路径。
+    ManualClock clock;
+    SafeModeGuard::Options options;
+    options.cooldown = std::chrono::milliseconds(1000);
+    options.now = [&clock] { return clock.now; };
+    SafeModeGuard guard(options);
+    guard.OnClientRejected();
+    guard.OnClientRejected();
+    guard.OnClientRejected(); // 计数触发进入 Safe Mode
+    if (guard.State() != SafeModeState::SafeMode) {
+        return false;
+    }
+    guard.ClearAnomaly(); // 无异常锁存：应无效果
+    clock.now += std::chrono::milliseconds(1500); // 冷却到期
+    return guard.State() == SafeModeState::Normal &&
+           guard.ShouldAcceptClients() && !guard.IsAnomalyLatched();
+}
+
 } // namespace
 
 int wmain() {
@@ -577,5 +661,13 @@ int wmain() {
         &TestSafeModeCooldownRecoveryClearsWindow);
     run(L"safe mode disabled stays normal", &TestSafeModeDisabledStaysNormal);
     run(L"safe mode boundary and cooldown", &TestSafeModeGuardBoundaryAndCooldown);
+    run(L"safe mode anomaly latches beyond cooldown",
+        &TestSafeModeAnomalyLatchesBeyondCooldown);
+    run(L"safe mode anomaly cleared explicitly", &TestSafeModeAnomalyClearedExplicitly);
+    run(L"safe mode anomaly disabled no-op", &TestSafeModeAnomalyDisabledNoOp);
+    run(L"safe mode anomaly ignores rejections while latched",
+        &TestSafeModeAnomalyIgnoresRejectionsWhileLatched);
+    run(L"safe mode clear anomaly keeps counting independent",
+        &TestSafeModeClearAnomalyKeepsCountingIndependent);
     return failed == 0 ? 0 : 1;
 }

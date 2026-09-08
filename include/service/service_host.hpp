@@ -187,19 +187,21 @@ private:
     std::condition_variable cv_;
 };
 
-// Safe Mode（docs/23 §6 面向 Agent 受理侧的首个触发项）：宿主对“身份/凭据失败”（服务端
-// 裁决/SID 白名单 UnauthorizedClient、凭据 AuthFailed，见 ipc::IpcClientVerdict）做时间窗口内
-// 计数，窗口内失败达阈值即进入 Safe Mode——暂停继续受理新 Agent（仅保留 R0 观测/日志），冷却
-// 期过后自动回到 Normal 并清空窗口。正常受理不参与计数（窗口自然过期防误积累；合法 Agent 的
-// 成功不会“冲销”攻击者失败——IPC-013 语义修正）。纯状态机 + 可注入时钟（确定性单测）；由宿主
-// 在每轮受理前用 ShouldAcceptClients() 决策。其余触发项（配置无效/Native 探测异常/审计不可用
-// 等）属后续。
+// Safe Mode（docs/23 §6 面向 Agent 受理侧）门禁：宿主对触发源做判定，进入 Safe Mode 后暂停
+// 继续受理新 Agent（仅保留 R0 观测/日志）。两类触发源：
+//  1) 计数触发（IPC-010/013/014，已落地）：身份/凭据失败（UnauthorizedClient/AuthFailed）在
+//     时间窗口内达阈值即进入；冷却到期自动恢复并清空窗口；正常受理不参与计数（窗口自然过期
+//     防误积累）。
+//  2) 离散异常触发（IPC-015，本切片）：持续状态异常（配置无效 / Native capability 探测异常 /
+//     不支持 OS 等 docs/23 §6 清单项）触发即进入并**锁存保持**（latched，不随冷却流逝自动恢复），
+//     直到显式 ClearAnomaly（异常已恢复/所有者确认）。
+// 其余触发项（异常退出恢复未确认等）随各自切片接入同类源。
 enum class SafeModeState {
     Normal,   // 正常受理
-    SafeMode  // 冷却中：暂停受理新 Agent
+    SafeMode  // 暂停受理新 Agent（计数冷却中或离散异常锁存）
 };
 
-// Safe Mode 门禁状态机（docs/23 §6 触发项：IPC 身份验证失败次数异常）。
+// Safe Mode 门禁状态机（docs/23 §6 触发项：IPC 身份验证失败次数异常 + 离散异常）。
 class SafeModeGuard {
 public:
     using Clock = std::function<std::chrono::steady_clock::time_point()>;
@@ -215,25 +217,37 @@ public:
 
     explicit SafeModeGuard(Options options = {});
 
-    // 当前状态（查询时推进冷却到期自动恢复并清空窗口）。
+    // 当前状态（查询时推进计数冷却到期自动恢复并清空窗口；离散异常锁存不被时间推进清除）。
     [[nodiscard]] SafeModeState State() noexcept;
 
-    // 是否可以受理新客户端（enabled=false 或 Normal 且未在冷却中为 true）。
+    // 是否可以受理新客户端（enabled=false、Normal 且未锁存异常时为 true）。
     [[nodiscard]] bool ShouldAcceptClients() noexcept;
 
-    // Safe Mode 中剩余冷却时长（Normal 时为 0）。
+    // Safe Mode 中剩余冷却时长（计数触发：随冷却递减；离散异常锁存：恒 0——停留由
+    // ClearAnomaly 决定，无时间语义）。
     [[nodiscard]] std::chrono::milliseconds CooldownRemaining() noexcept;
 
     // 一次身份/凭据拒绝（UnauthorizedClient/AuthFailed 结论）时调用：记录时间戳，窗口内
-    // 失败数达阈值即进入 Safe Mode 并启动冷却。
+    // 失败数达阈值即进入 Safe Mode 并启动冷却。锁存异常期间不接受新计数（已暂停受理）。
     void OnClientRejected() noexcept;
 
+    // 离散异常触发（配置无效/Native 探测异常/不支持 OS 等持续状态异常）：立即进入 Safe Mode
+    // 并锁存保持（不随冷却自动恢复），直到 ClearAnomaly；enabled=false 时不生效（恒 Normal）。
+    void OnAnomalyDetected() noexcept;
+
+    // 显式清除异常锁存（异常已恢复/所有者确认）。不影响计数触发的冷却窗口状态。
+    void ClearAnomaly() noexcept;
+
+    // 当前是否处于离散异常锁存（供宿主选择暂停文案/汇总展示）。
+    [[nodiscard]] bool IsAnomalyLatched() const noexcept;
+
 private:
-    void Refresh() noexcept; // 过期剪枝；冷却到期退出 Safe Mode 并清空窗口
+    void Refresh() noexcept; // 冷却到期退出计数 Safe Mode 并清空窗口；锁存异常不自动清除
     void PruneExpired() noexcept; // 丢弃早于 now-countingWindow 的失败时间戳
 
     Options options_;
-    bool safeMode_ = false;
+    bool safeMode_ = false;         // 计数触发进入的 Safe Mode（冷却到期自动恢复）
+    bool anomalyLatched_ = false;   // 离散异常锁存（ClearAnomaly 前保持）
     std::chrono::steady_clock::time_point cooldownUntil_{};
     std::vector<std::chrono::steady_clock::time_point> failureTimes_;
 };

@@ -487,6 +487,10 @@ void SafeModeGuard::PruneExpired() noexcept {
 }
 
 void SafeModeGuard::Refresh() noexcept {
+    // 离散异常锁存：不随冷却流逝自动清除（停留由 ClearAnomaly 决定），也不做剪枝。
+    if (anomalyLatched_) {
+        return;
+    }
     if (safeMode_) {
         // 冷却到期自动回到 Normal 并清空窗口（避免恢复瞬间因窗口内旧失败立即再触发）。
         if (options_.now() >= cooldownUntil_) {
@@ -501,17 +505,21 @@ void SafeModeGuard::Refresh() noexcept {
 
 SafeModeState SafeModeGuard::State() noexcept {
     Refresh();
+    if (anomalyLatched_) {
+        return SafeModeState::SafeMode;
+    }
     return safeMode_ ? SafeModeState::SafeMode : SafeModeState::Normal;
 }
 
 bool SafeModeGuard::ShouldAcceptClients() noexcept {
     Refresh();
-    return !options_.enabled || !safeMode_;
+    return !options_.enabled || (!safeMode_ && !anomalyLatched_);
 }
 
 std::chrono::milliseconds SafeModeGuard::CooldownRemaining() noexcept {
     Refresh();
-    if (!safeMode_) {
+    // 锁存异常无冷却语义（停留由 ClearAnomaly 决定），恒 0；计数触发的冷却随时钟递减。
+    if (anomalyLatched_ || !safeMode_) {
         return std::chrono::milliseconds(0);
     }
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -523,9 +531,9 @@ void SafeModeGuard::OnClientRejected() noexcept {
     if (!options_.enabled) {
         return;
     }
-    Refresh();
-    if (safeMode_) {
-        return; // 已在 Safe Mode：冷却期结束前不再累计
+    Refresh(); // 计数状态随时间推进：冷却到期先自动清窗，再判断是否累计
+    if (safeMode_ || anomalyLatched_) {
+        return; // 已在计数 Safe Mode 冷却期；或异常锁存中（已暂停受理，不累计）
     }
     // 时间窗口计数：记录时间戳，剪枝后窗口内失败数达阈值即进入 Safe Mode。
     failureTimes_.push_back(options_.now());
@@ -534,6 +542,21 @@ void SafeModeGuard::OnClientRejected() noexcept {
         safeMode_ = true;
         cooldownUntil_ = options_.now() + options_.cooldown;
     }
+}
+
+void SafeModeGuard::OnAnomalyDetected() noexcept {
+    if (!options_.enabled) {
+        return;
+    }
+    anomalyLatched_ = true; // 持续状态异常：锁存保持直到 ClearAnomaly
+}
+
+void SafeModeGuard::ClearAnomaly() noexcept {
+    anomalyLatched_ = false; // 只清异常锁存；计数冷却状态由各自规则自理
+}
+
+bool SafeModeGuard::IsAnomalyLatched() const noexcept {
+    return anomalyLatched_;
 }
 
 } // namespace optimizer::service
