@@ -238,7 +238,8 @@ bool TestLoadConfigPolicyDefaults() {
     }
     const auto& p = result.Value().policy;
     return p.comfortableMarginPercent == 30 && p.adequateMarginPercent == 15 &&
-           p.tightMarginPercent == 5 && p.cooldownMs == 5000;
+           p.tightMarginPercent == 5 && p.cooldownMs == 5000 &&
+           p.userAwayIdleSeconds == 0; // 门禁默认关闭（保守默认，零回归）
 }
 
 bool TestLoadConfigPolicySection() {
@@ -249,6 +250,7 @@ comfortable_margin_percent = 80
 adequate_margin_percent = 50
 tight_margin_percent = 20
 cooldown_ms = 3000
+user_away_idle_seconds = 120
 )";
     if (!WriteTempConfig(path, content)) {
         return false;
@@ -260,7 +262,32 @@ cooldown_ms = 3000
     }
     const auto& p = result.Value().policy;
     return p.comfortableMarginPercent == 80 && p.adequateMarginPercent == 50 &&
-           p.tightMarginPercent == 20 && p.cooldownMs == 3000;
+           p.tightMarginPercent == 20 && p.cooldownMs == 3000 &&
+           p.userAwayIdleSeconds == 120;
+}
+
+bool TestLoadConfigPolicyRejectsNegativeUserAway() {
+    // 用户在场门禁阈值为负属语义错误（应显式 0 = 关闭）。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[policy]\nuser_away_idle_seconds = -1\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
+}
+
+bool TestLoadConfigPolicyRejectsOversizedUserAway() {
+    // 超过 86400 秒（一天）越界属语义错误，直接拒绝。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "[policy]\nuser_away_idle_seconds = 86401\n")) {
+        return false;
+    }
+    auto result = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !result.HasValue();
 }
 
 bool TestLoadConfigPolicyZeroCooldown() {
@@ -662,6 +689,10 @@ int wmain() {
         &TestLoadConfigPolicyRejectsOutOfRangeComfortable);
     run(L"Load config rejects negative cooldown",
         &TestLoadConfigPolicyRejectsNegativeCooldown);
+    run(L"Load config rejects negative user away seconds",
+        &TestLoadConfigPolicyRejectsNegativeUserAway);
+    run(L"Load config rejects oversized user away seconds",
+        &TestLoadConfigPolicyRejectsOversizedUserAway);
     run(L"Load config ipc safe mode defaults", &TestLoadConfigIpcSafeModeDefaults);
     run(L"Load config ipc safe mode section", &TestLoadConfigIpcSafeModeSection);
     run(L"Load config ipc safe mode disabled", &TestLoadConfigIpcSafeModeDisabled);

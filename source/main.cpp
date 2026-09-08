@@ -227,7 +227,15 @@ int RunConfigCommand(std::wstring_view path) {
                << c.policy.comfortableMarginPercent << L"/"
                << c.policy.adequateMarginPercent << L"/"
                << c.policy.tightMarginPercent << L" cooldown "
-               << c.policy.cooldownMs << L" ms\n";
+               << c.policy.cooldownMs << L" ms";
+    if (c.policy.userAwayIdleSeconds > 0) {
+        std::wcout << L" user-away ";
+        std::wcout << L"on (idle >= " << c.policy.userAwayIdleSeconds
+                   << L" s)";
+    } else {
+        std::wcout << L" user-away off";
+    }
+    std::wcout << L"\n";
     std::wcout << L"  games      : " << c.games.size() << L" rule(s)\n";
     return 0;
 }
@@ -603,6 +611,10 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     // -> 规则评估 + 防抖，输出决策；PWR-002 起，决策经配置门禁后落地为
     // R1 执行器动作（[priority].enabled -> 前台游戏提升；[power].execution_required
     // -> 游戏运行期持有电源请求），门禁全关时保持 POL-001 纯咨询行为。
+    // ACT-004 起，[policy].user_away_idle_seconds > 0 时开启用户在场门禁：每秒只读
+    // 查询最近输入（GetLastInputInfo），无输入达到阈值视用户不在场（AFK/锁屏/断开时
+    // 输入时钟冻结自然落入），抑制优化建议（NoOp user_away）；查询失败同样视不在场
+    //（在场未知不伪装在场——不优化是安全方向）。0（默认）关闭门禁，行为零回归。
     // 无效/缺失指标不触发决策（黄色不变量），但仍对账释放已持动作。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
@@ -676,6 +688,17 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     optimizer::policy::PolicyEvaluator evaluator(
         thresholds, std::chrono::milliseconds(policyConfig.cooldownMs));
 
+    // ACT-004：用户在场门禁。0 = 关闭（保守默认，零回归）；>0 秒无键鼠输入视用户不在场
+    //（AFK/锁屏/断开时输入时钟冻结、空闲自然超阈值），抑制优化建议（NoOp user_away）。
+    const bool userAwayGateOn = policyConfig.userAwayIdleSeconds > 0;
+    const std::int64_t userAwayIdleMs =
+        static_cast<std::int64_t>(policyConfig.userAwayIdleSeconds) * 1000;
+    std::shared_ptr<optimizer::activity::LastInputBackend> lastInputBackend;
+    if (userAwayGateOn) {
+        lastInputBackend =
+            optimizer::activity::CreateWin32LastInputBackend();
+    }
+
     // PWR-002：决策经配置门禁后落地为 R1 执行器动作；
     // 无配置或门禁关闭 = 纯咨询（POL-001 行为不变）。
     optimizer::policy::ExecutorConfig executorConfig;
@@ -714,6 +737,11 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     if (games.empty()) {
         std::wcout
             << L"  (pass --policy <s> <config.toml> to evaluate game rules)\n";
+    }
+    if (userAwayGateOn) {
+        std::wcout << L"  user     : away when no input for >= "
+                   << policyConfig.userAwayIdleSeconds
+                   << L" s (presence gate on; read-only GetLastInputInfo)\n";
     }
 
     const auto deadline = std::chrono::steady_clock::now() +
@@ -781,6 +809,23 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
                 input.pressure = pressure.Value();
                 input.game = focus;
 
+                // 用户在场采样（ACT-004；仅门禁开启时）：每 tick 一次只读查询。
+                // 查询失败视用户不在场（在场未知不伪装在场——不优化是安全方向）。
+                bool userPresent = true;
+                if (userAwayGateOn) {
+                    userPresent = false;
+                    if (auto inputQuery = lastInputBackend->Query()) {
+                        const auto& inputSample = inputQuery.Value();
+                        userPresent =
+                            optimizer::activity::ClassifyActivity(
+                                inputSample.nowTick,
+                                inputSample.lastInputTick,
+                                userAwayIdleMs) ==
+                            optimizer::activity::ActivityState::Active;
+                    }
+                }
+                input.userPresent = userPresent;
+
                 const auto evaluation = evaluator.Evaluate(input, now);
                 counts[evaluation.decision.action]++;
                 effectiveDecision = evaluation.decision;
@@ -794,6 +839,10 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
                          << L" fg=" << (focus.foreground ? L"yes" : L"no");
                 } else {
                     line << L"none";
+                }
+                if (userAwayGateOn) {
+                    line << L" user="
+                         << (userPresent ? L"present" : L"away");
                 }
                 line << L" -> "
                      << optimizer::policy::ActionToString(

@@ -222,6 +222,57 @@ bool TestEvaluateBackgroundNoPauseAdequateNoOp() {
     return d.action == PolicyAction::NoOp && d.reasonCode == "mem_ok";
 }
 
+// ---------- ACT-004：用户在场门禁（user_away） ----------
+
+PolicyInput AwayInput(ResourcePressure pressure, bool running,
+                      bool foreground, bool pauseWhenBackground) {
+    PolicyInput input =
+        MakeInput(pressure, running, foreground, pauseWhenBackground);
+    input.userPresent = false; // 用户不在场（AFK/锁屏/断开/在场未知）
+    return input;
+}
+
+bool TestEvaluateUserAwaySuppressesTune() {
+    // 紧张 + 前台 + 不在场：原 mem_tight 建议被在场门禁抑制 -> NoOp user_away。
+    const auto d = EvaluatePolicy(AwayInput(
+        ResourcePressure::Tight, /*running=*/true,
+        /*foreground=*/true, /*pauseWhenBackground=*/true));
+    return d.action == PolicyAction::NoOp && d.reasonCode == "user_away" &&
+           d.gameId == "g";
+}
+
+bool TestEvaluateUserAwaySuppressesBoost() {
+    // 余量充足 + 前台 + 不在场：原 prio_boost 建议被抑制 -> NoOp user_away。
+    const auto d = EvaluatePolicy(AwayInput(
+        ResourcePressure::Comfortable, /*running=*/true,
+        /*foreground=*/true, /*pauseWhenBackground=*/true));
+    return d.action == PolicyAction::NoOp && d.reasonCode == "user_away";
+}
+
+bool TestEvaluateCriticalNotifiesEvenWhenAway() {
+    // 危急提示优先于在场门禁（危急信息不因用户暂离而丢失）。
+    const auto d = EvaluatePolicy(AwayInput(
+        ResourcePressure::Critical, /*running=*/true,
+        /*foreground=*/true, /*pauseWhenBackground=*/true));
+    return d.action == PolicyAction::Notify && d.reasonCode == "mem_critical";
+}
+
+bool TestEvaluateNoGameEvenWhenAway() {
+    // 无游戏运行优先于在场门禁。
+    const auto d = EvaluatePolicy(AwayInput(
+        ResourcePressure::Comfortable, /*running=*/false, false, true));
+    return d.action == PolicyAction::NoOp && d.reasonCode == "no_game" &&
+           d.gameId.empty();
+}
+
+bool TestEvaluateUserAwayPrecedesBackgroundPause() {
+    // 不在场优先于后台暂停规则：后台 + 暂停 + 不在场 -> user_away（而非 game_background）。
+    const auto d = EvaluatePolicy(AwayInput(
+        ResourcePressure::Comfortable, /*running=*/true,
+        /*foreground=*/false, /*pauseWhenBackground=*/true));
+    return d.action == PolicyAction::NoOp && d.reasonCode == "user_away";
+}
+
 // ---------- HysteresisFilter ----------
 
 bool TestHysteresisFirstApply() {
@@ -232,14 +283,14 @@ bool TestHysteresisFirstApply() {
 
 bool TestHysteresisSameStateStable() {
     HysteresisFilter filter(std::chrono::milliseconds(5000));
-    filter.Update(true, T0());
+    (void)filter.Update(true, T0());
     // 同状态原样返回，不重置切换计时。
     return filter.Update(true, T0() + std::chrono::milliseconds(4000)) == true;
 }
 
 bool TestHysteresisSuppressThenApply() {
     HysteresisFilter filter(std::chrono::milliseconds(5000));
-    filter.Update(true, T0());
+    (void)filter.Update(true, T0());
     // 冷却期内切换被抑制，保持旧状态。
     if (filter.Update(false, T0() + std::chrono::milliseconds(1000)) != true) {
         return false;
@@ -264,14 +315,14 @@ bool TestHysteresisSuppressThenApply() {
 
 bool TestHysteresisZeroCooldown() {
     HysteresisFilter filter(std::chrono::milliseconds(0));
-    filter.Update(true, T0());
+    (void)filter.Update(true, T0());
     // 0 冷却：任何切换立即生效。
     return filter.Update(false, T0() + std::chrono::milliseconds(1)) == false;
 }
 
 bool TestHysteresisReset() {
     HysteresisFilter filter(std::chrono::milliseconds(5000));
-    filter.Update(true, T0());
+    (void)filter.Update(true, T0());
     filter.Reset();
     if (filter.State() != false) {
         return false;
@@ -368,7 +419,7 @@ bool TestEvaluatorReset() {
     PolicyEvaluator evaluator({}, std::chrono::milliseconds(5000));
     const auto t0 = T0();
     // t0：后台未暂停 + 余量一般 -> NoOp（非行动态，首次生效）。
-    evaluator.Evaluate(
+    (void)evaluator.Evaluate(
         MakeInput(ResourcePressure::Adequate, /*running=*/true,
                   /*foreground=*/false, /*pauseWhenBackground=*/false),
         t0);
@@ -424,6 +475,14 @@ int wmain() {
         &TestEvaluateComfortableForegroundBoosts);
     run(L"EvaluatePolicy background no-pause adequate is NoOp",
         &TestEvaluateBackgroundNoPauseAdequateNoOp);
+    run(L"EvaluatePolicy user away suppresses tune", &TestEvaluateUserAwaySuppressesTune);
+    run(L"EvaluatePolicy user away suppresses boost",
+        &TestEvaluateUserAwaySuppressesBoost);
+    run(L"EvaluatePolicy critical notifies even when away",
+        &TestEvaluateCriticalNotifiesEvenWhenAway);
+    run(L"EvaluatePolicy no game even when away", &TestEvaluateNoGameEvenWhenAway);
+    run(L"EvaluatePolicy user away precedes background pause",
+        &TestEvaluateUserAwayPrecedesBackgroundPause);
     run(L"HysteresisFilter first call applies", &TestHysteresisFirstApply);
     run(L"HysteresisFilter same state stable", &TestHysteresisSameStateStable);
     run(L"HysteresisFilter suppress then apply", &TestHysteresisSuppressThenApply);

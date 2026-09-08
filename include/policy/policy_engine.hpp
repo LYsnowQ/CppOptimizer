@@ -65,9 +65,12 @@ struct GameFocus {
 };
 
 // 策略输入(一次求值的全部输入;压力已分级、指标已校验,求值函数恒不失败)。
+// userPresent=false 表示用户不在场（AFK 超阈值/锁屏/断开/在场查询失败，保守视为不在场），
+// 规则层对不在场样本不产生优化建议（NoOp user_away，ACT-004）；默认 true 保持旧语义。
 struct PolicyInput {
     ResourcePressure pressure = ResourcePressure::Comfortable;
     GameFocus game;
+    bool userPresent = true;
 };
 
 // 策略决策输出。v1 全部为只读咨询:
@@ -83,14 +86,17 @@ struct PolicyDecision {
 };
 
 // 纯函数：规则评估（确定性、无副作用、恒成功）。
-// v1/PWR-002 规则（按优先级，自上而下命中即返回）：
+// 规则（按优先级，自上而下命中即返回）：
 // 1) 无游戏运行                    -> NoOp (no_game)
 // 2) 压力 Critical                 -> Notify (mem_critical)：危急优先提示，不受后台暂停限制
-// 3) 游戏后台且配置后台暂停          -> NoOp (game_background)
-// 4) 压力 Tight                    -> SuggestMemoryTune (mem_tight)：Layer 2 咨询
-// 5) 压力 Adequate/Comfortable 且前台 -> SuggestPriorityBoost (prio_boost)：Layer 3，
+// 3) 用户不在场（userPresent=false，ACT-004：AFK 超阈值/锁屏/断开/在场查询失败）
+//                                  -> NoOp (user_away)：无人在场不优化（不产生建议）
+// 4) 游戏后台且配置后台暂停          -> NoOp (game_background)
+// 5) 压力 Tight                    -> SuggestMemoryTune (mem_tight)：Layer 2 咨询
+// 6) 压力 Adequate/Comfortable 且前台 -> SuggestPriorityBoost (prio_boost)：Layer 3，
 //     由 PolicyExecutor 经 PriorityBooster 落地（PWR-002）
-// 6) 其余（后台未暂停 + 余量充足）   -> NoOp (mem_ok)：无证据不优化
+// 7) 其余（后台未暂停 + 余量充足）   -> NoOp (mem_ok)：无证据不优化
+// 优先级要点：无游戏与危急提示优先于在场门禁；在场门禁优先于后台暂停与一切优化建议。
 [[nodiscard]] PolicyDecision EvaluatePolicy(const PolicyInput& input) noexcept;
 
 // 防抖滤波器:状态切换需经过冷却期,防止决策抖动。

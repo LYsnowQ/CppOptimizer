@@ -453,6 +453,16 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
                 snapshot.policy.cooldownMs = static_cast<std::int32_t>(*v);
             }
         }
+        // user_away_idle_seconds：0 = 关闭用户在场门禁（ACT-004）；1..86400 秒内无输入
+        // 视用户不在场。越界（负数/超 86400）属语义错误在下方统一拒绝。
+        if (const auto v =
+                (*section)["user_away_idle_seconds"].value<std::int64_t>()) {
+            if (*v >= std::numeric_limits<std::int32_t>::min() &&
+                *v <= std::numeric_limits<std::int32_t>::max()) {
+                snapshot.policy.userAwayIdleSeconds =
+                    static_cast<std::int32_t>(*v);
+            }
+        }
     }
     // 阈值有序性与范围校验：无论节是否存在，默认值恒合法；
     // 违序/越界配置是语义错误，直接拒绝（错误阈值会产生错误决策）。
@@ -462,12 +472,15 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
           snapshot.policy.adequateMarginPercent <
               snapshot.policy.comfortableMarginPercent &&
           snapshot.policy.comfortableMarginPercent <= 100) ||
-        snapshot.policy.cooldownMs < 0) {
+        snapshot.policy.cooldownMs < 0 ||
+        snapshot.policy.userAwayIdleSeconds < 0 ||
+        snapshot.policy.userAwayIdleSeconds > 86400) {
         return common::Result<ConfigSnapshot>::Failure(
             common::Error::Validation(
                 "LoadConfig",
                 L"[policy] thresholds must satisfy "
-                L"0 <= tight < adequate < comfortable <= 100 and cooldown_ms >= 0"));
+                L"0 <= tight < adequate < comfortable <= 100, cooldown_ms >= 0, "
+                L"user_away_idle_seconds in 0..86400 (0 = gate off)"));
     }
 
     // [ipc]：Safe Mode 门禁窗口参数（Agent 受理侧；缺省与 SafeModeGuard::Options 一致）。
