@@ -9,9 +9,12 @@
 
 namespace optimizer::activity {
 
-// 用户输入活动状态（MOD-ACT-001 首切片，R0 只读）。
-// Unknown=查询失败/不可交互（不伪装成活跃/空闲），Active=最近有输入，Idle=超过空闲阈值。
-enum class ActivityState { Unknown, Active, Idle };
+// 用户输入活动状态（MOD-ACT-001 首切片 + ACT-002 会话上下文，R0 只读）。
+// Unknown=查询失败/不可交互（不伪装成活跃/空闲），Active=最近有输入，Idle=超过空闲阈值；
+// Locked=工作站锁屏（会话连接仍在但输入被接管，输入时钟冻结），
+// Disconnected=会话已断开（RDP 断开等，无交互可能）。Locked/Disconnected 仅由
+// 会话上下文合并（ClassifyContextState/ObserveActivityContext）产生。
+enum class ActivityState { Unknown, Active, Idle, Locked, Disconnected };
 
 // 状态名（纯查询，恒成功）。
 [[nodiscard]] const wchar_t* ActivityStateToString(ActivityState state) noexcept;
@@ -60,6 +63,73 @@ struct ActivityWindowSummary {
     std::size_t idle = 0;
     std::size_t unknown = 0;
 };
+
+// ---------- ACT-002：会话/锁屏上下文（MOD-ACT-001 第二切片，R0 只读） ----------
+
+// 会话连接状态（当前会话；值对应 WTS_CONNECTSTATE_CLASS，Unknown=不支持/未识别）。
+// 只有 Active 对应“正常交互中”；Disconnected 指 RDP 等会话断开。
+enum class SessionLinkState { Unknown, Active, Connected, Disconnected, Idle, Listen };
+
+// 状态名（纯查询，恒成功）。
+[[nodiscard]] const wchar_t* SessionLinkStateToString(
+    SessionLinkState state) noexcept;
+
+// 纯映射：WTS_CONNECTSTATE_CLASS 整值 -> SessionLinkState
+//（WTSConnectQuery/WTSShadow 等瞬时态按 Unknown，不做宽松解释）。
+[[nodiscard]] SessionLinkState LinkStateFromWtsValue(int wtsConnectState) noexcept;
+
+// 当前会话上下文快照（一次只读查询）。
+// remoteSession=远程会话（RDP/Terminal Services），locked=工作站锁屏
+//（WTSSessionInfoEx SessionFlags == WTS_SESSIONSTATE_LOCK，输入桌面被 Winlogon 接管），
+// link=会话连接状态（WTSConnectState）。
+struct SessionContext {
+    bool remoteSession = false;
+    bool locked = false;
+    SessionLinkState link = SessionLinkState::Unknown;
+};
+
+// 会话上下文查询后端（可注入 fake 确定性测试；真实实现见 CreateWin32SessionProbe）。
+// 只读 WTS 查询 + 系统指标，无订阅/无窗口/无后台线程。查询失败返回 Failure，
+// 调用方整样本按 Unknown 降级（会话/锁屏未知时不得把“在场”伪装成已知）。
+class SessionProbe {
+public:
+    virtual ~SessionProbe() = default;
+
+    [[nodiscard]] virtual common::Result<SessionContext> Query() = 0;
+};
+
+// Win32 后端：WTSQuerySessionInformation（WTSConnectState + WTSSessionInfoEx
+// SessionFlags）+ GetSystemMetrics(SM_REMOTESESSION)（wtsapi32/user32 只读，
+// 无新窗口/线程/订阅）。当前会话标准用户可查询，失败即 Failure。
+[[nodiscard]] std::shared_ptr<SessionProbe> CreateWin32SessionProbe();
+
+// 合并输入活动与会话上下文为最终状态（纯函数，确定性）：
+// 会话断开（link == Disconnected）-> Disconnected（断开即无交互）；
+// 否则锁屏（locked）-> Locked（锁屏后输入时钟冻结，不得据此判 Active/Idle）；
+// 否则原样返回输入状态（Active/Idle/Unknown）。remoteSession 不影响归类（仅展示）。
+[[nodiscard]] ActivityState ClassifyContextState(
+    ActivityState inputState, const SessionContext& context) noexcept;
+
+// 会话上下文观测窗口汇总。
+struct ActivityContextSummary {
+    std::size_t samples = 0;
+    std::size_t active = 0;
+    std::size_t idle = 0;
+    std::size_t locked = 0;
+    std::size_t disconnected = 0;
+    std::size_t unknown = 0;
+};
+
+// 会话上下文观测（ACT-002）：行为与 ObserveActivity 一致，但每样本额外查询一次会话
+// 上下文并合并（断开/锁屏覆盖输入态）；输入查询与会话查询任一失败 -> 该样本 Unknown
+// （不伪装）。sampleInterval 为 0 时不等待（确定性测试用）；sampleCount == 0 ->
+// Validation 拒绝。onSample 收到 Locked/Disconnected 时 idleMs 为输入派生的原始值
+//（锁屏/断开下意义有限，供展示参考）。
+[[nodiscard]] common::Result<ActivityContextSummary> ObserveActivityContext(
+    LastInputBackend& inputBackend, SessionProbe& sessionProbe,
+    std::size_t sampleCount, std::chrono::milliseconds sampleInterval,
+    std::int64_t idleThresholdMs,
+    const std::function<void(ActivityState, std::int64_t)>& onSample);
 
 // 前台有界观测：采样 sampleCount 次（间隔 sampleIntervalMs；为 0 时不等待，供确定性测试），
 // 每次查询最近输入并分类；onSample(state, idleMs) 逐样本回调（CLI 打印等），查询失败样本回调

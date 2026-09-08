@@ -58,6 +58,7 @@ target_link_libraries(CppOptimizer PRIVATE
     user32
     psapi
     advapi32
+    wtsapi32
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
 )
@@ -341,7 +342,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         source/activity/user_activity.cpp
     )
     target_include_directories(CppOptimizerActivityTests PRIVATE include)
-    target_link_libraries(CppOptimizerActivityTests PRIVATE user32)
+    target_link_libraries(CppOptimizerActivityTests PRIVATE user32 wtsapi32)
     target_compile_features(CppOptimizerActivityTests PRIVATE cxx_std_20)
     target_compile_definitions(CppOptimizerActivityTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX

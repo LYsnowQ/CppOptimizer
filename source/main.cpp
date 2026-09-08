@@ -232,48 +232,104 @@ int RunConfigCommand(std::wstring_view path) {
     return 0;
 }
 
-int RunActivityCommand(std::wstring_view secondsText,
-                       std::wstring_view idleSecsText) {
-    // --activity <s> [idle-secs]：用户输入活动观测（MOD-ACT-001，R0 只读、前台有界）。
-    // 每秒只读查询最近键鼠输入（GetLastInputInfo）并分类 Active/Idle/Unknown，输出逐样本
-    // 状态与窗口汇总。无 Hook、不采集输入内容；非交互会话查询失败按 Unknown 降级不伪装。
+int RunActivityCommand(int argc, wchar_t* argv[]) {
+    // --activity <s> [idle-secs] [--session]：用户输入活动观测（MOD-ACT-001，R0 只读、前台
+    // 有界）。每秒只读查询最近键鼠输入（GetLastInputInfo）并分类 Active/Idle/Unknown；
+    // --session（ACT-002）追加当前会话上下文：远程会话标志（SM_REMOTESESSION）＋锁屏
+    //（WTSSessionInfoEx SessionFlags）＋会话连接状态（WTSConnectState），断开会话/锁屏覆盖
+    // 输入态（Disconnected/Locked），会话或输入任一查询失败按 Unknown 降级不伪装。
+    // 无 Hook、无窗口/消息循环/后台线程、不采集输入内容。
     constexpr std::uint32_t kMaxSeconds = 60;
     std::uint32_t seconds = 0;
-    if (!ParseUint32(secondsText, seconds) || seconds == 0 ||
+    if (argc < 3 || !ParseUint32(argv[2], seconds) || seconds == 0 ||
         seconds > kMaxSeconds) {
         std::wcerr << L"  --activity seconds must be in 1.." << kMaxSeconds
                    << L"\n";
         return 2;
     }
     std::uint32_t idleSecs = 15; // 默认空闲阈值 15 秒
-    if (!idleSecsText.empty()) {
-        if (!ParseUint32(idleSecsText, idleSecs) || idleSecs == 0 ||
+    bool idleGiven = false;
+    bool sessionContext = false;
+    for (int i = 3; i < argc; ++i) {
+        const std::wstring_view arg(argv[i]);
+        if (arg == L"--session") {
+            sessionContext = true;
+            continue;
+        }
+        if (arg.size() >= 2 && arg[0] == L'-') {
+            std::wcerr << L"  --activity unknown option: " << arg << L"\n";
+            return 2;
+        }
+        if (idleGiven || !ParseUint32(arg, idleSecs) || idleSecs == 0 ||
             idleSecs > 3600) {
             std::wcerr << L"  --activity idle-secs must be in 1..3600\n";
             return 2;
         }
+        idleGiven = true; // 位置参数仅一个（idle-secs），顺序与 --session 无关
     }
 
     std::wcout << L"User activity observation (read-only, foreground, "
                << seconds << L" s)\n";
     std::wcout << L"  threshold : idle >= " << idleSecs << L" s\n";
-    std::wcout << L"  source    : GetLastInputInfo (no hooks, no input content)\n";
-
+    std::wcout << L"  source    : GetLastInputInfo (no hooks, no input content)";
     auto backend = optimizer::activity::CreateWin32LastInputBackend();
+    auto sessionProbe = optimizer::activity::CreateWin32SessionProbe();
+    if (sessionContext) {
+        const auto context = sessionProbe->Query();
+        if (!context) {
+            std::wcout
+                << L"\n  context   : session probe unavailable - per-sample "
+                   L"degraded to unknown";
+        } else {
+            std::wcout << L"\n  context   : "
+                       << (context.Value().remoteSession
+                               ? L"remote (RDP) session"
+                               : L"local session")
+                       << L"; states may include locked/disconnected";
+        }
+    }
+    std::wcout << L"\n";
+
     std::size_t sampleIndex = 0;
-    const auto result = optimizer::activity::ObserveActivity(
-        *backend, seconds, std::chrono::milliseconds(1000),
-        static_cast<std::int64_t>(idleSecs) * 1000,
+    const auto onSample =
         [&seconds, &sampleIndex](optimizer::activity::ActivityState state,
                                  std::int64_t idleMs) {
             ++sampleIndex;
             std::wcout << L"  [" << sampleIndex << L"/" << seconds << L"] "
                        << optimizer::activity::ActivityStateToString(state);
-            if (state != optimizer::activity::ActivityState::Unknown) {
+            // 锁屏/断开/未知不带 idle（active/idle 才打印输入空闲毫秒）。
+            if (state == optimizer::activity::ActivityState::Active ||
+                state == optimizer::activity::ActivityState::Idle) {
                 std::wcout << L" (idle " << idleMs << L" ms)";
             }
             std::wcout << L"\n";
-        });
+        };
+    if (sessionContext) {
+        const auto result = optimizer::activity::ObserveActivityContext(
+            *backend, *sessionProbe, seconds, std::chrono::milliseconds(1000),
+            static_cast<std::int64_t>(idleSecs) * 1000, onSample);
+        if (!result) {
+            const auto& error = result.ErrorValue();
+            std::wcerr << L"  observation failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        const auto& summary = result.Value();
+        std::wcout << L"  summary  : active " << summary.active << L" / idle "
+                   << summary.idle << L" / locked " << summary.locked
+                   << L" / disconnected " << summary.disconnected
+                   << L" / unknown " << summary.unknown << L"\n";
+        if (summary.unknown == summary.samples && summary.samples > 0) {
+            std::wcout << L"  -> input/session query unavailable; degraded to "
+                          L"unknown, not Active/Idle/Locked/Disconnected\n";
+        }
+        return 0;
+    }
+
+    const auto result = optimizer::activity::ObserveActivity(
+        *backend, seconds, std::chrono::milliseconds(1000),
+        static_cast<std::int64_t>(idleSecs) * 1000, onSample);
     if (!result) {
         const auto& error = result.ErrorValue();
         std::wcerr << L"  observation failed ["
@@ -2448,10 +2504,13 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --status     Show one read-only memory snapshot\n"
         << L"  CppOptimizer.exe --observe <s> [threshold] Sample each second for 1..60 s;\n"
         << L"                             optional low-load threshold 0..100 (default 50)\n"
-        << L"  CppOptimizer.exe --activity <s> [idle-secs]  Observe user input activity\n"
-        << L"                             (read-only GetLastInputInfo; no hooks) for\n"
-        << L"                             1..60 s; idle threshold 1..3600 s (default 15);\n"
-        << L"                             outputs per-second Active/Idle/Unknown states\n"
+        << L"  CppOptimizer.exe --activity <s> [idle-secs] [--session]  Observe user input\n"
+        << L"                             activity (read-only GetLastInputInfo; no hooks)\n"
+        << L"                             for 1..60 s; idle threshold 1..3600 s (default\n"
+        << L"                             15); outputs per-second Active/Idle/Unknown\n"
+        << L"                             states. --session (ACT-002) adds read-only\n"
+        << L"                             session context: remote/local, locked (WTS\n"
+        << L"                             SessionFlags) and disconnected link states\n"
 
         << L"  CppOptimizer.exe --log <module> <message...> Write one Info log line to stderr\n"
         << L"                             (read-only, foreground, bounded)\n"
@@ -2556,9 +2615,9 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argc == 3 && std::wstring_view(argv[1]) == L"--config") {
             return RunConfigCommand(argv[2]);
         }
-        if ((argc == 3 || argc == 4) &&
+        if ((argc >= 3 && argc <= 5) &&
             std::wstring_view(argv[1]) == L"--activity") {
-            return RunActivityCommand(argv[2], argc == 4 ? argv[3] : L"");
+            return RunActivityCommand(argc, argv);
         }
         if ((argc == 3 || argc == 4) && std::wstring_view(argv[1]) == L"--watch") {
             return RunWatchCommand(argc, argv);
