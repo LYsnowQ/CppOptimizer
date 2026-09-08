@@ -3,6 +3,7 @@
 #include "common/error.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -63,6 +64,14 @@ struct IpcFact {
 // 截断并追加 " ..."(不切分多字节字符)。仅用于应答/日志回显;输入须已通过
 // Parse/Serialize 校验(无控制字节)。
 [[nodiscard]] std::string FormatFactsSummary(std::span<const IpcFact> facts);
+
+// 已注册数值键的通用取值(ACT-006,宿主/消费方访问器):线性查找 key,值非空十进制
+// 无符号整数则返回其值;键缺失、值非十进制/为空返回 nullopt。本函数是通用语法访问,
+// 不解释单键业务含义(键的语义由消费方按注册表说明解释,如 user_idle_seconds 为
+// 距最近键鼠输入的秒数);调用方应确保输入已通过 ValidateFactsV1Schema(越界/畸形
+// 值在 schema 层已拒,此处防御性返回 nullopt)。
+[[nodiscard]] std::optional<std::uint32_t> NumericFactValue(
+    std::span<const IpcFact> facts, std::string_view key) noexcept;
 
 // ---------------------------------------------------------------------------
 // Facts v1 键语义白名单（schema）。IPC-003：在语法契约（Parse/Serialize）之上

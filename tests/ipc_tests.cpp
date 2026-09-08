@@ -61,6 +61,7 @@ using optimizer::ipc::SerializeFactsV1;
 using optimizer::ipc::ParseFactsV1;
 using optimizer::ipc::ValidateFactsV1Schema;
 using optimizer::ipc::FormatFactsSummary;
+using optimizer::ipc::NumericFactValue;
 using optimizer::ipc::kFactsSummaryMaxBytes;
 using optimizer::ipc::kMaxFactsEntries;
 using optimizer::ipc::kMaxFactsKeyBytes;
@@ -754,6 +755,41 @@ bool TestFactsSchemaRejectsUserIdleSecondsOverflow() {
     const std::vector<IpcFact> overflow = {{"user_idle_seconds", "4294967296"}};
     const auto result = ValidateFactsV1Schema(overflow);
     return !result && result.ErrorValue().domain == ErrorDomain::Validation;
+}
+
+bool TestNumericFactValueLookup() {
+    // ACT-006：通用数值键取值——命中返回；键缺失/空集合/畸形值返回 nullopt（不解释）。
+    const std::vector<IpcFact> facts = {{"client_pid", "123"},
+                                        {"user_idle_seconds", "7"},
+                                        {"observer", "demo"}};
+    if (NumericFactValue(facts, "user_idle_seconds") != 7u) {
+        return false;
+    }
+    if (NumericFactValue(facts, "client_pid") != 123u) {
+        return false;
+    }
+    if (NumericFactValue(facts, "memory_total_mb").has_value()) {
+        return false; // 键缺失：nullopt
+    }
+    if (NumericFactValue({}, "user_idle_seconds").has_value()) {
+        return false; // 空集合：nullopt
+    }
+    const std::vector<IpcFact> malformed = {{"client_pid", "abc"}};
+    return !NumericFactValue(malformed, "client_pid").has_value();
+}
+
+bool TestNumericFactValueBoundaries() {
+    // 0 与 uint32 上限均可取；负数文本非十进制 -> nullopt（防御）。
+    const std::vector<IpcFact> zero = {{"user_idle_seconds", "0"}};
+    if (NumericFactValue(zero, "user_idle_seconds") != 0u) {
+        return false;
+    }
+    const std::vector<IpcFact> large = {{"user_idle_seconds", "4294967295"}};
+    if (NumericFactValue(large, "user_idle_seconds") != 4294967295u) {
+        return false;
+    }
+    const std::vector<IpcFact> negative = {{"user_idle_seconds", "-1"}};
+    return !NumericFactValue(negative, "user_idle_seconds").has_value();
 }
 
 bool TestFactsSchemaRejectsEmptyObserver() {
@@ -2319,6 +2355,8 @@ int wmain() {
         &TestFactsSchemaAcceptsUserIdleSeconds);
     run(L"facts schema rejects user idle seconds overflow",
         &TestFactsSchemaRejectsUserIdleSecondsOverflow);
+    run(L"numeric fact value lookup", &TestNumericFactValueLookup);
+    run(L"numeric fact value boundaries", &TestNumericFactValueBoundaries);
     run(L"facts schema rejects empty observer", &TestFactsSchemaRejectsEmptyObserver);
     run(L"facts schema token rules", &TestFactsSchemaTokenRules);
     run(L"facts token excluded from summary", &TestFactsTokenExcludedFromSummary);

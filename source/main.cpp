@@ -1455,6 +1455,9 @@ struct ServiceHostDemoState {
     std::size_t ipcLastFactCount = 0;
     bool ipcLastReplyAck = false;                 // 最近一次是否回 Ack
     std::string ipcLastFactSummary;               // 最近受理解析摘要（ASCII）
+    // ACT-006：最近受理 Agent 上报的用户活动观测（user_idle_seconds 已注册数值键；
+    // 未上报/不可解析为空，窗口汇总按 n/a 展示）。
+    std::optional<std::uint32_t> ipcLastUserIdleSeconds;
     std::wstring ipcExpectedToken;                // 会话凭据（IPC-005；空 = 不要求）
     // Safe Mode（IPC-010/013，Agent 受理门禁）：时间窗口内身份/凭据失败达阈值暂停受理新 Agent。
     std::optional<optimizer::service::SafeModeGuard> ipcSafeMode; // console demo 启用
@@ -1501,9 +1504,15 @@ optimizer::common::Result<void> ServiceWorkloadTick(
                         state.ipcLastFactSummary =
                             optimizer::ipc::FormatFactsSummary(parsed.Value());
                         state.ipcLastFactCount = parsed.Value().size();
+                        // ACT-006：宿主侧消费 Agent 用户活动观测（只读展示/编排种子；
+                        // 未上报该键按 n/a，不伪装在场）。
+                        state.ipcLastUserIdleSeconds =
+                            optimizer::ipc::NumericFactValue(
+                                parsed.Value(), "user_idle_seconds");
                     } else {
                         state.ipcLastFactSummary.clear();
                         state.ipcLastFactCount = 0;
+                        state.ipcLastUserIdleSeconds.reset();
                     }
                 }
                 return handled;
@@ -1545,6 +1554,14 @@ optimizer::common::Result<void> ServiceWorkloadTick(
         if (state.ipcLastFactCount > 0) {
             servedMessage +=
                 L" facts=" + std::to_wstring(state.ipcLastFactCount);
+            // ACT-006：逐客户端展示 Agent 上报的用户活动（该键只读展示，不做判定）。
+            servedMessage += L", user idle=";
+            if (state.ipcLastUserIdleSeconds) {
+                servedMessage +=
+                    std::to_wstring(*state.ipcLastUserIdleSeconds) + L" s";
+            } else {
+                servedMessage += L"n/a";
+            }
         }
         state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
                            servedMessage);
@@ -1767,6 +1784,14 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                     << L" bytes, " << state.ipcLastFactCount
                     << L" facts, reply "
                     << (state.ipcLastReplyAck ? L"ack" : L"error");
+            if (state.ipcLastFactCount > 0) {
+                ipcLine << L", user idle ";
+                if (state.ipcLastUserIdleSeconds) {
+                    ipcLine << *state.ipcLastUserIdleSeconds << L" s";
+                } else {
+                    ipcLine << L"n/a";
+                }
+            }
         } else {
             ipcLine << L"  ipc      : no Agent connected within window";
         }

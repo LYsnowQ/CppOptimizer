@@ -240,6 +240,21 @@ std::string FormatFactsSummary(std::span<const IpcFact> facts) {
     return out; // 防御：不可达（facts 非空时末尾已返回）。
 }
 
+std::optional<std::uint32_t> NumericFactValue(
+    std::span<const IpcFact> facts, std::string_view key) noexcept {
+    for (const IpcFact& fact : facts) {
+        if (fact.key != key) {
+            continue;
+        }
+        std::uint32_t value = 0;
+        if (!ParseUint32(fact.value, value)) {
+            return std::nullopt; // 防御：schema 层已拒畸形值，此处不解释
+        }
+        return value;
+    }
+    return std::nullopt; // 键缺失：消费方按“该周期未上报”处理
+}
+
 common::Result<void> ValidateFactsV1Schema(std::span<const IpcFact> facts) {
     bool hasNonCredential = false;
     bool hasTotal = false;
