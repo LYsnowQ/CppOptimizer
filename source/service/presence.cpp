@@ -29,6 +29,12 @@ PresenceState ClassifyPresence(
                                            : PresenceState::Away;
 }
 
+std::uint32_t EffectivePresenceAwaySeconds(
+    std::uint32_t policyAwayIdleSeconds,
+    std::uint32_t fallback) noexcept {
+    return policyAwayIdleSeconds > 0 ? policyAwayIdleSeconds : fallback;
+}
+
 HostPresenceTracker::HostPresenceTracker(Options options)
     : options_(std::move(options)) {}
 

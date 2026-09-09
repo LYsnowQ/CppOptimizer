@@ -31,6 +31,13 @@ enum class PresenceState {
     const std::optional<std::uint32_t>& idleSeconds,
     std::uint32_t awayAfterSeconds) noexcept;
 
+// 在场阈值纯函数：policyAwayIdleSeconds（[policy].user_away_idle_seconds）> 0 时采用之
+//（与 ACT-004 政策“用户在场”判定口径一致），否则回退 fallback（默认 15 秒）。
+// policy 为 0 = 政策侧不启用在场门禁，但展示侧仍需要一个非零阈值。
+[[nodiscard]] std::uint32_t EffectivePresenceAwaySeconds(
+    std::uint32_t policyAwayIdleSeconds,
+    std::uint32_t fallback) noexcept;
+
 // 单客户端在场账目（台账条目：最近一次上报的分类与空闲秒数）。
 struct ClientPresence {
     std::string key;                    // 客户端键（如 pid 文本）

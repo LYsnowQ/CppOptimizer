@@ -1615,11 +1615,14 @@ optimizer::common::Result<void> ServiceWorkloadTick(
             } else {
                 servedMessage += L"n/a";
             }
-            // SVC-006：记录进在场台账并标注分类（仅观测）。
+            // SVC-006/007：记录进在场台账并标注分类（仅观测）；客户端键含会话号，
+            // 区分同一 pid 在不同会话中的上报。
             if (state.ipcPresence) {
+                const std::string clientKey =
+                    std::to_string(result.clientPid) + ":" +
+                    std::to_string(result.clientSessionId);
                 const auto presence = state.ipcPresence->Record(
-                    std::to_string(result.clientPid),
-                    state.ipcLastUserIdleSeconds);
+                    clientKey, state.ipcLastUserIdleSeconds);
                 servedMessage += L" (" +
                     std::wstring(
                         optimizer::service::PresenceStateToString(presence)) +
@@ -1766,6 +1769,16 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         }
     }
 
+    // SVC-007：在场阈值与 ACT-004 政策“用户在场”口径一致——[policy].user_away_idle_seconds
+    // > 0（配置显式/默认给定时）采用其值，否则回退默认 15 秒（policy 0 = 政策不启用门禁，
+    // 展示侧仍需非零阈值）。仅 --ipc-facts 的在场台账使用。
+    std::uint32_t presenceAwaySeconds = kHostPresenceAwaySeconds;
+    if (consoleConfigSnapshot) {
+        presenceAwaySeconds = optimizer::service::EffectivePresenceAwaySeconds(
+            consoleConfigSnapshot->policy.userAwayIdleSeconds,
+            kHostPresenceAwaySeconds);
+    }
+
     ServiceHostDemoState state;
     state.logger.SetStderrSink();
     // IPC-018：恢复标记路径（会话开始写、正常结束清；异常退出留存供下次检测）。
@@ -1813,9 +1826,9 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         // 冷却到期自动恢复；参数取 [ipc] 配置（IPC-014），无配置时用状态机默认
         // （阈值 3、窗口 5s、冷却 2s、启用）——缺省行为零回归。仅影响 Agent 受理。
         state.ipcSafeMode.emplace(safeModeOptions);
-        // SVC-006：宿主在场台账（Agent user_idle 汇总；不参与 Safe Mode 触发判定）。
+        // SVC-006/007：宿主在场台账（Agent user_idle 汇总；不参与 Safe Mode 触发判定）。
         optimizer::service::HostPresenceTracker::Options presenceOptions;
-        presenceOptions.awayAfterSeconds = kHostPresenceAwaySeconds;
+        presenceOptions.awayAfterSeconds = presenceAwaySeconds;
         state.ipcPresence.emplace(presenceOptions);
         ipcOptions.verdictObserver =
             [&state](optimizer::ipc::IpcClientVerdict verdict) {
@@ -2090,16 +2103,35 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         }
         optimizer::common::WriteConsoleLine(ipcLine.str());
         if (state.ipcPresence) {
-            std::wostringstream presenceLine;
             const auto hostPresence = state.ipcPresence->Summary();
-            presenceLine
-                << L"  presence : "
-                << optimizer::service::PresenceStateToString(hostPresence)
-                << L" (clients " << state.ipcPresence->ClientCount()
-                << L", away threshold " << kHostPresenceAwaySeconds
-                << L" s idle)";
+            const auto clients = state.ipcPresence->Clients();
+            std::size_t presentCount = 0;
+            std::size_t awayCount = 0;
+            std::size_t unknownCount = 0;
+            for (const auto& client : clients) {
+                switch (client.state) {
+                    case optimizer::service::PresenceState::Present:
+                        ++presentCount;
+                        break;
+                    case optimizer::service::PresenceState::Away:
+                        ++awayCount;
+                        break;
+                    case optimizer::service::PresenceState::Unknown:
+                        ++unknownCount;
+                        break;
+                }
+            }
+            std::wostringstream presenceLine;
+            presenceLine << L"  presence : "
+                         << optimizer::service::PresenceStateToString(
+                                hostPresence)
+                         << L" (present " << presentCount << L" / away "
+                         << awayCount << L" / unknown " << unknownCount
+                         << L", clients " << clients.size()
+                         << L", away threshold " << presenceAwaySeconds
+                         << L" s idle)";
             optimizer::common::WriteConsoleLine(presenceLine.str());
-            for (const auto& client : state.ipcPresence->Clients()) {
+            for (const auto& client : clients) {
                 std::wostringstream clientLine;
                 clientLine << L"             ["
                            << std::wstring(client.key.begin(),

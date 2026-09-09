@@ -608,6 +608,14 @@ bool TestPresenceStateNames() {
                L"Unknown";
 }
 
+bool TestEffectivePresenceAwaySeconds() {
+    using optimizer::service::EffectivePresenceAwaySeconds;
+    // [policy].user_away_idle_seconds = 0（不启用）-> 回退默认阈值；> 0 -> 采用政策值。
+    return EffectivePresenceAwaySeconds(0, 15) == 15 &&
+           EffectivePresenceAwaySeconds(5, 15) == 5 &&
+           EffectivePresenceAwaySeconds(300, 15) == 300;
+}
+
 // ---------- 安装/卸载参数校验（不触碰真实 SCM） ----------
 
 bool TestInstallRejectsEmptyNames() {
@@ -931,6 +939,7 @@ int wmain() {
     run(L"presence tracker summary rules", &TestPresenceTrackerSummaryRules);
     run(L"presence tracker forget evicts", &TestPresenceTrackerForgetEvicts);
     run(L"presence state names", &TestPresenceStateNames);
+    run(L"presence effective away seconds", &TestEffectivePresenceAwaySeconds);
     run(L"console zero duration rejected", &TestConsoleZeroDurationRejected);
     run(L"install rejects empty names", &TestInstallRejectsEmptyNames);
     run(L"uninstall rejects empty name", &TestUninstallRejectsEmptyName);
