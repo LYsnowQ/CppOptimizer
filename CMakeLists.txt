@@ -44,6 +44,7 @@ add_executable(CppOptimizer
     source/priority/priority_booster.cpp
     source/process/process_watcher.cpp
     source/activity/user_activity.cpp
+    source/activity/raw_input.cpp
     source/service/service_host.cpp
     source/service/recovery_marker.cpp
     source/service/tray_host.cpp
@@ -365,6 +366,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         tests/activity_tests.cpp
         source/common/error.cpp
         source/activity/user_activity.cpp
+        source/activity/raw_input.cpp
     )
     target_include_directories(CppOptimizerActivityTests PRIVATE include)
     target_link_libraries(CppOptimizerActivityTests PRIVATE user32 wtsapi32)

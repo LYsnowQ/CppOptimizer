@@ -1,6 +1,7 @@
 ﻿#include "common/console_output.hpp"
 #include "common/error.hpp"
 #include "activity/user_activity.hpp"
+#include "activity/raw_input.hpp"
 #include "config/config_manager.hpp"
 #include "ipc/ipc_facts.hpp"
 #include "ipc/ipc_credentials.hpp"
@@ -1494,8 +1495,12 @@ struct ServiceHostDemoState {
     // IPC-018：上次异常退出且恢复未确认（recovery-state.json）——启动发现标记即锁存 Safe Mode。
     bool ipcRecoveryUnconfirmed = false;          // 上次会话未正常结束且未确认
     std::size_t ipcAnomalyEntries = 0;            // 窗口内离散异常触发次数（汇总）
-    // SVC-006：宿主在场台账（Agent user_idle 汇总；仅展示/记录，不参与 Safe Mode 触发判定）。
+    // SVC-006/007：宿主在场台账（Agent user_idle 汇总；仅展示/记录，不参与 Safe Mode 触发判定）。
     std::optional<optimizer::service::HostPresenceTracker> ipcPresence;
+    // SVC-008：宿主本机事件驱动输入（--tray 隐藏窗口 Raw Input；无窗口时轮询兜底）。
+    std::shared_ptr<optimizer::activity::RawInputEventSource> rawInput;
+    bool rawInputAttached = false; // 事件源已绑定并注册原始输入
+    std::shared_ptr<optimizer::activity::LastInputBackend> lastInputFallback;
 };
 
 optimizer::common::Result<void> ServiceWorkloadTick(
@@ -1511,6 +1516,29 @@ optimizer::common::Result<void> ServiceWorkloadTick(
         optimizer::memory::FormatBytes(s.availablePhysicalBytes) + L", load " +
         std::to_wstring(s.memoryLoadPercent) + L"%";
     state.logger.Write(optimizer::logger::LogLevel::Info, L"service", message);
+
+    // SVC-008：宿主本机在场（事件驱动输入优先；尚无事件/未绑定时回退 GetLastInputInfo
+    // 轮询；查询失败记 Unknown 不伪装）。放在受理门禁之前，Safe Mode 暂停期也持续更新。
+    if (state.ipcPresence && state.rawInput) {
+        std::optional<std::uint32_t> idleSeconds;
+        if (state.rawInputAttached) {
+            if (auto idle = state.rawInput->IdleDuration()) {
+                idleSeconds =
+                    static_cast<std::uint32_t>(idle->count() / 1000);
+            }
+        }
+        if (!idleSeconds && state.lastInputFallback) {
+            auto sample = state.lastInputFallback->Query();
+            if (sample) {
+                const std::int64_t idleMs =
+                    optimizer::activity::IdleMilliseconds(
+                        sample.Value().nowTick, sample.Value().lastInputTick);
+                idleSeconds =
+                    static_cast<std::uint32_t>(idleMs / 1000);
+            }
+        }
+        (void)state.ipcPresence->Record("host", idleSeconds);
+    }
 
     // SVC-002/003：受保护管道事实消费（--ipc-facts；常驻监听连续受理多客户端）。
     if (state.ipcEnabled && state.ipcSession) {
@@ -1956,9 +1984,24 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         optimizer::service::CreateWin32ScmBackend());
 
     // SVC-005：--tray 时加通知区图标；右键“退出”回调请求宿主优雅停止。
+    // SVC-008：--tray + --ipc-facts 时给托盘窗口挂事件驱动输入（Raw Input）——宿主本机
+    // 输入也计入在场台账（不再只依赖 Agent 上报）。
     std::shared_ptr<optimizer::service::TrayHost> trayHost;
     if (useTray) {
-        trayHost = std::make_shared<optimizer::service::TrayHost>();
+        optimizer::service::TrayHost::Options trayOptions;
+        if (ipcFacts) {
+            state.rawInput =
+                std::make_shared<optimizer::activity::RawInputEventSource>();
+            state.lastInputFallback =
+                optimizer::activity::CreateWin32LastInputBackend();
+            // 观察者指针指向 state.rawInput：托盘线程先于其析构 join（本函数内安全）。
+            trayOptions.messageObserver =
+                [source = state.rawInput.get()](UINT message, WPARAM wParam,
+                                                LPARAM lParam) -> bool {
+                    return source->OnWindowMessage(message, wParam, lParam);
+                };
+        }
+        trayHost = std::make_shared<optimizer::service::TrayHost>(trayOptions);
         auto started = trayHost->Start([&host] { host.RequestStop(); });
         if (!started) {
             const auto& error = started.ErrorValue();
@@ -1971,6 +2014,22 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                     recoveryMarkerPath);
             }
             return 2;
+        }
+        // SVC-008：绑定到托盘隐藏窗口并注册键盘/鼠标原始输入（非前台也接收）。
+        if (ipcFacts && state.rawInput) {
+            auto attached =
+                state.rawInput->Attach(trayHost->WindowHandle());
+            state.rawInputAttached = attached.HasValue();
+            if (!attached) {
+                const auto& error = attached.ErrorValue();
+                state.logger.Write(
+                    optimizer::logger::LogLevel::Info, L"service",
+                    L"input : raw sink attach failed, fallback to polling [" +
+                        std::wstring(optimizer::common::ToString(
+                            error.domain)) +
+                        L":" + std::to_wstring(error.code) + L"] " +
+                        error.message);
+            }
         }
     }
 
@@ -2102,6 +2161,11 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             ipcLine << L"  ipc      : no Agent connected within window";
         }
         optimizer::common::WriteConsoleLine(ipcLine.str());
+        if (state.rawInputAttached) {
+            optimizer::common::WriteConsoleLine(
+                L"  input    : raw input sink attached (event-driven, "
+                L"keyboard+mouse)");
+        }
         if (state.ipcPresence) {
             const auto hostPresence = state.ipcPresence->Summary();
             const auto clients = state.ipcPresence->Clients();

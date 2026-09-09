@@ -530,6 +530,36 @@ bool TestTrayDoubleStartRejected() {
            second.ErrorValue().domain == ErrorDomain::Validation;
 }
 
+bool TestTrayMessageObserverInvoked() {
+    // 自定义消息观察（SVC-008 用）：托盘窗口收到 WM_APP 类消息时回调（UI 线程）且可拦截。
+    auto fake = std::make_shared<FakeTrayIconBackend>();
+    std::atomic<int> observed{0};
+    optimizer::service::TrayHost::Options options;
+    options.messageObserver =
+        [&observed](UINT message, WPARAM, LPARAM) -> bool {
+            if (message == WM_APP) {
+                ++observed;
+                return true; // 已处理：跳过默认处理
+            }
+            return false;
+        };
+    optimizer::service::TrayHost tray(options);
+    if (!tray.Start([] {}, fake)) {
+        return false;
+    }
+    void* window = tray.WindowHandle();
+    if (window == nullptr) {
+        tray.Stop();
+        return false;
+    }
+    const BOOL posted = ::PostMessageW(static_cast<HWND>(window), WM_APP, 0, 0);
+    for (int i = 0; i < 500 && observed.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    tray.Stop();
+    return posted && observed.load() == 1;
+}
+
 // ---------- 宿主在场台账（纯逻辑，可注入时钟） ----------
 
 bool TestPresenceClassify() {
@@ -935,6 +965,7 @@ int wmain() {
     run(L"tray menu exit invokes callback and stops", &TestTrayMenuExitInvokesCallbackAndStops);
     run(L"tray add failure reported", &TestTrayAddFailureReported);
     run(L"tray double start rejected", &TestTrayDoubleStartRejected);
+    run(L"tray message observer invoked", &TestTrayMessageObserverInvoked);
     run(L"presence classify", &TestPresenceClassify);
     run(L"presence tracker summary rules", &TestPresenceTrackerSummaryRules);
     run(L"presence tracker forget evicts", &TestPresenceTrackerForgetEvicts);

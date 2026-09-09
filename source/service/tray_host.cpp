@@ -226,12 +226,14 @@ LRESULT CALLBACK TrayHost::WindowProc(HWND hwnd, UINT message,
         case kTrayCallbackMessage:
             if (self != nullptr && LOWORD(lParam) == WM_RBUTTONUP) {
                 self->ShowTrayMenu(hwnd); // 通知区图标右键
+                return 0;
             }
             break;
         case WM_COMMAND:
             if (self != nullptr &&
                 LOWORD(wParam) == kTrayExitCommandId) {
                 self->RequestExitFromUiThread();
+                return 0;
             }
             break;
         case WM_CLOSE:
@@ -240,12 +242,17 @@ LRESULT CALLBACK TrayHost::WindowProc(HWND hwnd, UINT message,
             } else {
                 ::DestroyWindow(hwnd);
             }
-            break;
+            return 0; // 窗口已销毁：不再走默认 WM_CLOSE 处理
         case WM_DESTROY:
             ::PostQuitMessage(0);
-            break;
+            return 0;
         default:
             break;
+    }
+    // 自定义消息观察（可选项）：默认处理前转交外部订阅者。
+    if (self != nullptr && self->options_.messageObserver &&
+        self->options_.messageObserver(message, wParam, lParam)) {
+        return 0; // 观察者已处理（如 WM_INPUT 输入事件）
     }
     return ::DefWindowProcW(hwnd, message, wParam, lParam);
 }

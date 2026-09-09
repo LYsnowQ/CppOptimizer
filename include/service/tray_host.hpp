@@ -61,6 +61,11 @@ public:
         std::wstring windowClass = L"CppOptimizerTrayWindow";
         std::wstring windowTitle = L"CppOptimizer R0 host";
         std::wstring tooltip = L"CppOptimizer R0 host - right-click to exit";
+        // 可选自定义消息观察（UI 线程，默认处理前）：返回 true = 已处理（跳过默认处理）。
+        // 用于把宿主窗口消息（如 WM_INPUT 原始输入）转交外部订阅者；托盘自身消息
+        //（托盘回调/WM_COMMAND/退出/关闭）优先级更高，不经观察者。
+        std::function<bool(UINT message, WPARAM wParam, LPARAM lParam)>
+            messageObserver = nullptr;
     };
 
     enum class State {

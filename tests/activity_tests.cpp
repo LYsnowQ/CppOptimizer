@@ -1,9 +1,11 @@
 #include "activity/user_activity.hpp"
+#include "activity/raw_input.hpp"
 
 #include <cstdint>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace {
@@ -632,6 +634,52 @@ bool TestForegroundMixedSequenceCounts() {
            session->queryCount == 4 && foreground->queryCount == 3;
 }
 
+// ---------- SVC-008：事件驱动输入（Raw Input 观察源，无窗口纯消息路径） ----------
+
+bool TestRawInputCountsInputEvents() {
+    using optimizer::activity::RawInputEventSource;
+    constexpr std::uint32_t kWmInput = 0x00FF;
+    constexpr std::uint32_t kWmKeyDown = 0x0100;
+    RawInputEventSource source;
+    if (!source.OnWindowMessage(kWmInput, 0, 0) ||
+        source.InputEventCount() != 1) {
+        return false;
+    }
+    if (!source.OnWindowMessage(kWmInput, 0, 0) ||
+        source.InputEventCount() != 2) {
+        return false;
+    }
+    if (source.OnWindowMessage(kWmKeyDown, 0, 0) ||
+        source.InputEventCount() != 2) {
+        return false; // 非 WM_INPUT 不处理、不计数
+    }
+    return !source.IsAttached();
+}
+
+bool TestRawInputIdleBeforeAndAfterEvent() {
+    using optimizer::activity::RawInputEventSource;
+    RawInputEventSource source;
+    if (source.IdleDuration()) {
+        return false; // 尚无事件：nullopt，不伪装“刚有输入”
+    }
+    (void)source.OnWindowMessage(0x00FF, 0, 0); // 事件后必有非负时长
+    const auto idle = source.IdleDuration();
+    return idle.has_value(); // 事件后必有非负时长
+}
+
+bool TestRawInputAttachValidationAndDetachIdempotent() {
+    using optimizer::activity::RawInputEventSource;
+    RawInputEventSource source;
+    if (source.Attach(nullptr)) {
+        return false; // 空 hwnd 拒绝
+    }
+    if (source.IsAttached()) {
+        return false;
+    }
+    source.Detach(); // 未绑定 Detach 为空操作
+    return !source.IsAttached() && source.InputEventCount() == 0;
+}
+
 } // namespace
 
 int wmain() {
@@ -678,5 +726,8 @@ int wmain() {
     run(L"foreground session failure degrades", &TestForegroundSessionFailureDegrades);
     run(L"foreground rejects zero samples", &TestForegroundRejectsZeroSamples);
     run(L"foreground mixed sequence counts", &TestForegroundMixedSequenceCounts);
+    run(L"raw input counts input events", &TestRawInputCountsInputEvents);
+    run(L"raw input idle before/after event", &TestRawInputIdleBeforeAndAfterEvent);
+    run(L"raw input attach validation and detach", &TestRawInputAttachValidationAndDetachIdempotent);
     return failed == 0 ? 0 : 1;
 }
