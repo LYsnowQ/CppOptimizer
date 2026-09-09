@@ -1,6 +1,8 @@
 ﻿#include "service/service_host.hpp"
 #include "service/recovery_marker.hpp"
+#include "service/tray_host.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -426,6 +428,107 @@ bool TestConsoleZeroDurationRejected() {
            result.ErrorValue().domain == ErrorDomain::Validation;
 }
 
+// ---------- 托盘宿主（可注入图标后端，不触碰真实通知区） ----------
+
+// 可注入托盘图标后端：记录调用序列，可注入添加失败。
+class FakeTrayIconBackend : public optimizer::service::TrayIconBackend {
+public:
+    int addCalls = 0;
+    int removeCalls = 0;
+    bool failAdd = false;
+
+    Result<void> AddIcon(void* hwnd, const std::wstring&) override {
+        (void)hwnd;
+        ++addCalls; // 记录尝试次数（成功/失败均计入）
+        if (failAdd) {
+            return Result<void>::Failure(
+                Error::Validation("fake-tray", L"injected add failure"));
+        }
+        return Result<void>::Success();
+    }
+
+    void RemoveIcon(void*) noexcept override { ++removeCalls; }
+};
+
+bool TestTrayStartStopLifecycle() {
+    auto fake = std::make_shared<FakeTrayIconBackend>();
+    int exits = 0;
+    optimizer::service::TrayHost tray(optimizer::service::TrayHost::Options{});
+    const auto start = tray.Start([&exits] { ++exits; }, fake);
+    if (!start ||
+        tray.GetState() != optimizer::service::TrayHost::State::Running ||
+        !tray.IsIconAdded()) {
+        tray.Stop();
+        return false;
+    }
+    tray.Stop();
+    const bool clean =
+        tray.GetState() == optimizer::service::TrayHost::State::Idle &&
+        !tray.IsIconAdded() && exits == 0 && fake->addCalls == 1 &&
+        fake->removeCalls == 1;
+    if (clean) {
+        // 停止后可再次启动（窗口类已注销、线程已回收）。
+        const auto second = tray.Start([] {}, fake);
+        if (second) {
+            tray.Stop();
+            return fake->addCalls == 2;
+        }
+    }
+    return clean;
+}
+
+bool TestTrayMenuExitInvokesCallbackAndStops() {
+    auto fake = std::make_shared<FakeTrayIconBackend>();
+    std::atomic<int> exits{0};
+    optimizer::service::TrayHost tray(optimizer::service::TrayHost::Options{});
+    if (!tray.Start([&exits] { ++exits; }, fake)) {
+        return false;
+    }
+    void* window = tray.WindowHandle();
+    if (window == nullptr) {
+        tray.Stop();
+        return false;
+    }
+    // 投递退出命令（模拟右键菜单选中“退出”的 WM_COMMAND 路径；真实弹窗留人工点验）。
+    const BOOL posted = ::PostMessageW(
+        static_cast<HWND>(window), WM_COMMAND,
+        optimizer::service::kTrayExitCommandId, 0);
+    for (int i = 0; i < 1000 && exits.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    tray.Stop(); // 幂等收尾（菜单路径线程已自退出或随本调用退出）
+    return posted && exits.load() == 1 && fake->addCalls == 1 &&
+           fake->removeCalls >= 1 &&
+           tray.GetState() == optimizer::service::TrayHost::State::Idle;
+}
+
+bool TestTrayAddFailureReported() {
+    auto fake = std::make_shared<FakeTrayIconBackend>();
+    fake->failAdd = true;
+    optimizer::service::TrayHost tray(optimizer::service::TrayHost::Options{});
+    const auto start = tray.Start([] {}, fake);
+    // 添加失败：Start 报错、无图标、不遗留线程。
+    if (start) {
+        return false;
+    }
+    return fake->addCalls == 1 && fake->removeCalls == 0 &&
+           tray.GetState() == optimizer::service::TrayHost::State::Idle &&
+           !tray.IsIconAdded();
+}
+
+bool TestTrayDoubleStartRejected() {
+    auto fake = std::make_shared<FakeTrayIconBackend>();
+    optimizer::service::TrayHost tray(optimizer::service::TrayHost::Options{});
+    const auto first = tray.Start([] {}, fake);
+    if (!first) {
+        return false;
+    }
+    const auto second = tray.Start([] {}, fake);
+    tray.Stop();
+    return !second &&
+           second.ErrorValue().domain == ErrorDomain::Validation;
+}
+
 // ---------- 安装/卸载参数校验（不触碰真实 SCM） ----------
 
 bool TestInstallRejectsEmptyNames() {
@@ -741,6 +844,10 @@ int wmain() {
     run(L"request stop ends console early", &TestRequestStopEndsConsoleEarly);
     run(L"request stop idempotent", &TestRequestStopIdempotent);
     run(L"console resident runs until stop", &TestConsoleResidentRunsUntilStop);
+    run(L"tray start stop lifecycle", &TestTrayStartStopLifecycle);
+    run(L"tray menu exit invokes callback and stops", &TestTrayMenuExitInvokesCallbackAndStops);
+    run(L"tray add failure reported", &TestTrayAddFailureReported);
+    run(L"tray double start rejected", &TestTrayDoubleStartRejected);
     run(L"console zero duration rejected", &TestConsoleZeroDurationRejected);
     run(L"install rejects empty names", &TestInstallRejectsEmptyNames);
     run(L"uninstall rejects empty name", &TestUninstallRejectsEmptyName);

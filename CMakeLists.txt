@@ -46,6 +46,7 @@ add_executable(CppOptimizer
     source/activity/user_activity.cpp
     source/service/service_host.cpp
     source/service/recovery_marker.cpp
+    source/service/tray_host.cpp
     source/ipc/ipc_protocol.cpp
     source/ipc/ipc_transport.cpp
     source/ipc/ipc_session.cpp
@@ -60,6 +61,7 @@ target_link_libraries(CppOptimizer PRIVATE
     psapi
     advapi32
     wtsapi32
+    shell32
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
 )
@@ -319,9 +321,10 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         source/common/error.cpp
         source/service/service_host.cpp
         source/service/recovery_marker.cpp
+        source/service/tray_host.cpp
     )
     target_include_directories(CppOptimizerServiceTests PRIVATE include)
-    target_link_libraries(CppOptimizerServiceTests PRIVATE advapi32)
+    target_link_libraries(CppOptimizerServiceTests PRIVATE advapi32 shell32)
     target_compile_features(CppOptimizerServiceTests PRIVATE cxx_std_20)
     target_compile_definitions(CppOptimizerServiceTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX

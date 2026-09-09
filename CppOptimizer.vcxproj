@@ -61,7 +61,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;wtsapi32.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;wtsapi32.lib;shell32.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -87,7 +87,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;wtsapi32.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;wtsapi32.lib;shell32.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -114,6 +114,7 @@
     <ClInclude Include="include\process\process_watcher.hpp" />
     <ClInclude Include="include\activity\user_activity.hpp" />
     <ClInclude Include="include\service\service_host.hpp" />
+    <ClInclude Include="include\service\tray_host.hpp" />
     <ClInclude Include="include\ipc\ipc_protocol.hpp" />
     <ClInclude Include="include\ipc\ipc_transport.hpp" />
     <ClInclude Include="include\ipc\ipc_session.hpp" />
@@ -138,6 +139,7 @@
     <ClCompile Include="source\activity\user_activity.cpp" />
     <ClCompile Include="source\service\service_host.cpp" />
     <ClCompile Include="source\service\recovery_marker.cpp" />
+    <ClCompile Include="source\service\tray_host.cpp" />
     
     
     <ClCompile Include="source\ipc\ipc_protocol.cpp" />

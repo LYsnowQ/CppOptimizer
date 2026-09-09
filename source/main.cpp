@@ -19,6 +19,7 @@
 #include "process/process_watcher.hpp"
 #include "service/service_host.hpp"
 #include "service/recovery_marker.hpp"
+#include "service/tray_host.hpp"
 
 #include <windows.h>
 
@@ -1654,7 +1655,7 @@ std::filesystem::path DefaultHostConfigPath() noexcept {
 }
 
 int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
-    // --service console <s|run> [config.toml] [--ipc-facts] [--confirm-recovery]：
+    // --service console <s|run> [config.toml] [--ipc-facts] [--confirm-recovery] [--tray]：
     // 控制台托管——前台、Ctrl+C 优雅停止；<s> 为 1..60 秒有界窗口，run 表示常驻
     //（无时间上限，直到 Ctrl+C/关闭信号；异常退出由恢复标记在下一次启动检测）。可选
     // --ipc-facts 在运行期间同时作为受保护管道服务端常驻受理 Agent 事实（SVC-002/003，R0）。
@@ -1683,12 +1684,15 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     }
     bool ipcFacts = false;
     bool confirmRecovery = false;
+    bool useTray = false; // SVC-005：--tray 通知区图标（右键“退出”停止宿主）
     for (int i = flagsStart; i < argc; ++i) {
         const std::wstring_view arg(argv[i]);
         if (arg == L"--ipc-facts") {
             ipcFacts = true;
         } else if (arg == L"--confirm-recovery") {
             confirmRecovery = true;
+        } else if (arg == L"--tray") {
+            useTray = true;
         }
     }
 
@@ -1918,6 +1922,25 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         [&state] { return ServiceWorkloadTick(state); }, std::move(options),
         optimizer::service::CreateWin32ScmBackend());
 
+    // SVC-005：--tray 时加通知区图标；右键“退出”回调请求宿主优雅停止。
+    std::shared_ptr<optimizer::service::TrayHost> trayHost;
+    if (useTray) {
+        trayHost = std::make_shared<optimizer::service::TrayHost>();
+        auto started = trayHost->Start([&host] { host.RequestStop(); });
+        if (!started) {
+            const auto& error = started.ErrorValue();
+            std::wcerr << L"  tray start failed ["
+                       << optimizer::common::ToString(error.domain) << L":"
+                       << error.code << L"] " << error.message << L"\n";
+            if (ipcFacts) {
+                // 会话未真正开始：不留“异常退出”标记（避免误导下次启动）。
+                (void)optimizer::service::ClearRecoveryMarker(
+                    recoveryMarkerPath);
+            }
+            return 2;
+        }
+    }
+
     std::wostringstream header;
     if (resident) {
         header << L"Service host (console mode, R0 workload, resident until "
@@ -1992,12 +2015,19 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             }
         }
     }
+    if (useTray) {
+        optimizer::common::WriteConsoleLine(
+            L"  tray     : icon in notification area (right-click to exit)");
+    }
     optimizer::common::WriteConsoleLine(
         resident ? L"  stop     : Ctrl+C or console close"
                  : L"  stop     : Ctrl+C or timeout");
     const auto result =
         resident ? host.RunConsole(std::nullopt)
                  : host.RunConsole(std::chrono::seconds(seconds));
+    if (trayHost) {
+        trayHost->Stop(); // 托盘线程收尾（幂等；菜单退出路径线程已自退出）
+    }
     if (state.ipcSession) {
         state.ipcSession->Close(); // 结束常驻监听会话（幂等）
     }
@@ -2061,7 +2091,8 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     }
     std::wostringstream stoppedLine;
     stoppedLine << L"  stopped  : "
-                << (host.IsStopRequested() ? L"user (Ctrl+C)" : L"timeout");
+                << (host.IsStopRequested() ? L"user (Ctrl+C or tray exit)"
+                                           : L"timeout");
     optimizer::common::WriteConsoleLine(stoppedLine.str());
     return 0;
 }
@@ -3057,6 +3088,8 @@ void PrintUsage() {
         << L"                             --ipc-facts also serves Agent facts frames via the\n"
         << L"                             protected pipe continuously\n"
         << L"                             (optional session token / user SID allow-list).\n"
+        << L"                             --tray adds a notification-area icon whose\n"
+        << L"                             right-click Exit menu stops the host.\n"
         << L"                             --confirm-recovery (IPC-018) acknowledges an\n"
         << L"                             unclean previous run (recovery-state.json marker)\n"
         << L"                             and clears the intake Safe Mode latch.\n"
