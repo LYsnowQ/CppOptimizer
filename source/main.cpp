@@ -1501,6 +1501,8 @@ struct ServiceHostDemoState {
     std::shared_ptr<optimizer::activity::RawInputEventSource> rawInput;
     bool rawInputAttached = false; // 事件源已绑定并注册原始输入
     std::shared_ptr<optimizer::activity::LastInputBackend> lastInputFallback;
+    // SVC-009：在场汇总变化次数（变化事件回调计数，供窗口汇总展示）。
+    std::size_t presenceTransitions = 0;
 };
 
 optimizer::common::Result<void> ServiceWorkloadTick(
@@ -1567,6 +1569,10 @@ optimizer::common::Result<void> ServiceWorkloadTick(
                 state.logger.Write(optimizer::logger::LogLevel::Info,
                                    L"service",
                                    L"ipc  : Safe Mode 冷却中，暂停受理 Agent");
+            }
+            // SVC-009：暂停期也推进在场汇总（宿主事件输入行仍可能更新）。
+            if (state.ipcPresence) {
+                (void)state.ipcPresence->Summary();
             }
             return optimizer::common::Result<void>::Success();
         }
@@ -1659,6 +1665,10 @@ optimizer::common::Result<void> ServiceWorkloadTick(
         }
         state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
                            servedMessage);
+    }
+    // SVC-009：每 tick 末推进在场汇总（记录完本 tick 全部上报后触发变化事件）。
+    if (state.ipcPresence) {
+        (void)state.ipcPresence->Summary();
     }
     return optimizer::common::Result<void>::Success();
 }
@@ -1858,6 +1868,20 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         optimizer::service::HostPresenceTracker::Options presenceOptions;
         presenceOptions.awayAfterSeconds = presenceAwaySeconds;
         state.ipcPresence.emplace(presenceOptions);
+        // SVC-009：在场汇总变化事件（时间线日志 + 计数；只作观测/记录）。
+        state.ipcPresence->SetOnChange(
+            [&state](optimizer::service::PresenceState from,
+                     optimizer::service::PresenceState to) {
+                ++state.presenceTransitions;
+                state.logger.Write(
+                    optimizer::logger::LogLevel::Info, L"service",
+                    L"presence : " +
+                        std::wstring(
+                            optimizer::service::PresenceStateToString(from)) +
+                        L" -> " +
+                        std::wstring(
+                            optimizer::service::PresenceStateToString(to)));
+            });
         ipcOptions.verdictObserver =
             [&state](optimizer::ipc::IpcClientVerdict verdict) {
                 auto& guard = *state.ipcSafeMode;
@@ -2193,7 +2217,8 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                          << awayCount << L" / unknown " << unknownCount
                          << L", clients " << clients.size()
                          << L", away threshold " << presenceAwaySeconds
-                         << L" s idle)";
+                         << L" s idle, transitions "
+                         << state.presenceTransitions << L")";
             optimizer::common::WriteConsoleLine(presenceLine.str());
             for (const auto& client : clients) {
                 std::wostringstream clientLine;

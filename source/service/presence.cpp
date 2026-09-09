@@ -67,25 +67,20 @@ PresenceState HostPresenceTracker::Record(
     return state;
 }
 
-PresenceState HostPresenceTracker::Summary() noexcept {
-    PruneExpired();
-    bool anyPresent = false;
-    bool anyAway = false;
+void HostPresenceTracker::SetOnChange(ChangeCallback callback) noexcept {
+    onChange_ = std::move(callback);
+}
+
+PresenceState HostPresenceTracker::ComputeSummary() const noexcept {
     bool anyKnown = false;
+    bool anyPresent = false;
     for (const auto& [key, entry] : entries_) {
         (void)key;
-        switch (entry.state) {
-            case PresenceState::Present:
-                anyPresent = true;
-                break;
-            case PresenceState::Away:
-                anyAway = true;
-                break;
-            case PresenceState::Unknown:
-                break;
-        }
         if (entry.state != PresenceState::Unknown) {
             anyKnown = true;
+            if (entry.state == PresenceState::Present) {
+                anyPresent = true;
+            }
         }
     }
     if (!anyKnown) {
@@ -93,6 +88,19 @@ PresenceState HostPresenceTracker::Summary() noexcept {
     }
     // “有人在”语义：任一在场即 Present，否则全部 Away -> Away。
     return anyPresent ? PresenceState::Present : PresenceState::Away;
+}
+
+PresenceState HostPresenceTracker::Summary() noexcept {
+    PruneExpired();
+    const PresenceState current = ComputeSummary();
+    if (current != lastSummary_) {
+        const PresenceState previous = lastSummary_;
+        lastSummary_ = current;
+        if (onChange_) {
+            onChange_(previous, current); // 变化事件：在场度时间线（仅观测）
+        }
+    }
+    return current;
 }
 
 std::vector<ClientPresence> HostPresenceTracker::Clients() noexcept {

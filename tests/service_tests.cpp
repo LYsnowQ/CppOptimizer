@@ -638,6 +638,46 @@ bool TestPresenceStateNames() {
                L"Unknown";
 }
 
+bool TestPresenceTrackerChangeEvents() {
+    using optimizer::service::HostPresenceTracker;
+    using optimizer::service::PresenceState;
+    const auto base = std::chrono::steady_clock::now();
+    long elapsedMs = 0;
+    HostPresenceTracker::Options options;
+    options.now = [&base, &elapsedMs] {
+        return base + std::chrono::milliseconds(elapsedMs);
+    };
+    HostPresenceTracker tracker(options);
+    std::vector<PresenceState> events; // 记录每次变化的“新状态”
+    tracker.SetOnChange([&events](PresenceState, PresenceState to) {
+        events.push_back(to);
+    });
+    if (tracker.Summary() != PresenceState::Unknown || !events.empty()) {
+        return false; // 空台账 Unknown 且不触发
+    }
+    (void)tracker.Record("a", std::uint32_t{1});
+    if (tracker.Summary() != PresenceState::Present || events.size() != 1 ||
+        events[0] != PresenceState::Present) {
+        return false; // Unknown -> Present
+    }
+    (void)tracker.Summary(); // 状态未变：不重复触发
+    if (events.size() != 1) {
+        return false;
+    }
+    (void)tracker.Record("a", std::uint32_t{40});
+    if (tracker.Summary() != PresenceState::Away || events.size() != 2 ||
+        events[1] != PresenceState::Away) {
+        return false; // Present -> Away
+    }
+    (void)tracker.Record("b", std::uint32_t{2});
+    if (tracker.Summary() != PresenceState::Present || events.size() != 3 ||
+        events[2] != PresenceState::Present) {
+        return false; // Away -> Present（任一在场）
+    }
+    (void)tracker.Record("c", std::nullopt); // Unknown 不影响汇总：无事件
+    return tracker.Summary() == PresenceState::Present && events.size() == 3;
+}
+
 bool TestEffectivePresenceAwaySeconds() {
     using optimizer::service::EffectivePresenceAwaySeconds;
     // [policy].user_away_idle_seconds = 0（不启用）-> 回退默认阈值；> 0 -> 采用政策值。
@@ -969,6 +1009,7 @@ int wmain() {
     run(L"presence classify", &TestPresenceClassify);
     run(L"presence tracker summary rules", &TestPresenceTrackerSummaryRules);
     run(L"presence tracker forget evicts", &TestPresenceTrackerForgetEvicts);
+    run(L"presence tracker change events", &TestPresenceTrackerChangeEvents);
     run(L"presence state names", &TestPresenceStateNames);
     run(L"presence effective away seconds", &TestEffectivePresenceAwaySeconds);
     run(L"console zero duration rejected", &TestConsoleZeroDurationRejected);
