@@ -1749,6 +1749,11 @@ std::filesystem::path DefaultHostConfigPath() noexcept {
     return root / L"CppOptimizer" / L"config.local.toml";
 }
 
+// SVC-010：在场转移时间线文件（每用户数据目录，与恢复标记同目录）。
+std::filesystem::path DefaultPresenceTimelinePath() noexcept {
+    return DefaultHostConfigPath().parent_path() / L"presence-timeline.log";
+}
+
 int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     // --service console <s|run> [config.toml] [--ipc-facts] [--confirm-recovery] [--tray]：
     // 控制台托管——前台、Ctrl+C 优雅停止；<s> 为 1..60 秒有界窗口，run 表示常驻
@@ -1919,6 +1924,9 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                         L" -> " +
                         std::wstring(
                             optimizer::service::PresenceStateToString(to)));
+                // SVC-010：转移同时追加到时间线文件（尽力而为，失败不阻断运行）。
+                (void)optimizer::service::AppendPresenceTransitionLine(
+                    DefaultPresenceTimelinePath(), from, to);
             });
         ipcOptions.verdictObserver =
             [&state](optimizer::ipc::IpcClientVerdict verdict) {
@@ -2278,6 +2286,13 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                 }
                 optimizer::common::WriteConsoleLine(clientLine.str());
             }
+        }
+        if (state.presenceTransitions > 0) {
+            std::wostringstream timelineLine;
+            timelineLine << L"  timeline : " << state.presenceTransitions
+                         << L" presence transition(s) appended to "
+                         << DefaultPresenceTimelinePath().wstring();
+            optimizer::common::WriteConsoleLine(timelineLine.str());
         }
         if (state.ipcSafeMode) {
             std::wostringstream safeLine;

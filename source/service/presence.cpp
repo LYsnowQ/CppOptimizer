@@ -1,5 +1,16 @@
 ﻿#include "service/presence.hpp"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <ctime>
+#include <fstream>
+#include <string>
 #include <utility>
 
 namespace optimizer::service {
@@ -33,6 +44,69 @@ std::uint32_t EffectivePresenceAwaySeconds(
     std::uint32_t policyAwayIdleSeconds,
     std::uint32_t fallback) noexcept {
     return policyAwayIdleSeconds > 0 ? policyAwayIdleSeconds : fallback;
+}
+
+namespace {
+
+// 本地时间戳（ASCII "YYYY-MM-DD HH:MM:SS"）。localtime_s 失败返回空串（行仍可写）。
+std::string LocalTimestampAscii() noexcept {
+    const auto now = std::chrono::system_clock::to_time_t(
+        std::chrono::system_clock::now());
+    std::tm local{};
+    if (::localtime_s(&local, &now) != 0) {
+        return "";
+    }
+    char buffer[32]{};
+    if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &local) ==
+        0) {
+        return "";
+    }
+    return std::string(buffer);
+}
+
+} // namespace
+
+common::Result<void> AppendPresenceTransitionLine(
+    const std::filesystem::path& path, PresenceState from,
+    PresenceState to) noexcept {
+    if (path.empty()) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "AppendPresenceTransitionLine", L"路径不能为空"));
+    }
+    std::error_code ec;
+    const auto parent = path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            return common::Result<void>::Failure(common::Error::FromWin32(
+                static_cast<std::uint32_t>(ec.value()),
+                "create_directories(presence timeline)"));
+        }
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    if (!out) {
+        return common::Result<void>::Failure(common::Error::FromWin32(
+            static_cast<std::uint32_t>(::GetLastError()),
+            "open presence timeline for append"));
+    }
+    // 状态名为 ASCII：逐宽字符收窄直写（与文件 UTF-8 兼容，避免窄化告警）。
+    const auto narrowAscii = [](const wchar_t* text) {
+        std::string out;
+        for (const wchar_t* p = text; p != nullptr && *p != L'\0'; ++p) {
+            out.push_back(static_cast<char>(*p));
+        }
+        return out;
+    };
+    out << LocalTimestampAscii() << " "
+        << narrowAscii(PresenceStateToString(from)) << " -> "
+        << narrowAscii(PresenceStateToString(to)) << "\n";
+    out.flush();
+    if (!out) {
+        return common::Result<void>::Failure(common::Error::FromWin32(
+            static_cast<std::uint32_t>(::GetLastError()),
+            "flush presence timeline"));
+    }
+    return common::Result<void>::Success();
 }
 
 HostPresenceTracker::HostPresenceTracker(Options options)

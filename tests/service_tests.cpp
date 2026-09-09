@@ -678,6 +678,43 @@ bool TestPresenceTrackerChangeEvents() {
     return tracker.Summary() == PresenceState::Present && events.size() == 3;
 }
 
+bool TestPresenceTimelineAppend() {
+    using optimizer::service::AppendPresenceTransitionLine;
+    using optimizer::service::PresenceState;
+    std::error_code ec;
+    const auto root = std::filesystem::temp_directory_path(ec);
+    if (ec) {
+        return false;
+    }
+    const auto path = root /
+        (L"cpo_presence_timeline_" + std::to_wstring(::GetCurrentProcessId()) +
+         L".log");
+    std::filesystem::remove(path, ec);
+    ec.clear();
+    // 空路径拒绝；追加两条；内容可读；目录当文件路径时如实失败。
+    if (AppendPresenceTransitionLine({}, PresenceState::Unknown,
+                                     PresenceState::Present)) {
+        return false;
+    }
+    if (!AppendPresenceTransitionLine(path, PresenceState::Unknown,
+                                      PresenceState::Present) ||
+        !AppendPresenceTransitionLine(path, PresenceState::Present,
+                                      PresenceState::Away)) {
+        return false;
+    }
+    std::ifstream in(path, std::ios::binary);
+    std::string line1, line2;
+    std::getline(in, line1);
+    std::getline(in, line2);
+    const bool ok = !line1.empty() && line1.find("Unknown -> Present") !=
+                        std::string::npos &&
+                    line2.find("Present -> Away") != std::string::npos &&
+                    !AppendPresenceTransitionLine(root, PresenceState::Away,
+                                                  PresenceState::Unknown);
+    std::filesystem::remove(path, ec);
+    return ok;
+}
+
 bool TestEffectivePresenceAwaySeconds() {
     using optimizer::service::EffectivePresenceAwaySeconds;
     // [policy].user_away_idle_seconds = 0（不启用）-> 回退默认阈值；> 0 -> 采用政策值。
@@ -1010,6 +1047,7 @@ int wmain() {
     run(L"presence tracker summary rules", &TestPresenceTrackerSummaryRules);
     run(L"presence tracker forget evicts", &TestPresenceTrackerForgetEvicts);
     run(L"presence tracker change events", &TestPresenceTrackerChangeEvents);
+    run(L"presence timeline append", &TestPresenceTimelineAppend);
     run(L"presence state names", &TestPresenceStateNames);
     run(L"presence effective away seconds", &TestEffectivePresenceAwaySeconds);
     run(L"console zero duration rejected", &TestConsoleZeroDurationRejected);

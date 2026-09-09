@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <optional>
@@ -37,6 +38,13 @@ enum class PresenceState {
 [[nodiscard]] std::uint32_t EffectivePresenceAwaySeconds(
     std::uint32_t policyAwayIdleSeconds,
     std::uint32_t fallback) noexcept;
+
+// 在场转移时间线（SVC-010）：把一次宿主在场汇总状态转移追加写入文件（一行一条：
+// 本地时间戳 + from -> to，ASCII 可读）。文件不存在则创建（父目录自动创建）；追加失败如实返回
+// Failure（不伪装记录成功）。供常驻编排回看“何时有人在/何时离场”时间线。
+[[nodiscard]] common::Result<void> AppendPresenceTransitionLine(
+    const std::filesystem::path& path, PresenceState from,
+    PresenceState to) noexcept;
 
 // 单客户端在场账目（台账条目：最近一次上报的分类与空闲秒数）。
 struct ClientPresence {
