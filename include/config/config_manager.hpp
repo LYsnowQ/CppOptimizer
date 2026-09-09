@@ -105,7 +105,8 @@ struct GameConfig {
     std::string id;
     std::string displayName;
     std::vector<std::string> processNames;
-    // windowTitleContains 已解析未消费：窗口标题参与规则过滤属后续匹配策略
+    // 窗口标题子串过滤：非空时仅当进程主窗口标题含该子串才命中规则（辅助同名
+    // 多实例/启动器与游戏同进程名场景）；空（默认）表示仅按进程名匹配。
     std::string windowTitleContains;
     bool pauseWhenBackground = true;
 };

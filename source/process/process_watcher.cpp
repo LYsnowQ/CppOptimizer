@@ -14,6 +14,7 @@
 #include "common/unique_resource.hpp"
 
 #include <algorithm>
+#include <map>
 #include <string>
 #include <utility>
 
@@ -188,6 +189,14 @@ common::Result<std::vector<GameRule>> BuildGameRules(
             }
             rule.processNames.push_back(std::move(wide.Value()));
         }
+        if (!game.windowTitleContains.empty()) {
+            auto title = Utf8ToWide(game.windowTitleContains);
+            if (!title) {
+                return common::Result<std::vector<GameRule>>::Failure(
+                    title.ErrorValue());
+            }
+            rule.windowTitleContains = std::move(title.Value());
+        }
         rules.push_back(std::move(rule));
     }
     return common::Result<std::vector<GameRule>>::Success(std::move(rules));
@@ -206,12 +215,17 @@ bool ProcessNameMatches(std::wstring_view ruleName,
     return true;
 }
 
+// 窗口标题子串包含判断的前置声明（定义在下方进程目录节）：
+// ASCII 大小写不敏感的子串匹配，needle 为空恒真。
+bool ContainsAscii(std::wstring_view text, std::wstring_view needle) noexcept;
+
 std::vector<RuleMatch> MatchRulesToEntries(
     std::span<const GameRule> rules,
     std::span<const ProcessEntry> entries) noexcept {
     std::vector<RuleMatch> matched;
     matched.reserve(rules.size());
     for (const auto& rule : rules) {
+        const bool hasTitleFilter = !rule.windowTitleContains.empty();
         for (const auto& entry : entries) {
             bool hit = false;
             for (const auto& ruleName : rule.processNames) {
@@ -220,10 +234,19 @@ std::vector<RuleMatch> MatchRulesToEntries(
                     break;
                 }
             }
-            if (hit) {
-                matched.push_back(RuleMatch{rule.id, entry});
-                break;
+            if (!hit) {
+                continue;
             }
+            if (hasTitleFilter) {
+                // 标题过滤为硬条件：窗口信息未查询（EnumWindows 失败/未查）或
+                // 无可见窗口（标题为空）均不满足，继续检查下一个同名进程。
+                if (!entry.windowTitleKnown ||
+                    !ContainsAscii(entry.windowTitle, rule.windowTitleContains)) {
+                    continue;
+                }
+            }
+            matched.push_back(RuleMatch{rule.id, entry});
+            break;
         }
     }
     return matched;
@@ -662,8 +685,47 @@ common::Result<std::vector<ProcessTransition>> ProcessWatcher::PollOnce() noexce
         return common::Result<std::vector<ProcessTransition>>::Failure(
             processes.ErrorValue());
     }
+    std::vector<ProcessEntry> entries = std::move(processes.Value());
 
-    const auto matches = MatchRulesToEntries(rules_, processes.Value());
+    // 标题过滤规则需在匹配阶段读窗口标题：仅当存在带 windowTitleContains 的规则时，
+    // 对命中其候选进程名的条目做一次只读窗口预查并写回条目（无标题过滤零额外查询，
+    // 与 detectWindows 开关独立——过滤本身依赖窗口）。
+    bool hasTitleRule = false;
+    for (const auto& rule : rules_) {
+        if (!rule.windowTitleContains.empty()) {
+            hasTitleRule = true;
+            break;
+        }
+    }
+    std::map<std::uint32_t, WindowInfo> windowCache;
+    if (hasTitleRule) {
+        for (const auto& rule : rules_) {
+            if (rule.windowTitleContains.empty()) {
+                continue;
+            }
+            for (const auto& ruleName : rule.processNames) {
+                for (const auto& entry : entries) {
+                    if (ProcessNameMatches(ruleName, entry.name)) {
+                        if (windowCache.find(entry.pid) == windowCache.end()) {
+                            auto info = QueryWindowInfo(entry.pid);
+                            if (info) {
+                                windowCache.emplace(entry.pid, info.Value());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (auto& entry : entries) {
+            const auto cached = windowCache.find(entry.pid);
+            if (cached != windowCache.end()) {
+                entry.windowTitle = cached->second.title;
+                entry.windowTitleKnown = true;
+            }
+        }
+    }
+
+    const auto matches = MatchRulesToEntries(rules_, entries);
     std::vector<GamePresence> presence;
     presence.reserve(matches.size());
     for (const auto& match : matches) {
@@ -673,11 +735,19 @@ common::Result<std::vector<ProcessTransition>> ProcessWatcher::PollOnce() noexce
         item.processName = match.entry.name;
         item.creationTime100ns = QueryProcessCreationTime(match.entry.pid);
         if (options_.detectWindows) {
-            auto window = QueryWindowInfo(match.entry.pid);
-            if (window) {
-                item.windowTitle = window.Value().title;
-                item.isForeground = window.Value().isForeground;
-                item.isFullscreen = window.Value().isFullscreen;
+            // 标题预查已取过窗口的复用缓存，避免对同一进程重复枚举窗口。
+            const auto cached = windowCache.find(match.entry.pid);
+            if (cached != windowCache.end()) {
+                item.windowTitle = cached->second.title;
+                item.isForeground = cached->second.isForeground;
+                item.isFullscreen = cached->second.isFullscreen;
+            } else {
+                auto window = QueryWindowInfo(match.entry.pid);
+                if (window) {
+                    item.windowTitle = window.Value().title;
+                    item.isForeground = window.Value().isForeground;
+                    item.isFullscreen = window.Value().isFullscreen;
+                }
             }
         }
         presence.push_back(std::move(item));

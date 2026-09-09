@@ -125,6 +125,66 @@ bool TestMatchRulesFirstMatchPerRule() {
     return matched.size() == 1 && matched[0].entry.pid == 101;
 }
 
+bool TestMatchRulesTitleFilterSelectsInstance() {
+    // 同名多实例：首个进程名命中但标题不满足，应继续找下一个标题满足的实例。
+    const std::vector<process::GameRule> rules = {
+        {"g", {L"Game.exe"}, L"Game Window"}};
+    const std::vector<process::ProcessEntry> entries = {
+        {100, L"Game.exe", L"Game Launcher", true},
+        {101, L"Game.exe", L"Game Window", true},
+    };
+    const auto matched = process::MatchRulesToEntries(rules, entries);
+    return matched.size() == 1 && matched[0].entry.pid == 101;
+}
+
+bool TestMatchRulesTitleFilterCaseInsensitiveAndChinese() {
+    { // ASCII 大小写不敏感子串
+        const std::vector<process::GameRule> rules = {
+            {"g", {L"Game.exe"}, L"client"}};
+        const std::vector<process::ProcessEntry> entries = {
+            {100, L"Game.exe", L"GAME CLIENT 1.0", true}};
+        const auto matched = process::MatchRulesToEntries(rules, entries);
+        if (matched.size() != 1 || matched[0].entry.pid != 100) {
+            return false;
+        }
+    }
+    { // 中文子串
+        const std::vector<process::GameRule> rules = {
+            {"g", {L"Game.exe"}, L"原神"}};
+        const std::vector<process::ProcessEntry> entries = {
+            {100, L"Game.exe", L"原神启动器", true},
+            {101, L"Game.exe", L"崩坏启动器", true}};
+        const auto matched = process::MatchRulesToEntries(rules, entries);
+        if (matched.size() != 1 || matched[0].entry.pid != 100) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TestMatchRulesTitleFilterUnknownOrNoWindowFails() {
+    // 标题未查询（EnumWindows 未跑/失败）与已查询但无可见窗口（标题为空）：
+    // 均不满足标题过滤，规则视为无命中（保守，不把标题不符的进程当游戏）。
+    const std::vector<process::GameRule> rules = {
+        {"g", {L"Game.exe"}, L"Game"}};
+    const std::vector<process::ProcessEntry> entries = {
+        {100, L"Game.exe", L"", false},
+        {101, L"Game.exe", L"", true},
+    };
+    const auto matched = process::MatchRulesToEntries(rules, entries);
+    return matched.empty();
+}
+
+bool TestMatchRulesEmptyTitleFilterNoFilter() {
+    // 空标题过滤 = 仅按进程名匹配（既有语义），标题是否已知/匹配不参与选择。
+    const std::vector<process::GameRule> rules = {{"one", {L"a.exe"}}};
+    const std::vector<process::ProcessEntry> entries = {
+        {101, L"a.exe", L"Launcher", true},
+        {102, L"a.exe", L"Game Window", false}};
+    const auto matched = process::MatchRulesToEntries(rules, entries);
+    return matched.size() == 1 && matched[0].entry.pid == 101;
+}
+
 bool TestBuildGameRules() {
     std::vector<GameConfig> games;
     games.push_back(MakeGame("g", {"Example.exe", "辅助.exe"}));
@@ -139,6 +199,23 @@ bool TestBuildGameRules() {
 bool TestBuildGameRulesInvalidUtf8() {
     std::vector<GameConfig> games;
     games.push_back(MakeGame("bad", {std::string("\xC3\x28", 2)})); // 非法 UTF-8
+    auto rules = process::BuildGameRules(games);
+    return !rules.HasValue();
+}
+
+bool TestBuildGameRulesCarriesTitleFilter() {
+    std::vector<GameConfig> games;
+    games.push_back(MakeGame("g", {"Example.exe"}));
+    games[0].windowTitleContains = "辅助";
+    auto rules = process::BuildGameRules(games);
+    return rules.HasValue() && rules.Value().size() == 1 &&
+           rules.Value()[0].windowTitleContains == L"辅助";
+}
+
+bool TestBuildGameRulesRejectsInvalidTitleUtf8() {
+    std::vector<GameConfig> games;
+    games.push_back(MakeGame("bad", {"ok.exe"}));
+    games[0].windowTitleContains = std::string("\xC3\x28", 2); // 非法 UTF-8
     auto rules = process::BuildGameRules(games);
     return !rules.HasValue();
 }
@@ -571,8 +648,14 @@ int wmain() {
     run(L"ProcessNameMatches case-insensitive", &TestProcessNameMatches);
     run(L"MatchRulesToEntries rules ordered", &TestMatchRulesToEntries);
     run(L"MatchRulesToEntries first match per rule", &TestMatchRulesFirstMatchPerRule);
+    run(L"MatchRules title filter selects instance", &TestMatchRulesTitleFilterSelectsInstance);
+    run(L"MatchRules title filter case-insensitive/chinese", &TestMatchRulesTitleFilterCaseInsensitiveAndChinese);
+    run(L"MatchRules title filter unknown/no-window fails", &TestMatchRulesTitleFilterUnknownOrNoWindowFails);
+    run(L"MatchRules empty title filter = no filter", &TestMatchRulesEmptyTitleFilterNoFilter);
     run(L"BuildGameRules UTF-8 to wide", &TestBuildGameRules);
     run(L"BuildGameRules rejects invalid UTF-8", &TestBuildGameRulesInvalidUtf8);
+    run(L"BuildGameRules carries title filter", &TestBuildGameRulesCarriesTitleFilter);
+    run(L"BuildGameRules rejects invalid title UTF-8", &TestBuildGameRulesRejectsInvalidTitleUtf8);
     run(L"Diff empty to empty", &TestDiffEmptyToEmpty);
     run(L"Diff new process starts", &TestDiffNewProcessStarts);
     run(L"Diff starting to running", &TestDiffStartingToRunning);

@@ -55,16 +55,21 @@ struct ProcessTransition {
 
 // ---------- 纯函数（无 Windows 依赖，可单测） ----------
 
-// 进程枚举条目（Toolhelp 快照的进程名 + pid）。
+// 进程枚举条目（Toolhelp 快照的进程名 + pid，可带窗口标题供规则过滤）。
 struct ProcessEntry {
     std::uint32_t pid = 0;
     std::wstring name;
+    std::wstring windowTitle;       // 已查询的主窗口标题（windowTitleKnown 时有效）
+    bool windowTitleKnown = false;  // 是否已查询窗口（含“已查但无可见窗口/标题为空”）
 };
 
 // 游戏规则（宽字符串进程名形式）。
 struct GameRule {
     std::string id;
     std::vector<std::wstring> processNames;
+    // 窗口标题子串过滤（空 = 不过滤，仅按进程名匹配）。非空时规则只命中主窗口
+    // 标题含该子串的进程；无可见窗口或窗口信息未查询的进程不满足过滤。
+    std::wstring windowTitleContains;
 };
 
 // 把 config::GameConfig（UTF-8 进程名）转为宽字符串规则。
@@ -76,14 +81,18 @@ struct GameRule {
 [[nodiscard]] bool ProcessNameMatches(
     std::wstring_view ruleName, std::wstring_view processName) noexcept;
 
-// 规则匹配结果：每个规则至多一个条目（取枚举顺序首个匹配进程）。
+// 规则匹配结果：每个规则至多一个条目。
 struct RuleMatch {
     std::string gameId;
     ProcessEntry entry;
 };
 
-// 把进程枚举结果按规则匹配（规则内任一候选名命中即可）。
-// 无匹配的规则不出现；同一 pid 可被多个规则命中。返回顺序与规则一致。
+// 把进程枚举结果按规则匹配：规则内任一候选进程名命中即可；规则带窗口标题过滤
+// （windowTitleContains 非空）时，仅主窗口标题含该子串的条目算命中——标题未查询
+// 或无可见窗口（标题为空）的条目不满足过滤，继续在同名条目中找下一个。
+// 无标题过滤的规则取枚举顺序首个进程名命中的条目（既有语义）；带过滤的规则取
+// 首个进程名与标题均满足的条目。无匹配的规则不出现；同一 pid 可被多个规则命中。
+// 返回顺序与规则一致。
 [[nodiscard]] std::vector<RuleMatch> MatchRulesToEntries(
     std::span<const GameRule> rules,
     std::span<const ProcessEntry> entries) noexcept;
@@ -190,7 +199,9 @@ class ProcessWatcher {
 public:
     struct Options {
         std::chrono::milliseconds pollInterval = std::chrono::milliseconds(1000);
-        bool detectWindows = true;        // 窗口标题/前台/全屏检测
+        bool detectWindows = true; // 窗口标题/前台/全屏检测。规则带窗口标题过滤
+        //（window_title_contains）时，匹配阶段仍需查询候选进程标题
+        //（标题过滤依赖窗口）；记录到观测结果的前台/全屏/标题仍受本开关控制。
     };
 
     explicit ProcessWatcher(Options options = {}) noexcept;

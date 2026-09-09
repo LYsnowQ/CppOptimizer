@@ -62,5 +62,6 @@ safe_mode_cooldown_ms = 2000     # 进入 Safe Mode 后的冷却期（毫秒，1
 id = "example-game"
 display_name = "Example Game"
 process_names = ["ExampleGame.exe"]
-window_title_contains = ""
+window_title_contains = ""   # 窗口标题子串过滤（空 = 仅按进程名匹配；非空时主窗口标题须含
+                                 #   该子串才命中规则，供同名多开/启动器与游戏同进程名场景挑选实例）
 pause_when_background = true
