@@ -1,4 +1,5 @@
-﻿#include "common/console_output.hpp"
+﻿#include "audit/audit_log.hpp"
+#include "common/console_output.hpp"
 #include "common/error.hpp"
 #include "activity/user_activity.hpp"
 #include "activity/raw_input.hpp"
@@ -720,6 +721,19 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
         configLoaded && powerConfig.executionRequired;
     executorConfig.consecutiveActionFailuresToHalt = static_cast<std::size_t>(
         std::max(0, policyConfig.haltAfterActionFailures));
+    // AUD-001：R1 动作审计（进程内有界记录；观察者接入执行器每次后端调用）。
+    optimizer::audit::AuditLog auditLog(optimizer::audit::AuditLog::Options{});
+    executorConfig.actionObserver =
+        [&auditLog](const optimizer::policy::ExecutorActionEvent& event) {
+            optimizer::audit::AuditRecord record;
+            record.operationId = event.operationId;
+            record.risk = optimizer::audit::RiskLevel::R1;
+            record.caller = "policy";
+            record.target = event.target;
+            record.detail = event.detail;
+            record.ok = event.ok;
+            (void)auditLog.Append(std::move(record));
+        };
     optimizer::priority::PriorityBooster::Options boosterOptions;
     boosterOptions.maxLevel = executorConfig.priorityMaxLevel;
     auto powerLocker = std::make_shared<optimizer::power::PowerLocker>(
@@ -935,6 +949,16 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
                     << execUnboost << L" / power+ " << execPowerHold
                     << L" / power- " << execPowerRelease;
         optimizer::common::WriteConsoleLine(execSummary.str());
+    }
+    if (auditLog.Size() > 0) {
+        std::wostringstream auditLine;
+        auditLine << L"  audit    : " << auditLog.Size()
+                  << L" R1 action record(s) recorded (in-memory)";
+        optimizer::common::WriteConsoleLine(auditLine.str());
+        for (const auto& record : auditLog.Records()) {
+            optimizer::common::WriteConsoleLine(
+                optimizer::audit::FormatAuditRecord(record));
+        }
     }
     return 0;
 }

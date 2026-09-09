@@ -78,6 +78,10 @@ common::Result<void> PolicyExecutor::ReconcilePriority(
         if (!priorityGameId_.empty()) {
             auto released =
                 priority_->ReleaseBoost(priorityGameId_, priorityPid_);
+            EmitAction("priority.unboost",
+                       priorityGameId_ + " pid " +
+                           std::to_string(priorityPid_),
+                       "target change pre-release", released.HasValue());
             if (!released) {
                 // 释放失败：提升仍生效，上报且保持记录，调用方可重试。
                 return released;
@@ -88,6 +92,12 @@ common::Result<void> PolicyExecutor::ReconcilePriority(
         auto acquired = priority_->AcquireBoost(
             target.gameId, target.pid, target.creationTime100ns,
             config_.priorityMaxLevel);
+        EmitAction("priority.boost",
+                   target.gameId + " pid " + std::to_string(target.pid),
+                   "level=" +
+                       std::to_string(
+                           static_cast<int>(config_.priorityMaxLevel)),
+                   acquired.HasValue());
         if (!acquired) {
             return acquired; // 失败不伪装成功
         }
@@ -101,6 +111,10 @@ common::Result<void> PolicyExecutor::ReconcilePriority(
     if (!priorityGameId_.empty()) {
         auto released =
             priority_->ReleaseBoost(priorityGameId_, priorityPid_);
+        EmitAction("priority.unboost",
+                   priorityGameId_ + " pid " +
+                       std::to_string(priorityPid_),
+                   "game exit or no longer desired", released.HasValue());
         if (!released) {
             return released;
         }
@@ -117,6 +131,9 @@ common::Result<void> PolicyExecutor::ReconcilePower(
         auto locked = power_->AcquireLock(
             optimizer::power::PowerLockType::ExecutionRequired,
             config_.powerReason);
+        // 审计详情用固定 ASCII 描述（不把宽字符 reason 窄化回显到审计记录）。
+        EmitAction("power.hold", "policy (game running)",
+                   "execution power request", locked.HasValue());
         if (!locked) {
             return locked; // 失败不伪装成功
         }
@@ -127,6 +144,8 @@ common::Result<void> PolicyExecutor::ReconcilePower(
     if (!desired && powerHeld_) {
         auto released = power_->ReleaseLock(
             optimizer::power::PowerLockType::ExecutionRequired);
+        EmitAction("power.release", "policy",
+                   "game exit or no longer desired", released.HasValue());
         if (!released) {
             return released;
         }
@@ -139,12 +158,19 @@ common::Result<void> PolicyExecutor::ReconcilePower(
 void PolicyExecutor::ReleaseAll() noexcept {
     if (!priorityGameId_.empty() && priority_) {
         // 尽力而为：恢复失败不阻断（句柄随进程退出/析构清理）。
-        (void)priority_->ReleaseBoost(priorityGameId_, priorityPid_);
+        auto released =
+            priority_->ReleaseBoost(priorityGameId_, priorityPid_);
+        EmitAction("priority.unboost",
+                   priorityGameId_ + " pid " +
+                       std::to_string(priorityPid_),
+                   "release-all on exit", released.HasValue());
         priorityGameId_.clear();
     }
     if (powerHeld_ && power_) {
-        (void)power_->ReleaseLock(
+        auto released = power_->ReleaseLock(
             optimizer::power::PowerLockType::ExecutionRequired);
+        EmitAction("power.release", "policy", "release-all on exit",
+                   released.HasValue());
         powerHeld_ = false;
     }
 }
@@ -164,6 +190,22 @@ bool PolicyExecutor::IsHalted() const noexcept {
 void PolicyExecutor::ResetHalt() noexcept {
     halted_ = false;
     consecutiveActionFailures_ = 0;
+}
+
+void PolicyExecutor::EmitAction(std::string operationId, std::string target,
+                                std::string detail, bool ok) noexcept {
+    if (!config_.actionObserver) {
+        return;
+    }
+    ExecutorActionEvent event;
+    event.operationId = std::move(operationId);
+    event.target = std::move(target);
+    event.detail = std::move(detail);
+    event.ok = ok;
+    try {
+        config_.actionObserver(event); // 审计观察者异常不跨执行器传播
+    } catch (...) {
+    }
 }
 
 } // namespace optimizer::policy

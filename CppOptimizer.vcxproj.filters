@@ -57,6 +57,9 @@
     <ClInclude Include="include\activity\raw_input.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\audit\audit_log.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="include\service\service_host.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -129,6 +132,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\activity\raw_input.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\audit\audit_log.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\service\service_host.cpp">

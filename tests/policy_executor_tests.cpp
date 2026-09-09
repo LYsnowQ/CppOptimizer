@@ -238,6 +238,40 @@ bool TestPowerGateOffSkipsHold() {
 
 // ---------- 优先级执行与释放 ----------
 
+bool TestActionObserverEmitsAuditEvents() {
+    // AUD-001：观察者在每次实际后端调用后回调（操作/结果）；未调用后端时不回调。
+    Harness h;
+    h.priority->creationByPid[100] = 111;
+    std::vector<std::string> ops;
+    std::vector<bool> oks;
+    h.config.actionObserver =
+        [&ops, &oks](const optimizer::policy::ExecutorActionEvent& event) {
+            ops.push_back(event.operationId);
+            oks.push_back(event.ok);
+        };
+    PolicyExecutor executor = h.Make();
+    const auto boost = executor.ApplyDecision(
+        MakeDecision(PolicyAction::SuggestPriorityBoost, "prio_boost"),
+        MakeTarget(true, 100, 111));
+    if (!boost) {
+        return false;
+    }
+    // 一次 Apply 内先对账优先级再对账电源（两者均执行）。
+    if (ops.size() != 2 || ops[0] != "priority.boost" || !oks[0] ||
+        ops[1] != "power.hold" || !oks[1]) {
+        return false;
+    }
+    // 游戏退出：优先级与电源都释放，各发一次事件。
+    const auto stop = executor.ApplyDecision(MakeDecision(PolicyAction::NoOp,
+                                                          "no_game"),
+                                             MakeTarget(false));
+    if (!stop || ops.size() != 4 || ops[2] != "priority.unboost" ||
+        ops[3] != "power.release") {
+        return false;
+    }
+    return oks[2] && oks[3];
+}
+
 bool TestPriorityBoostExecutes() {
     Harness h;
     h.priority->creationByPid[100] = 111;
@@ -707,6 +741,7 @@ int wmain() {
     run(L"priority gate off skips boost", &TestPriorityGateOffSkipsBoost);
     run(L"power gate off skips hold", &TestPowerGateOffSkipsHold);
     run(L"priority boost executes", &TestPriorityBoostExecutes);
+    run(L"action observer emits audit events", &TestActionObserverEmitsAuditEvents);
     run(L"priority idempotent same target", &TestPriorityIdempotentSameTarget);
     run(L"priority released on game stop", &TestPriorityReleaseOnGameStop);
     run(L"priority released on decision change",

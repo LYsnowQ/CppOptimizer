@@ -114,6 +114,7 @@
     <ClInclude Include="include\process\process_watcher.hpp" />
     <ClInclude Include="include\activity\user_activity.hpp" />
     <ClInclude Include="include\activity\raw_input.hpp" />
+    <ClInclude Include="include\audit\audit_log.hpp" />
     <ClInclude Include="include\service\service_host.hpp" />
     <ClInclude Include="include\service\tray_host.hpp" />
     <ClInclude Include="include\service\presence.hpp" />
@@ -140,6 +141,7 @@
     <ClCompile Include="source\process\process_watcher.cpp" />
     <ClCompile Include="source\activity\user_activity.cpp" />
     <ClCompile Include="source\activity\raw_input.cpp" />
+    <ClCompile Include="source\audit\audit_log.cpp" />
     <ClCompile Include="source\service\service_host.cpp" />
     <ClCompile Include="source\service\recovery_marker.cpp" />
     <ClCompile Include="source\service\tray_host.cpp" />
@@ -173,6 +175,7 @@
     <None Include="tests\priority_tests.cpp" />
     <None Include="tests\service_tests.cpp" />
     <None Include="tests\process_tests.cpp" />
+    <None Include="tests\audit_tests.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

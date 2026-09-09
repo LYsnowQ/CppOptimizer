@@ -45,6 +45,7 @@ add_executable(CppOptimizer
     source/process/process_watcher.cpp
     source/activity/user_activity.cpp
     source/activity/raw_input.cpp
+    source/audit/audit_log.cpp
     source/service/service_host.cpp
     source/service/recovery_marker.cpp
     source/service/tray_host.cpp
@@ -381,4 +382,22 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerActivityTests PRIVATE -municode)
     endif()
     add_test(NAME ActivityTests COMMAND CppOptimizerActivityTests)
+
+    add_executable(CppOptimizerAuditTests
+        tests/audit_tests.cpp
+        source/common/error.cpp
+        source/audit/audit_log.cpp
+    )
+    target_include_directories(CppOptimizerAuditTests PRIVATE include)
+    target_compile_features(CppOptimizerAuditTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerAuditTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerAuditTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    if(MINGW)
+        target_link_options(CppOptimizerAuditTests PRIVATE -municode)
+    endif()
+    add_test(NAME AuditTests COMMAND CppOptimizerAuditTests)
 endif()

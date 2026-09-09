@@ -7,10 +7,21 @@
 #include "priority/priority_booster.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace optimizer::policy {
+
+// 一次 R1 动作尝试（AUD-001）：由执行器在每次实际调用后端（优先级/电源的获取、释放）后发出，
+// 供调用方接入审计（本模块不依赖审计实现）。operationId 如 "priority.boost"；ok = 后端调用成功。
+struct ExecutorActionEvent {
+    std::string operationId;
+    std::string target; // 目标描述（gameId/pid 等）
+    std::string detail; // 参数/结果补充
+    bool ok = true;
+};
 
 // 执行器配置（PWR-002 消费 [priority] 与 [power] 配置节）。
 // 门禁语义：对应开关为 false 时该执行器不动作，决策仍由 PolicyEvaluator
@@ -26,6 +37,9 @@ struct ExecutorConfig {
     // halted——不再调用任何后端（决策仍由 PolicyEvaluator 产出展示，纯咨询），直到 ResetHalt。
     // 任何一次 ApplyDecision 成功（含无需动作）重置连续计数。0 = 关闭（缺省，零回归）。
     std::size_t consecutiveActionFailuresToHalt = 0; // [policy].halt_after_action_failures
+    // 动作事件观察者（AUD-001，可选）：每次实际调用后端后回调一次（同步、调用线程）。
+    // 用于审计接入；不得阻塞或抛异常（抛出由执行器捕获并忽略）。空 = 不回调（零回归）。
+    std::function<void(const ExecutorActionEvent&)> actionObserver = nullptr;
 };
 
 // 游戏目标身份（由 ProcessWatcher 观测提供）。
@@ -94,6 +108,9 @@ private:
     // 期望状态对账：游戏运行期电源请求（门禁开启）。
     [[nodiscard]] common::Result<void> ReconcilePower(
         const ExecutorTarget& target, ExecutorEffect& effect);
+    // 发出动作事件（AUD-001；观察者空/抛异常均安全）。
+    void EmitAction(std::string operationId, std::string target,
+                    std::string detail, bool ok) noexcept;
 
     std::shared_ptr<optimizer::power::PowerLocker> power_;
     std::shared_ptr<optimizer::priority::PriorityBooster> priority_;
