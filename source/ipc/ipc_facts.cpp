@@ -292,7 +292,7 @@ common::Result<void> ValidateFactsV1Schema(std::span<const IpcFact> facts) {
             fact.key == "client_pid" || fact.key == "memory_total_mb" ||
             fact.key == "memory_available_mb" ||
             fact.key == "memory_load_percent" ||
-            fact.key == "user_idle_seconds";
+            fact.key == "user_idle_seconds" || fact.key == "foreground_pid";
         if (!knownNumeric) {
             return common::Result<void>::Failure(FactsValidationError(
                 L"未知事实键：" +
@@ -318,6 +318,10 @@ common::Result<void> ValidateFactsV1Schema(std::span<const IpcFact> facts) {
         } else if (fact.key == "memory_load_percent" && numeric > 100) {
             return common::Result<void>::Failure(FactsValidationError(
                 L"memory_load_percent 必须 0..100"));
+        } else if (fact.key == "foreground_pid" && numeric == 0) {
+            // 无前台窗口时应省略该键；0 与“不伪装”语义冲突，整体拒绝。
+            return common::Result<void>::Failure(FactsValidationError(
+                L"foreground_pid 必须 >= 1"));
         }
         // client_pid：任意十进制无符号整数（自报仅供参考）。
     }

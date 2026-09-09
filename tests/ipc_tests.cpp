@@ -735,6 +735,27 @@ bool TestFactsSchemaRejectsAvailableGtTotal() {
     return !result && result.ErrorValue().domain == ErrorDomain::Validation;
 }
 
+bool TestFactsSchemaForegroundPidRules() {
+    // IPC-019：foreground_pid 为已注册数值键；>=1 接受，0 与溢出整体拒绝。
+    const std::vector<IpcFact> valid = {{"foreground_pid", "4242"}};
+    if (!ValidateFactsV1Schema(valid)) {
+        return false;
+    }
+    const std::vector<IpcFact> zero = {{"foreground_pid", "0"}};
+    if (ValidateFactsV1Schema(zero)) {
+        return false; // 0 = 应省略而非伪造
+    }
+    const std::vector<IpcFact> overflow = {{"foreground_pid", "4294967296"}};
+    if (ValidateFactsV1Schema(overflow)) {
+        return false;
+    }
+    const std::vector<IpcFact> mixed = {
+        {"client_pid", "123"}, {"foreground_pid", "6936"},
+        {"observer", "demo"}};
+    return static_cast<bool>(ValidateFactsV1Schema(mixed)) &&
+           NumericFactValue(mixed, "foreground_pid") == 6936u;
+}
+
 bool TestFactsSchemaAcceptsUserIdleSeconds() {
     // ACT-005：user_idle_seconds 为已注册数值键（无符号十进制整数）。
     // 单键即可满足“至少一条非凭据事实”；边界与混合载荷均接受。
@@ -2450,6 +2471,7 @@ int wmain() {
         &TestFactsSchemaRejectsAvailableGtTotal);
     run(L"facts schema accepts user idle seconds",
         &TestFactsSchemaAcceptsUserIdleSeconds);
+    run(L"facts schema foreground pid rules", &TestFactsSchemaForegroundPidRules);
     run(L"facts schema rejects user idle seconds overflow",
         &TestFactsSchemaRejectsUserIdleSecondsOverflow);
     run(L"numeric fact value lookup", &TestNumericFactValueLookup);

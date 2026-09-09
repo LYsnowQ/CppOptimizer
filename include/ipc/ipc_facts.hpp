@@ -87,6 +87,9 @@ struct IpcFact {
 //   - user_idle_seconds    无符号十进制整数(ACT-005:上报方当前会话距最近键鼠输入的
 //                          秒数,GetLastInputInfo 口径,锁屏/断开时输入时钟冻结自然增长;
 //                          查询失败时上报方应省略该键——不伪装,本层不解释)
+//   - foreground_pid       无符号十进制整数 >= 1(IPC-019:上报方会话当前前台窗口所属
+//                          进程 pid,GetForegroundWindow 只读;无前台窗口或查询失败时
+//                          上报方应省略该键——不伪装)
 //   - observer             UTF-8 文本,非空(上报方自述,用于调试/审计)
 //   - agent_token          ASCII 会话凭据(IPC-005,1..kMaxFactsTokenBytes);服务端
 //                          Options.expectedToken 配置时才校验(缺失/不匹配回

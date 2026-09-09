@@ -1503,6 +1503,8 @@ struct ServiceHostDemoState {
     // ACT-006：最近受理 Agent 上报的用户活动观测（user_idle_seconds 已注册数值键；
     // 未上报/不可解析为空，窗口汇总按 n/a 展示）。
     std::optional<std::uint32_t> ipcLastUserIdleSeconds;
+    // IPC-019：最近受理 Agent 上报的前台窗口所属 pid（无前台/未上报为空）。
+    std::optional<std::uint32_t> ipcLastForegroundPid;
     std::wstring ipcExpectedToken;                // 会话凭据（IPC-005；空 = 不要求）
     // Safe Mode（IPC-010/013，Agent 受理门禁）：时间窗口内身份/凭据失败达阈值暂停受理新 Agent。
     std::optional<optimizer::service::SafeModeGuard> ipcSafeMode; // console demo 启用
@@ -1620,10 +1622,15 @@ optimizer::common::Result<void> ServiceWorkloadTick(
                         state.ipcLastUserIdleSeconds =
                             optimizer::ipc::NumericFactValue(
                                 parsed.Value(), "user_idle_seconds");
+                        // IPC-019：前台窗口归属（数值键经白名单校验后读取）。
+                        state.ipcLastForegroundPid =
+                            optimizer::ipc::NumericFactValue(
+                                parsed.Value(), "foreground_pid");
                     } else {
                         state.ipcLastFactSummary.clear();
                         state.ipcLastFactCount = 0;
                         state.ipcLastUserIdleSeconds.reset();
+                        state.ipcLastForegroundPid.reset();
                     }
                 }
                 return handled;
@@ -1685,6 +1692,13 @@ optimizer::common::Result<void> ServiceWorkloadTick(
                     std::wstring(
                         optimizer::service::PresenceStateToString(presence)) +
                     L")";
+            }
+            // IPC-019：展示最近上报的前台窗口 pid（无前台/未上报按 none 不伪装）。
+            servedMessage += L", fg pid=";
+            if (state.ipcLastForegroundPid) {
+                servedMessage += std::to_wstring(*state.ipcLastForegroundPid);
+            } else {
+                servedMessage += L"none";
             }
         }
         state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
@@ -2204,6 +2218,13 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                 } else {
                     ipcLine << L"n/a";
                 }
+                // IPC-019：最近受理客户端上报的前台窗口 pid（无前台/未上报 none）。
+                ipcLine << L", fg pid ";
+                if (state.ipcLastForegroundPid) {
+                    ipcLine << *state.ipcLastForegroundPid;
+                } else {
+                    ipcLine << L"none";
+                }
             }
         } else {
             ipcLine << L"  ipc      : no Agent connected within window";
@@ -2655,6 +2676,8 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     // 重试沿用当次 id（与应答配对）。
     auto lastInputBackend =
         optimizer::activity::CreateWin32LastInputBackend();
+    // IPC-019：前台窗口归属探测（GetForegroundWindow 只读）。
+    auto foregroundProbe = optimizer::activity::CreateWin32ForegroundProbe();
     std::uint32_t nextRequestId = 0;
     const auto buildRequest =
         [&]() -> optimizer::common::Result<optimizer::ipc::IpcFrameRequest> {
@@ -2686,6 +2709,12 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
                 1000;
             facts.push_back(optimizer::ipc::IpcFact{
                 "user_idle_seconds", std::to_string(idleSeconds)});
+        }
+        // 前台窗口归属（IPC-019）：前台窗口存在才附 pid（无前台窗口/查询失败省略不伪装）。
+        if (auto foreground = foregroundProbe->Query();
+            foreground && foreground.Value().hasWindow) {
+            facts.push_back(optimizer::ipc::IpcFact{
+                "foreground_pid", std::to_string(foreground.Value().pid)});
         }
         facts.push_back(
             optimizer::ipc::IpcFact{"observer", "CppOptimizer agent demo"});
@@ -2757,7 +2786,9 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     }
     std::wcout
         << L"  facts    : memory (total/available/load) + user_idle_seconds "
-           L"(ACT-005, GetLastInputInfo read-only; omitted on query failure)\n";
+           L"(ACT-005, GetLastInputInfo read-only; omitted on query failure)"
+        << L" + foreground_pid (IPC-019, foreground window owning pid; omitted\n"
+        << L"             when none / on query failure)\n";
     if (hasToken) {
         std::wcout << L"  auth     : session token supplied (hidden)\n";
     }
