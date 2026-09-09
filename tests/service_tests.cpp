@@ -1,6 +1,7 @@
 ﻿#include "service/service_host.hpp"
 #include "service/recovery_marker.hpp"
 #include "service/tray_host.hpp"
+#include "service/presence.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -529,6 +530,84 @@ bool TestTrayDoubleStartRejected() {
            second.ErrorValue().domain == ErrorDomain::Validation;
 }
 
+// ---------- 宿主在场台账（纯逻辑，可注入时钟） ----------
+
+bool TestPresenceClassify() {
+    using optimizer::service::ClassifyPresence;
+    using optimizer::service::PresenceState;
+    std::optional<std::uint32_t> missing;
+    return ClassifyPresence(missing, 15) == PresenceState::Unknown && // 未上报不伪装在场
+           ClassifyPresence(std::uint32_t{0}, 15) == PresenceState::Present &&
+           ClassifyPresence(std::uint32_t{14}, 15) == PresenceState::Present &&
+           ClassifyPresence(std::uint32_t{15}, 15) == PresenceState::Away && // 达阈值即不在场
+           ClassifyPresence(std::uint32_t{120}, 15) == PresenceState::Away &&
+           ClassifyPresence(std::uint32_t{120}, 0) == PresenceState::Present && // 阈值 0 不判定
+           ClassifyPresence(missing, 0) == PresenceState::Unknown;
+}
+
+bool TestPresenceTrackerSummaryRules() {
+    using optimizer::service::HostPresenceTracker;
+    using optimizer::service::PresenceState;
+    const auto base = std::chrono::steady_clock::now();
+    long elapsedMs = 0;
+    HostPresenceTracker::Options options;
+    options.now = [&base, &elapsedMs] {
+        return base + std::chrono::milliseconds(elapsedMs);
+    };
+    HostPresenceTracker tracker(options);
+    if (tracker.Summary() != PresenceState::Unknown ||
+        tracker.ClientCount() != 0) {
+        return false; // 空台账 Unknown
+    }
+    if (tracker.Record("a", std::uint32_t{2}) != PresenceState::Present ||
+        tracker.Summary() != PresenceState::Present) {
+        return false;
+    }
+    (void)tracker.Record("a", std::uint32_t{40}); // 同一客户端更新为不在场
+    if (tracker.Summary() != PresenceState::Away) {
+        return false;
+    }
+    (void)tracker.Record("b", std::uint32_t{3}); // 第二客户端在场：任一在场 -> Present
+    if (tracker.Summary() != PresenceState::Present ||
+        tracker.ClientCount() != 2) {
+        return false;
+    }
+    // 未上报空闲的客户端记 Unknown，不影响“有人在”汇总。
+    (void)tracker.Record("c", std::nullopt);
+    return tracker.Summary() == PresenceState::Present &&
+           tracker.ClientCount() == 3;
+}
+
+bool TestPresenceTrackerForgetEvicts() {
+    using optimizer::service::HostPresenceTracker;
+    using optimizer::service::PresenceState;
+    const auto base = std::chrono::steady_clock::now();
+    long elapsedMs = 0;
+    HostPresenceTracker::Options options;
+    options.now = [&base, &elapsedMs] {
+        return base + std::chrono::milliseconds(elapsedMs);
+    };
+    options.forgetAfter = std::chrono::seconds(5);
+    HostPresenceTracker tracker(options);
+    (void)tracker.Record("a", std::uint32_t{1});
+    if (tracker.Summary() != PresenceState::Present) {
+        return false;
+    }
+    elapsedMs = 6000; // 超过遗忘时长：客户端移除，回到 Unknown
+    return tracker.Summary() == PresenceState::Unknown &&
+           tracker.ClientCount() == 0;
+}
+
+bool TestPresenceStateNames() {
+    using optimizer::service::PresenceState;
+    using optimizer::service::PresenceStateToString;
+    return std::wstring(PresenceStateToString(PresenceState::Present)) ==
+               L"Present" &&
+           std::wstring(PresenceStateToString(PresenceState::Away)) == L"Away" &&
+           std::wstring(PresenceStateToString(PresenceState::Unknown)) ==
+               L"Unknown";
+}
+
 // ---------- 安装/卸载参数校验（不触碰真实 SCM） ----------
 
 bool TestInstallRejectsEmptyNames() {
@@ -848,6 +927,10 @@ int wmain() {
     run(L"tray menu exit invokes callback and stops", &TestTrayMenuExitInvokesCallbackAndStops);
     run(L"tray add failure reported", &TestTrayAddFailureReported);
     run(L"tray double start rejected", &TestTrayDoubleStartRejected);
+    run(L"presence classify", &TestPresenceClassify);
+    run(L"presence tracker summary rules", &TestPresenceTrackerSummaryRules);
+    run(L"presence tracker forget evicts", &TestPresenceTrackerForgetEvicts);
+    run(L"presence state names", &TestPresenceStateNames);
     run(L"console zero duration rejected", &TestConsoleZeroDurationRejected);
     run(L"install rejects empty names", &TestInstallRejectsEmptyNames);
     run(L"uninstall rejects empty name", &TestUninstallRejectsEmptyName);

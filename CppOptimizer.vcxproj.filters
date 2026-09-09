@@ -60,6 +60,9 @@
     <ClInclude Include="include\service\tray_host.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\service\presence.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="include\ipc\ipc_protocol.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -129,6 +132,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\service\tray_host.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\service\presence.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     

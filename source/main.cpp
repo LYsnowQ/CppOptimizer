@@ -20,6 +20,7 @@
 #include "service/service_host.hpp"
 #include "service/recovery_marker.hpp"
 #include "service/tray_host.hpp"
+#include "service/presence.hpp"
 
 #include <windows.h>
 
@@ -1457,6 +1458,9 @@ constexpr wchar_t kServiceDescription[] =
 // 常驻监听（persistentAccept），窗口内连续受理到达的 Agent 客户端（每客户端一帧
 // FactsSnapshot）并记录身份/摘要。
 // 服务模式不接受临时危险命令，本负载不产生任何系统修改。
+// SVC-006：宿主在场台账默认“不在场”空闲阈值（秒），与 --activity 默认空闲阈值一致。
+constexpr std::uint32_t kHostPresenceAwaySeconds = 15;
+
 struct ServiceHostDemoState {
     optimizer::logger::Logger logger;
     std::size_t tickCount = 0;
@@ -1490,6 +1494,8 @@ struct ServiceHostDemoState {
     // IPC-018：上次异常退出且恢复未确认（recovery-state.json）——启动发现标记即锁存 Safe Mode。
     bool ipcRecoveryUnconfirmed = false;          // 上次会话未正常结束且未确认
     std::size_t ipcAnomalyEntries = 0;            // 窗口内离散异常触发次数（汇总）
+    // SVC-006：宿主在场台账（Agent user_idle 汇总；仅展示/记录，不参与 Safe Mode 触发判定）。
+    std::optional<optimizer::service::HostPresenceTracker> ipcPresence;
 };
 
 optimizer::common::Result<void> ServiceWorkloadTick(
@@ -1608,6 +1614,16 @@ optimizer::common::Result<void> ServiceWorkloadTick(
                     std::to_wstring(*state.ipcLastUserIdleSeconds) + L" s";
             } else {
                 servedMessage += L"n/a";
+            }
+            // SVC-006：记录进在场台账并标注分类（仅观测）。
+            if (state.ipcPresence) {
+                const auto presence = state.ipcPresence->Record(
+                    std::to_string(result.clientPid),
+                    state.ipcLastUserIdleSeconds);
+                servedMessage += L" (" +
+                    std::wstring(
+                        optimizer::service::PresenceStateToString(presence)) +
+                    L")";
             }
         }
         state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
@@ -1797,6 +1813,10 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         // 冷却到期自动恢复；参数取 [ipc] 配置（IPC-014），无配置时用状态机默认
         // （阈值 3、窗口 5s、冷却 2s、启用）——缺省行为零回归。仅影响 Agent 受理。
         state.ipcSafeMode.emplace(safeModeOptions);
+        // SVC-006：宿主在场台账（Agent user_idle 汇总；不参与 Safe Mode 触发判定）。
+        optimizer::service::HostPresenceTracker::Options presenceOptions;
+        presenceOptions.awayAfterSeconds = kHostPresenceAwaySeconds;
+        state.ipcPresence.emplace(presenceOptions);
         ipcOptions.verdictObserver =
             [&state](optimizer::ipc::IpcClientVerdict verdict) {
                 auto& guard = *state.ipcSafeMode;
@@ -2069,6 +2089,30 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             ipcLine << L"  ipc      : no Agent connected within window";
         }
         optimizer::common::WriteConsoleLine(ipcLine.str());
+        if (state.ipcPresence) {
+            std::wostringstream presenceLine;
+            const auto hostPresence = state.ipcPresence->Summary();
+            presenceLine
+                << L"  presence : "
+                << optimizer::service::PresenceStateToString(hostPresence)
+                << L" (clients " << state.ipcPresence->ClientCount()
+                << L", away threshold " << kHostPresenceAwaySeconds
+                << L" s idle)";
+            optimizer::common::WriteConsoleLine(presenceLine.str());
+            for (const auto& client : state.ipcPresence->Clients()) {
+                std::wostringstream clientLine;
+                clientLine << L"             ["
+                           << std::wstring(client.key.begin(),
+                                           client.key.end())
+                           << L"] "
+                           << optimizer::service::PresenceStateToString(
+                                  client.state);
+                if (client.idleSeconds) {
+                    clientLine << L", idle " << *client.idleSeconds << L" s";
+                }
+                optimizer::common::WriteConsoleLine(clientLine.str());
+            }
+        }
         if (state.ipcSafeMode) {
             std::wostringstream safeLine;
             safeLine << L"  safe mode: entered " << state.ipcSafeModeEntries
