@@ -1484,6 +1484,8 @@ struct ServiceHostDemoState {
     bool ipcNativeProbeOk = false;                // 启动探测通过（R0 baseline）
     bool ipcNativeProbeAnomaly = false;           // Native 探测异常（已触发锁存）
     bool ipcOsSupportAnomaly = false;             // 操作系统不支持（已触发锁存）
+    // SVC-004：每用户默认配置无效（启动自动消费时解析失败）-> Safe Mode「配置无效」离散触发。
+    bool ipcConfigAnomaly = false;                // 默认配置无效（已触发锁存）
     // IPC-018：上次异常退出且恢复未确认（recovery-state.json）——启动发现标记即锁存 Safe Mode。
     bool ipcRecoveryUnconfirmed = false;          // 上次会话未正常结束且未确认
     std::size_t ipcAnomalyEntries = 0;            // 窗口内离散异常触发次数（汇总）
@@ -1509,9 +1511,23 @@ optimizer::common::Result<void> ServiceWorkloadTick(
         // Safe Mode（IPC-010）：冷却期暂停受理新 Agent，R0 观测/日志照常。
         if (state.ipcSafeMode && !state.ipcSafeMode->ShouldAcceptClients()) {
             if (state.ipcSafeMode->IsAnomalyLatched()) {
+                std::wstring sources;
+                const auto append = [&sources](bool on, const wchar_t* name) {
+                    if (on) {
+                        if (!sources.empty()) {
+                            sources += L"/";
+                        }
+                        sources += name;
+                    }
+                };
+                append(state.ipcNativeProbeAnomaly, L"native");
+                append(state.ipcOsSupportAnomaly, L"os");
+                append(state.ipcConfigAnomaly, L"config");
+                append(state.ipcRecoveryUnconfirmed, L"recovery");
                 state.logger.Write(
                     optimizer::logger::LogLevel::Info, L"service",
-                    L"ipc  : Safe Mode（Native 探测异常锁存）保持，暂停受理 Agent");
+                    L"ipc  : Safe Mode（启动异常锁存：" + sources +
+                        L"）保持，暂停受理 Agent");
             } else {
                 state.logger.Write(optimizer::logger::LogLevel::Info,
                                    L"service",
@@ -1621,19 +1637,41 @@ bool IsValidIpcToken(const std::wstring& token) noexcept;
 std::optional<std::filesystem::path> FindIpcTokenFile(
     int argc, wchar_t* argv[], int start) noexcept;
 
+// SVC-004：每用户默认宿主配置路径（%LOCALAPPDATA%\CppOptimizer\config.local.toml，
+// 与恢复标记/凭据存储同目录）。LOCALAPPDATA 缺失时回退系统 Temp（避免空路径）。
+std::filesystem::path DefaultHostConfigPath() noexcept {
+    wchar_t buffer[MAX_PATH]{};
+    const DWORD len = ::GetEnvironmentVariableW(
+        L"LOCALAPPDATA", buffer, static_cast<DWORD>(MAX_PATH));
+    std::filesystem::path root;
+    if (len > 0 && len < static_cast<DWORD>(MAX_PATH)) {
+        root = std::filesystem::path(buffer);
+    } else {
+        std::error_code ec;
+        root = std::filesystem::temp_directory_path(ec);
+    }
+    return root / L"CppOptimizer" / L"config.local.toml";
+}
+
 int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
-    // --service console <s> [config.toml] [--ipc-facts] [--confirm-recovery]：控制台托管演示
-    //（前台、有界、Ctrl+C 优雅停止）。可选 --ipc-facts 在负载窗口内同时作为受保护管道服务端
-    // 常驻受理 Agent 事实（SVC-002/003，R0）。可选 [config.toml]（紧跟在秒数后的首个非选项
-    // 参数）在 --ipc-facts 时经 [ipc] 节配置 Safe Mode 门禁窗口参数（IPC-014）。IPC-018：
-    // 会话开始写恢复标记、正常结束清除；上次异常退出未确认时锁存 Safe Mode（暂停受理），
+    // --service console <s|run> [config.toml] [--ipc-facts] [--confirm-recovery]：
+    // 控制台托管——前台、Ctrl+C 优雅停止；<s> 为 1..60 秒有界窗口，run 表示常驻
+    //（无时间上限，直到 Ctrl+C/关闭信号；异常退出由恢复标记在下一次启动检测）。可选
+    // --ipc-facts 在运行期间同时作为受保护管道服务端常驻受理 Agent 事实（SVC-002/003，R0）。
+    // 可选 [config.toml]（紧跟在秒数后的首个非选项参数）在 --ipc-facts 时经 [ipc] 节配置
+    // Safe Mode 门禁窗口参数（IPC-014）；无显式配置时自动消费每用户默认配置
+    //（%LOCALAPPDATA%\CppOptimizer\config.local.toml，SVC-004）。IPC-018：会话开始写恢复
+    // 标记、正常结束清除；上次异常退出未确认时锁存 Safe Mode（暂停受理），
     // --confirm-recovery 显式确认后清除并继续（只读 R0 不受影响）。
     constexpr std::uint32_t kMaxSeconds = 60;
+    bool resident = false;
     std::uint32_t seconds = 0;
-    if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
-        seconds > kMaxSeconds) {
-        std::wcerr << L"  --service console seconds must be in 1.."
-                   << kMaxSeconds << L"\n";
+    if (argc >= 4 && std::wstring_view(argv[3]) == L"run") {
+        resident = true;
+    } else if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
+               seconds > kMaxSeconds) {
+        std::wcerr << L"  --service console needs <seconds 1.." << kMaxSeconds
+                   << L"|run>\n";
         return 2;
     }
     // 可选配置路径：argv[4] 为“非选项”token 时视为配置（其余位置参数均为选项及其值）。
@@ -1654,29 +1692,58 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         }
     }
 
-    // IPC-014：Safe Mode 门禁窗口参数（供 banner/门禁构造引用，缺省 = 状态机默认）。
+    // IPC-014/SVC-004：Safe Mode 门禁窗口参数（供 banner/门禁构造引用，缺省 = 状态机默认）。
+    // [ipc] 配置仅在 --ipc-facts 时消费（无门禁则配置无意义）。配置来源优先级：
+    // 显式 [config.toml] -> 每用户默认配置（%LOCALAPPDATA%\CppOptimizer\config.local.toml，
+    // 与恢复标记/凭据同目录，存在才消费）-> 状态机默认（零回归）。显式配置无效 = 语义错误，
+    // 启动期直接拒绝（错误配置显式暴露）；默认配置无效按环境异常处理 -> Safe Mode「配置无效」
+    // 离散锁存（常驻宿主不因损坏的环境配置退出，R0 负载照常、暂停受理 Agent，见启动异常块）。
     optimizer::service::SafeModeGuard::Options safeModeOptions;
-    // [ipc] 配置仅在 --ipc-facts 时消费（无门禁则配置无意义）；无配置路径时保持
-    // SafeModeGuard 默认常量（零回归）。
     std::optional<optimizer::config::ConfigSnapshot> consoleConfigSnapshot;
-    if (ipcFacts && consoleConfig) {
-        auto loaded = optimizer::config::LoadConfig(consoleConfig->wstring());
-        if (!loaded) {
-            const auto& error = loaded.ErrorValue();
-            std::wcerr << L"  --service console config load failed ["
-                       << optimizer::common::ToString(error.domain) << L":"
-                       << error.code << L"] " << error.message << L"\n";
-            return 2;
+    std::filesystem::path hostConfigPath; // 实际消费的配置路径（空 = 未消费配置）
+    std::wstring hostConfigError;         // 默认配置无效时的错误描述（供日志）
+    bool hostConfigIsDefault = false;     // 消费的是每用户默认配置
+    bool hostConfigInvalid = false;       // 默认配置存在但无效（Safe Mode 触发源）
+    if (ipcFacts) {
+        if (consoleConfig) {
+            hostConfigPath = consoleConfig.value();
+        } else {
+            std::error_code ec;
+            const auto defaultPath = DefaultHostConfigPath();
+            if (std::filesystem::exists(defaultPath, ec)) {
+                hostConfigPath = defaultPath;
+                hostConfigIsDefault = true;
+            }
         }
-        const auto& safeMode = loaded.Value().ipc.safeMode;
-        safeModeOptions.enabled = safeMode.enabled;
-        safeModeOptions.failuresToEnter =
-            static_cast<std::size_t>(safeMode.failuresToEnter);
-        safeModeOptions.countingWindow = std::chrono::milliseconds(
-            safeMode.countingWindowMs);
-        safeModeOptions.cooldown =
-            std::chrono::milliseconds(safeMode.cooldownMs);
-        consoleConfigSnapshot = loaded.Value();
+        if (!hostConfigPath.empty()) {
+            auto loaded =
+                optimizer::config::LoadConfig(hostConfigPath.wstring());
+            if (!loaded) {
+                const auto& error = loaded.ErrorValue();
+                hostConfigError =
+                    L"[" +
+                    std::wstring(optimizer::common::ToString(error.domain)) +
+                    L":" + std::to_wstring(error.code) + L"] " +
+                    error.message;
+                if (hostConfigIsDefault) {
+                    hostConfigInvalid = true; // 锁存延后到门禁构造后（见启动异常块）
+                } else {
+                    std::wcerr << L"  --service console config load failed "
+                               << hostConfigError << L"\n";
+                    return 2;
+                }
+            } else {
+                const auto& safeMode = loaded.Value().ipc.safeMode;
+                safeModeOptions.enabled = safeMode.enabled;
+                safeModeOptions.failuresToEnter =
+                    static_cast<std::size_t>(safeMode.failuresToEnter);
+                safeModeOptions.countingWindow = std::chrono::milliseconds(
+                    safeMode.countingWindowMs);
+                safeModeOptions.cooldown =
+                    std::chrono::milliseconds(safeMode.cooldownMs);
+                consoleConfigSnapshot = loaded.Value();
+            }
+        }
     }
 
     ServiceHostDemoState state;
@@ -1799,6 +1866,21 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         } else {
             state.ipcNativeProbeOk = true;
         }
+        // SVC-004：每用户默认配置无效 -> Safe Mode「配置无效」离散触发（docs/23 §6）。
+        // 显式配置无效已在启动期拒绝（语义错误显式暴露）；默认配置损坏按环境异常处理：
+        // 锁存 Safe Mode、暂停受理 Agent，R0 负载照常；修复或移除配置后重启恢复。
+        if (hostConfigInvalid) {
+            state.ipcSafeMode->OnAnomalyDetected();
+            ++state.ipcAnomalyEntries;
+            state.ipcConfigAnomaly = true;
+            state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
+                               L"ipc  : Safe Mode entered - 每用户默认配置无效（" +
+                                   hostConfigPath.wstring() + L"）");
+            state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
+                               L"ipc  : config load failed " + hostConfigError);
+            state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
+                               L"ipc  : 暂停受理新 Agent（配置无效锁存；修复或移除配置后重启）");
+        }
         // IPC-018：上次异常退出且恢复未确认（docs/23 §6 触发项）。启动先查恢复标记：
         // 标记存在 = 上次会话未正常结束（崩溃/被杀/失败返回）。--confirm-recovery 显式确认
         // 先清除标记；否则视为离散异常锁存 Safe Mode（暂停受理，需下次确认后恢复）。随后写入
@@ -1837,8 +1919,13 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         optimizer::service::CreateWin32ScmBackend());
 
     std::wostringstream header;
-    header << L"Service host (console mode, R0 workload, " << seconds
-           << L" s)";
+    if (resident) {
+        header << L"Service host (console mode, R0 workload, resident until "
+                  L"Ctrl+C)";
+    } else {
+        header << L"Service host (console mode, R0 workload, " << seconds
+               << L" s)";
+    }
     optimizer::common::WriteConsoleLine(header.str());
     optimizer::common::WriteConsoleLine(
         L"  workload : memory snapshot + info log (read-only)");
@@ -1867,10 +1954,22 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                          << L" pause)";
             }
             optimizer::common::WriteConsoleLine(gateLine.str());
-            if (consoleConfigSnapshot) {
+            if (hostConfigInvalid) {
                 optimizer::common::WriteConsoleLine(
-                    L"  config   : " + consoleConfig.value().wstring() +
-                    L" ([ipc] safe_mode)");
+                    L"  config   : invalid default config -> Safe Mode (agent "
+                    L"intake paused); fix or remove and restart");
+                optimizer::common::WriteConsoleLine(
+                    L"  config   : " + hostConfigPath.wstring());
+                optimizer::common::WriteConsoleLine(L"  config   : load failed " +
+                                                    hostConfigError);
+            } else if (consoleConfigSnapshot) {
+                optimizer::common::WriteConsoleLine(
+                    L"  config   : " + hostConfigPath.wstring() +
+                    (hostConfigIsDefault ? L" (default, [ipc] safe_mode)"
+                                         : L" ([ipc] safe_mode)"));
+            } else {
+                optimizer::common::WriteConsoleLine(
+                    L"  config   : none (Safe Mode gate defaults)");
             }
             optimizer::common::WriteConsoleLine(
                 state.ipcNativeProbeAnomaly
@@ -1893,8 +1992,12 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             }
         }
     }
-    optimizer::common::WriteConsoleLine(L"  stop     : Ctrl+C or timeout");
-    const auto result = host.RunConsole(std::chrono::seconds(seconds));
+    optimizer::common::WriteConsoleLine(
+        resident ? L"  stop     : Ctrl+C or console close"
+                 : L"  stop     : Ctrl+C or timeout");
+    const auto result =
+        resident ? host.RunConsole(std::nullopt)
+                 : host.RunConsole(std::chrono::seconds(seconds));
     if (state.ipcSession) {
         state.ipcSession->Close(); // 结束常驻监听会话（幂等）
     }
@@ -1946,6 +2049,9 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             }
             if (state.ipcOsSupportAnomaly) {
                 safeLine << L", unsupported os/build";
+            }
+            if (state.ipcConfigAnomaly) {
+                safeLine << L", invalid default config";
             }
             if (state.ipcRecoveryUnconfirmed) {
                 safeLine << L", recovery unconfirmed";
@@ -2942,13 +3048,14 @@ void PrintUsage() {
         << L"                             demand start, R0 workload)\n"
         << L"  CppOptimizer.exe --service uninstall           Remove the Windows service\n"
         << L"                             (SCM, requires administrator)\n"
-        << L"  CppOptimizer.exe --service console <s> [config.toml] [--ipc-facts]\n"
+        << L"  CppOptimizer.exe --service console <s|run> [config.toml] [--ipc-facts]\n"
         << L"                             [--confirm-recovery] [--ipc-token <t>]\n"
         << L"                             [--ipc-token-file [<path>]]\n"
         << L"                             [--ipc-allow-user <SID>]  Host the R0 workload\n"
-        << L"                             in console mode for 1..60 s (foreground; Ctrl+C\n"
-        << L"                             to stop). --ipc-facts also serves Agent facts\n"
-        << L"                             frames via the protected pipe continuously\n"
+        << L"                             in console mode for 1..60 s or until Ctrl+C\n"
+        << L"                             (run = resident; foreground; Ctrl+C to stop).\n"
+        << L"                             --ipc-facts also serves Agent facts frames via the\n"
+        << L"                             protected pipe continuously\n"
         << L"                             (optional session token / user SID allow-list).\n"
         << L"                             --confirm-recovery (IPC-018) acknowledges an\n"
         << L"                             unclean previous run (recovery-state.json marker)\n"

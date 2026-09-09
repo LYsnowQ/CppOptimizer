@@ -144,10 +144,11 @@ public:
     ServiceHost(const ServiceHost&) = delete;
     ServiceHost& operator=(const ServiceHost&) = delete;
 
-    // 控制台模式：前台、有界运行 boundedFor；Ctrl+C/关闭信号触发优雅停止。
+    // 控制台模式：boundedFor 有值时前台有界运行（须为正秒数）；nullopt 表示常驻运行
+    //（无时间上限，直到 Ctrl+C/关闭信号触发优雅停止；进程异常退出由调用方恢复机制检测）。
     // 成功表示正常停止；失败表示负载错误或信号处理器安装失败。
     [[nodiscard]] common::Result<void> RunConsole(
-        std::chrono::seconds boundedFor) noexcept;
+        std::optional<std::chrono::seconds> boundedFor) noexcept;
 
     // 服务模式：进入 SCM 分发循环并按状态机上报
     // START_PENDING -> RUNNING -> STOP_PENDING -> STOPPED。

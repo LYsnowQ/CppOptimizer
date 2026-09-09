@@ -354,8 +354,8 @@ bool ServiceHost::IsStopRequested() const noexcept {
 }
 
 common::Result<void> ServiceHost::RunConsole(
-    std::chrono::seconds boundedFor) noexcept {
-    if (boundedFor.count() <= 0) {
+    std::optional<std::chrono::seconds> boundedFor) noexcept {
+    if (boundedFor && boundedFor->count() <= 0) {
         return common::Result<void>::Failure(common::Error::Validation(
             "RunConsole", L"boundedFor 必须为正秒数"));
     }
@@ -369,8 +369,10 @@ common::Result<void> ServiceHost::RunConsole(
         return common::Result<void>::Failure(common::Error::FromWin32(
             ::GetLastError(), "SetConsoleCtrlHandler"));
     }
-    const auto deadline =
-        std::chrono::steady_clock::now() + boundedFor;
+    std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt;
+    if (boundedFor) {
+        deadline = std::chrono::steady_clock::now() + *boundedFor;
+    }
     const auto loop = RunLoop(deadline);
     {
         std::lock_guard<std::mutex> lock(gConsoleHostMutex);

@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <windows.h>
@@ -393,6 +394,30 @@ bool TestRequestStopIdempotent() {
     return host.IsStopRequested();
 }
 
+bool TestConsoleResidentRunsUntilStop() {
+    // 常驻（RunConsole(std::nullopt)）：无时间上限，运行到外部 RequestStop 才优雅退出。
+    auto fake = std::make_shared<FakeScmBackend>();
+    std::size_t ticks = 0;
+    ServiceHost host(
+        [&] {
+            ++ticks;
+            return Result<void>::Success();
+        },
+        MakeOptions(), fake);
+    bool finished = false;
+    std::thread runner([&host, &finished] {
+        const auto result = host.RunConsole(std::nullopt);
+        finished = result.HasValue(); // 优雅退出应返回成功
+    });
+    // 等待至少执行若干 tick（tick 间隔 10ms）后请求停止并回收线程。
+    for (int i = 0; i < 500 && ticks < 3; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    host.RequestStop();
+    runner.join();
+    return finished && host.IsStopRequested() && ticks >= 3;
+}
+
 bool TestConsoleZeroDurationRejected() {
     auto fake = std::make_shared<FakeScmBackend>();
     ServiceHost host([] { return Result<void>::Success(); }, MakeOptions(), fake);
@@ -715,6 +740,7 @@ int wmain() {
     run(L"console bounded runs workload", &TestConsoleBoundedRunsWorkload);
     run(L"request stop ends console early", &TestRequestStopEndsConsoleEarly);
     run(L"request stop idempotent", &TestRequestStopIdempotent);
+    run(L"console resident runs until stop", &TestConsoleResidentRunsUntilStop);
     run(L"console zero duration rejected", &TestConsoleZeroDurationRejected);
     run(L"install rejects empty names", &TestInstallRejectsEmptyNames);
     run(L"uninstall rejects empty name", &TestUninstallRejectsEmptyName);
