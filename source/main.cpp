@@ -1950,7 +1950,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         state.ipcSession = std::make_shared<optimizer::ipc::IpcSession>(
             optimizer::ipc::CreateWin32ServerBackend(state.ipcPipeName),
             ipcOptions);
-        // IPC-015/016：启动环境离散异常（docs/23 §6 触发项：Native capability 探测异常、
+        // IPC-015/016：启动环境离散异常（触发项：Native capability 探测异常、
         // 不支持的 OS/build）。受理 Agent 前做一次只读启动基线检查：Native 探测失败或核心只读
         // 能力缺失（ntdll 加载失败 / NtQuerySystemInformation / 状态码转换不可用），或操作系统
         // 不受支持（非 Win10/11 x64，RtlGetVersion + GetNativeSystemInfo 只读判定）——任一
@@ -2001,7 +2001,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         } else {
             state.ipcNativeProbeOk = true;
         }
-        // SVC-004：每用户默认配置无效 -> Safe Mode「配置无效」离散触发（docs/23 §6）。
+        // SVC-004：每用户默认配置无效 -> Safe Mode「配置无效」离散触发。
         // 显式配置无效已在启动期拒绝（语义错误显式暴露）；默认配置损坏按环境异常处理：
         // 锁存 Safe Mode、暂停受理 Agent，R0 负载照常；修复或移除配置后重启恢复。
         if (hostConfigInvalid) {
@@ -2016,7 +2016,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             state.logger.Write(optimizer::logger::LogLevel::Info, L"service",
                                L"ipc  : 暂停受理新 Agent（配置无效锁存；修复或移除配置后重启）");
         }
-        // IPC-018：上次异常退出且恢复未确认（docs/23 §6 触发项）。启动先查恢复标记：
+        // IPC-018：上次异常退出且恢复未确认，属 Safe Mode 离散异常触发项。启动先查恢复标记：
         // 标记存在 = 上次会话未正常结束（崩溃/被杀/失败返回）。--confirm-recovery 显式确认
         // 先清除标记；否则视为离散异常锁存 Safe Mode（暂停受理，需下次确认后恢复）。随后写入
         // 本次会话标记，正常结束（RunConsole 成功返回）时清除；失败/被杀则留存供下次检测。

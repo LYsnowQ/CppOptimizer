@@ -19,7 +19,7 @@ enum class RiskLevel { R0, R1, R2, R3, R4 };
 // 等级名（纯查询，恒成功）。
 [[nodiscard]] const wchar_t* RiskLevelToString(RiskLevel level) noexcept;
 
-// 一次受审计动作（docs 安全审计日志字段子集，AUD-001）：
+// 一次受审计动作（审计记录字段，AUD-001）：
 // operationId 动作标识（如 "priority.boost"/"power.release"）、target 目标描述、detail 参数/
 // 结果说明、ok 是否成功、caller 来源（policy/console/recovery 等）、at 发生时刻（单调时钟，
 // 仅用于排序与窗口内展示，不跨重启作绝对时间）。

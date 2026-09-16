@@ -553,7 +553,7 @@ bool TestPowerAcquireFailureNotDisguised() {
     return !executor.IsPowerHeld() && h.power->open.empty();
 }
 
-// ---------- IPC-017：R1 动作连续失败停摆（同一动作连续失败超阈值，docs/23 §6） ----------
+// ---------- IPC-017：R1 动作连续失败停摆（同一动作连续失败超阈值） ----------
 
 bool TestConsecutiveFailuresHaltDisabledByDefault() {
     // 阈值默认 0 = 关闭：连续失败不触发停摆（零回归），每次仍如实报错并重试。

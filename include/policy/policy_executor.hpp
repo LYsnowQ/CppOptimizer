@@ -32,7 +32,7 @@ struct ExecutorConfig {
         config::PriorityLevel::AboveNormal;       // [priority].max_level
     bool powerExecutionRequired = false;          // [power].execution_required
     std::wstring powerReason = L"CppOptimizer policy: game running (R1)";
-    // R1 动作连续失败停摆（IPC-017，docs/23 §6“同一动作连续失败超过阈值”执行器侧）：
+    // R1 动作连续失败停摆（IPC-017，执行器侧）：
     // >0 时 ApplyDecision 连续 N 次因 R1 动作失败（优先级/电源获取或释放出错）后执行器进入
     // halted——不再调用任何后端（决策仍由 PolicyEvaluator 产出展示，纯咨询），直到 ResetHalt。
     // 任何一次 ApplyDecision 成功（含无需动作）重置连续计数。0 = 关闭（缺省，零回归）。

@@ -188,13 +188,13 @@ private:
     std::condition_variable cv_;
 };
 
-// Safe Mode（docs/23 §6 面向 Agent 受理侧）门禁：宿主对触发源做判定，进入 Safe Mode 后暂停
+// Safe Mode（面向 Agent 受理侧）门禁：宿主对触发源做判定，进入 Safe Mode 后暂停
 // 继续受理新 Agent（仅保留 R0 观测/日志）。两类触发源：
 //  1) 计数触发（IPC-010/013/014，已落地）：身份/凭据失败（UnauthorizedClient/AuthFailed）在
 //     时间窗口内达阈值即进入；冷却到期自动恢复并清空窗口；正常受理不参与计数（窗口自然过期
 //     防误积累）。
 //  2) 离散异常触发（IPC-015，本切片）：持续状态异常（配置无效 / Native capability 探测异常 /
-//     不支持 OS 等 docs/23 §6 清单项）触发即进入并**锁存保持**（latched，不随冷却流逝自动恢复），
+//     不支持 OS 等持续环境异常）触发即进入并**锁存保持**（latched，不随冷却流逝自动恢复），
 //     直到显式 ClearAnomaly（异常已恢复/所有者确认）。
 // 其余触发项（异常退出恢复未确认等）随各自切片接入同类源。
 enum class SafeModeState {
@@ -202,7 +202,7 @@ enum class SafeModeState {
     SafeMode  // 暂停受理新 Agent（计数冷却中或离散异常锁存）
 };
 
-// Safe Mode 门禁状态机（docs/23 §6 触发项：IPC 身份验证失败次数异常 + 离散异常）。
+// Safe Mode 门禁状态机（触发源：身份/凭据失败窗口计数 + 离散环境异常）。
 class SafeModeGuard {
 public:
     using Clock = std::function<std::chrono::steady_clock::time_point()>;

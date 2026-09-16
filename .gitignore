@@ -54,7 +54,7 @@ thirdParty/
 # AI 临时测试目录（测试文件可删除，不提交 Git）
 /AI_test/
 
-# Local learning workspace (never commit)
+# Local private workspace (never commit)
 /work.md
 /works/
 
