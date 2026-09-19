@@ -1,4 +1,4 @@
-#include "platform/native_api.hpp"
+﻿#include "platform/native_api.hpp"
 
 #include <iostream>
 

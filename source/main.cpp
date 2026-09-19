@@ -20,6 +20,7 @@
 #include "priority/priority_booster.hpp"
 #include "process/process_watcher.hpp"
 #include "service/service_host.hpp"
+#include "service/startup_entry.hpp"
 #include "service/recovery_marker.hpp"
 #include "service/tray_host.hpp"
 #include "service/presence.hpp"
@@ -44,6 +45,46 @@
 #include <vector>
 
 namespace {
+
+// 每用户数据目录下的审计文件路径（定义见本文件后部）。
+std::filesystem::path DefaultAuditLogPath() noexcept;
+
+// 作用域错误行（替代宽字符标准错误流）：链式拼接后在临时对象析构时按 stderr 双路径一次性写出。
+// 存在的理由：宽字符标准错误流在默认 C locale 下遇非 ASCII（本地化 Win32 错误消息）会进入 failbit
+// 并丢弃之后的所有输出，造成“错误原因静默丢失”；本类保证消息完整，且重定向 stderr 时仍为 UTF-8 字节。
+// 用法与原宽字符标准错误流相同（内容里需自行带换行符）。
+class ErrorLine {
+public:
+    ErrorLine() = default;
+    ErrorLine(const ErrorLine&) = delete;
+    ErrorLine& operator=(const ErrorLine&) = delete;
+
+    template <typename T>
+    ErrorLine& operator<<(const T& value) {
+        stream_ << value;
+        return *this;
+    }
+
+    ~ErrorLine() {
+        optimizer::common::WriteConsoleError(stream_.str());
+    }
+
+private:
+    std::wostringstream stream_;
+};
+
+// CFG-006：[memory].query_enabled 门禁——配置显式关闭时**拒绝**系统内存查询并报明原因（不静默降级）。
+// 只由已消费的配置影响判定：未给配置 = 默认放行（零回归）；返回 false 表示已拒绝，调用方应立即返回 2。
+bool EnsureMemoryQueryAllowed(
+    const std::optional<optimizer::config::ConfigSnapshot>& config) {
+    if (config && !config->memory.queryEnabled) {
+        ErrorLine{} << L"  memory query disabled by config ([memory].query_enabled = false)\n"
+                    << L"  hint   : set query_enabled = true, or drop the config"
+                    << L" argument to use the built-in default\n";
+        return false;
+    }
+    return true;
+}
 
 // 严格无符号十进制解析：拒绝空输入、前缀垃圾与尾随非数字。
 // 仅在完全解析成功时写入 out，保持 CLI 解析严格。
@@ -79,11 +120,27 @@ bool AsciiEqualsIgnoreCaseW(std::wstring_view a, std::wstring_view b) noexcept {
     return true;
 }
 
-int RunStatus() {
+int RunStatus(const std::wstring& configPath) {
+    // CFG-006：可选 [config.toml]——仅在显式给出时读配置（不给则与既有行为一致）。
+    std::optional<optimizer::config::ConfigSnapshot> config;
+    if (!configPath.empty()) {
+        auto loaded = optimizer::config::LoadConfig(configPath);
+        if (!loaded) {
+            const auto& error = loaded.ErrorValue();
+            ErrorLine{} << L"  config load failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        config = loaded.Value();
+        if (!EnsureMemoryQueryAllowed(config)) {
+            return 2;
+        }
+    }
     const auto result = optimizer::memory::QueryMemoryStatus();
     if (!result) {
         const auto& error = result.ErrorValue();
-        std::wcerr << L"  memory snapshot : failed ["
+        ErrorLine{} << L"  memory snapshot : failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -116,7 +173,24 @@ int RunStatus() {
     return 0;
 }
 
-int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
+int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText,
+               const std::wstring& configPath = {}) {
+    // CFG-006：可选 [config.toml]——与 --status 同口径（显式给出才读，关闭则拒绝查询）。
+    if (!configPath.empty()) {
+        auto loaded = optimizer::config::LoadConfig(configPath);
+        if (!loaded) {
+            const auto& error = loaded.ErrorValue();
+            ErrorLine{} << L"  config load failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        const std::optional<optimizer::config::ConfigSnapshot> config =
+            loaded.Value();
+        if (!EnsureMemoryQueryAllowed(config)) {
+            return 2;
+        }
+    }
     // 前台、有界、用户主动发起的观测：无后台线程、无周期任务、无系统写入。
     // 属指标采样而非清理轮询；自动内存清理的红区规则不适用。
     constexpr std::uint32_t kMaxSeconds = 60;
@@ -124,7 +198,7 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
     std::uint32_t seconds = 0;
     if (!ParseUint32(secondsText, seconds) || seconds == 0 ||
         seconds > kMaxSeconds) {
-        std::wcerr << L"  --observe seconds must be in 1.." << kMaxSeconds << L"\n";
+        ErrorLine{} << L"  --observe seconds must be in 1.." << kMaxSeconds << L"\n";
         return 2;
     }
 
@@ -133,7 +207,7 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
     if (!thresholdText.empty()) {
         std::uint32_t parsed = 0;
         if (!ParseUint32(thresholdText, parsed) || parsed > 100) {
-            std::wcerr << L"  --observe threshold must be in 0..100\n";
+            ErrorLine{} << L"  --observe threshold must be in 0..100\n";
             return 2;
         }
         threshold = parsed;
@@ -148,7 +222,7 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
         const auto status = optimizer::memory::QueryMemoryStatus();
         if (!status) {
             const auto& error = status.ErrorValue();
-            std::wcerr << L"  memory sample failed ["
+            ErrorLine{} << L"  memory sample failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -164,7 +238,7 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
     auto report = optimizer::metrics::AggregateMemoryWindow(samples);
     if (!report) {
         const auto& error = report.ErrorValue();
-        std::wcerr << L"  window aggregation failed ["
+        ErrorLine{} << L"  window aggregation failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -173,7 +247,7 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText) {
     auto share = optimizer::metrics::ShareOfLoadBelow(samples, threshold);
     if (!share) {
         const auto& error = share.ErrorValue();
-        std::wcerr << L"  low-load share failed ["
+        ErrorLine{} << L"  low-load share failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -198,7 +272,7 @@ int RunConfigCommand(std::wstring_view path) {
     auto result = optimizer::config::LoadConfig(path);
     if (!result) {
         const auto& error = result.ErrorValue();
-        std::wcerr << L"  config load failed ["
+        ErrorLine{} << L"  config load failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -211,12 +285,16 @@ int RunConfigCommand(std::wstring_view path) {
         mode = L"experimental";
     }
     std::wcout << L"Config snapshot (read-only)\n";
-    std::wcout << L"  version    : " << c.version << L"\n";
+    const std::string versionText =
+        optimizer::config::FormatConfigVersion(c.version);
+    std::wcout << L"  version    : "
+               << std::wstring(versionText.begin(), versionText.end())
+               << L"\n";
     std::wcout << L"  mode       : " << mode << L"\n";
     std::wcout << L"  logging    : level " << std::wstring(c.logging.level.begin(),
                                                         c.logging.level.end())
                << L", max " << c.logging.maxFileMb << L" MB x "
-               << c.logging.maxFiles << L" files\n";
+               << c.logging.maxFiles << L" backup file(s)\n";
     std::wcout << L"  memory     : query " << (c.memory.queryEnabled ? L"on" : L"off")
                << L", clean " << (c.memory.scheduledCleanEnabled ? L"on" : L"off")
                << L", native-write " << (c.memory.allowNativeWrite ? L"on" : L"off")
@@ -249,6 +327,27 @@ int RunConfigCommand(std::wstring_view path) {
     }
     std::wcout << L"\n";
     std::wcout << L"  games      : " << c.games.size() << L" rule(s)\n";
+    // 如实区分“已解析”与“已生效”：以下字段尚无消费者（能力待落地或模块未实施），
+    // 回显它们不代表行为已生效（与日志/审计同口径：不伪装成功）。
+    std::wcout << L"  pending    : parsed but not effective yet:\n"
+                  L"               [application].safe_mode_on_recovery_error\n"
+                  L"               [memory].max_clean_level\n"
+                  L"               [gpu_heartbeat]/[scheduler]/[disk_cache] (modules not implemented)\n";
+    // 未知键如实上报（拼写错误不再被静默吞掉）。键名允许非 ASCII，故先冲刷 std::wcout
+    // 缓冲再走双路径输出（std::wcout 在默认 C locale 下遇非 ASCII 会进入 failbit 截断后续输出）。
+    if (!c.unknownKeys.empty()) {
+        std::wcout.flush();
+        std::wostringstream unknownHead;
+        unknownHead << L"  unknown    : " << c.unknownKeys.size()
+                    << L" ignored key(s) (typo? defaults were used):";
+        optimizer::common::WriteConsoleLine(unknownHead.str());
+        for (const auto& key : c.unknownKeys) {
+            const auto wide = optimizer::common::Utf8ToWide(key);
+            optimizer::common::WriteConsoleLine(
+                std::wstring(L"               ") +
+                (wide ? wide.Value() : L"<undecodable key>"));
+        }
+    }
     return 0;
 }
 
@@ -267,7 +366,7 @@ int RunActivityCommand(int argc, wchar_t* argv[]) {
     std::uint32_t seconds = 0;
     if (argc < 3 || !ParseUint32(argv[2], seconds) || seconds == 0 ||
         seconds > kMaxSeconds) {
-        std::wcerr << L"  --activity seconds must be in 1.." << kMaxSeconds
+        ErrorLine{} << L"  --activity seconds must be in 1.." << kMaxSeconds
                    << L"\n";
         return 2;
     }
@@ -286,12 +385,12 @@ int RunActivityCommand(int argc, wchar_t* argv[]) {
             continue;
         }
         if (arg.size() >= 2 && arg[0] == L'-') {
-            std::wcerr << L"  --activity unknown option: " << arg << L"\n";
+            ErrorLine{} << L"  --activity unknown option: " << arg << L"\n";
             return 2;
         }
         if (idleGiven || !ParseUint32(arg, idleSecs) || idleSecs == 0 ||
             idleSecs > 3600) {
-            std::wcerr << L"  --activity idle-secs must be in 1..3600\n";
+            ErrorLine{} << L"  --activity idle-secs must be in 1..3600\n";
             return 2;
         }
         idleGiven = true; // 位置参数仅一个（idle-secs），顺序与 --session 无关
@@ -367,7 +466,7 @@ int RunActivityCommand(int argc, wchar_t* argv[]) {
             static_cast<std::int64_t>(idleSecs) * 1000, onSample);
         if (!result) {
             const auto& error = result.ErrorValue();
-            std::wcerr << L"  observation failed ["
+            ErrorLine{} << L"  observation failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -427,7 +526,7 @@ int RunActivityCommand(int argc, wchar_t* argv[]) {
             static_cast<std::int64_t>(idleSecs) * 1000, onSample);
         if (!result) {
             const auto& error = result.ErrorValue();
-            std::wcerr << L"  observation failed ["
+            ErrorLine{} << L"  observation failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -449,7 +548,7 @@ int RunActivityCommand(int argc, wchar_t* argv[]) {
         static_cast<std::int64_t>(idleSecs) * 1000, onSample);
     if (!result) {
         const auto& error = result.ErrorValue();
-        std::wcerr << L"  observation failed ["
+        ErrorLine{} << L"  observation failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -471,7 +570,7 @@ int RunCpuCommand() {
     optimizer::metrics::PdhCpuQuery query;
     auto init = query.Initialize();
     if (!init) {
-        std::wcerr << L"  cpu query init failed ["
+        ErrorLine{} << L"  cpu query init failed ["
                    << optimizer::common::ToString(init.ErrorValue().domain) << L":"
                    << init.ErrorValue().code << L"] "
                    << init.ErrorValue().message << L"\n";
@@ -480,7 +579,7 @@ int RunCpuCommand() {
 
     auto first = query.Sample(); // warming-up 基线
     if (!first) {
-        std::wcerr << L"  cpu sample failed ["
+        ErrorLine{} << L"  cpu sample failed ["
                    << optimizer::common::ToString(first.ErrorValue().domain)
                    << L":" << first.ErrorValue().code << L"] "
                    << first.ErrorValue().message << L"\n";
@@ -489,7 +588,7 @@ int RunCpuCommand() {
 
     auto second = query.Sample();
     if (!second || !second.Value().valid) {
-        std::wcerr << L"  cpu sample not ready (warming up)\n";
+        ErrorLine{} << L"  cpu sample not ready (warming up)\n";
         return 2;
     }
 
@@ -503,7 +602,7 @@ int RunLogCommand(int argc, wchar_t* argv[]) {
     // --log <module> <message...>: 向 stderr 写入一条同步 Info 记录。
     // 只读、前台、无后台线程；消息文本永不被当作命令解析。
     if (argc < 4) {
-        std::wcerr << L"  --log requires a module and a message\n";
+        ErrorLine{} << L"  --log requires a module and a message\n";
         return 2;
     }
     std::wstring message;
@@ -519,6 +618,71 @@ int RunLogCommand(int argc, wchar_t* argv[]) {
     return 0;
 }
 
+int RunAuditLogCommand(int argc, wchar_t* argv[]) {
+    // --audit-log [path] [lines]：只读回看审计文件末尾（默认每用户 audit.log，最近 20 行）。
+    // 只读：不写、不截断、不重命名、不删除；“尚无记录”与“读取失败”分开报（后者如实失败）。
+    // 输出统一走 WriteConsoleLine（双路径编码）：与直写句柄混用会打乱顺序，而 std::wcout
+    // 在默认 C locale 下遇中文进入 failbit 会截断错误消息。
+    constexpr std::size_t kDefaultLines = 20;
+    constexpr std::uint32_t kMaxLines = 200;
+    std::filesystem::path path = DefaultAuditLogPath();
+    std::size_t maxLines = kDefaultLines;
+    if (argc >= 3) {
+        path = argv[2];
+    }
+    if (argc >= 4) {
+        std::uint32_t parsed = 0;
+        if (!ParseUint32(argv[3], parsed) || parsed < 1 || parsed > kMaxLines) {
+            optimizer::common::WriteConsoleLine(
+                L"  --audit-log <lines> must be 1..200");
+            return 2;
+        }
+        maxLines = parsed;
+    }
+    const auto tail = optimizer::audit::ReadAuditTail(path, maxLines);
+    if (!tail) {
+        const auto& error = tail.ErrorValue();
+        std::wostringstream line;
+        line << L"  audit log read failed ["
+             << optimizer::common::ToString(error.domain) << L":"
+             << error.code << L"] " << error.message;
+        optimizer::common::WriteConsoleLine(line.str());
+        return 2;
+    }
+    optimizer::common::WriteConsoleLine(L"Audit trail (read-only)");
+    {
+        std::wostringstream line;
+        line << L"  path    : " << path.wstring();
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    {
+        std::wostringstream line;
+        line << L"  records : " << tail.Value().totalLines << L" line(s)";
+        if (tail.Value().totalLines > 0) {
+            line << L", showing last " << tail.Value().lines.size();
+        }
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (tail.Value().totalLines == 0) {
+        optimizer::common::WriteConsoleLine(
+            L"  note    : no audit records yet; R1 actions are recorded when ready");
+        optimizer::common::WriteConsoleLine(
+            L"            config gates enable [priority].enabled or");
+        optimizer::common::WriteConsoleLine(
+            L"            [power].execution_required");
+        return 0;
+    }
+    optimizer::common::WriteConsoleLine(
+        L"  note    : append-only; no rotation or retention configured yet");
+    for (const auto& line : tail.Value().lines) {
+        // 审计文件为 UTF-8：按 UTF-8 解码后走双路径输出；非法字节如实标注不伪装。
+        const auto wide = optimizer::common::Utf8ToWide(line);
+        optimizer::common::WriteConsoleLine(
+            wide ? wide.Value() : L"  <undecodable audit line>");
+    }
+    return 0;
+}
+
 int RunWatchCommand(int argc, wchar_t* argv[]) {
     // --watch <seconds> [config-path]: 前台、有界、只读的进程生命周期观测。
     // 后台轮询线程仅在命令执行期间存在，命令结束后立即停止。
@@ -526,7 +690,7 @@ int RunWatchCommand(int argc, wchar_t* argv[]) {
     std::uint32_t seconds = 0;
     if (!ParseUint32(argv[2], seconds) || seconds == 0 ||
         seconds > kMaxSeconds) {
-        std::wcerr << L"  --watch seconds must be in 1.." << kMaxSeconds << L"\n";
+        ErrorLine{} << L"  --watch seconds must be in 1.." << kMaxSeconds << L"\n";
         return 2;
     }
 
@@ -540,7 +704,7 @@ int RunWatchCommand(int argc, wchar_t* argv[]) {
             optimizer::config::LoadConfigWithLocal(argv[3], localPath);
         if (!config) {
             const auto& error = config.ErrorValue();
-            std::wcerr << L"  config load failed ["
+            ErrorLine{} << L"  config load failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -562,7 +726,7 @@ int RunWatchCommand(int argc, wchar_t* argv[]) {
     auto setup = watcher.SetRules(games);
     if (!setup) {
         const auto& error = setup.ErrorValue();
-        std::wcerr << L"  rule setup failed ["
+        ErrorLine{} << L"  rule setup failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -594,7 +758,7 @@ int RunWatchCommand(int argc, wchar_t* argv[]) {
     auto started = watcher.Start();
     if (!started) {
         const auto& error = started.ErrorValue();
-        std::wcerr << L"  watcher start failed ["
+        ErrorLine{} << L"  watcher start failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -632,7 +796,7 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     std::uint32_t seconds = 0;
     if (!ParseUint32(argv[2], seconds) || seconds == 0 ||
         seconds > kMaxSeconds) {
-        std::wcerr << L"  --policy seconds must be in 1.." << kMaxSeconds
+        ErrorLine{} << L"  --policy seconds must be in 1.." << kMaxSeconds
                    << L"\n";
         return 2;
     }
@@ -643,7 +807,11 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     optimizer::config::PolicyConfig policyConfig;
     optimizer::config::PowerConfig powerConfig;
     optimizer::config::PriorityConfig priorityConfig;
+    optimizer::config::RunMode applicationMode =
+        optimizer::config::RunMode::Observe; // [application].mode（默认最保守）
+    optimizer::config::LayerConfig layersConfig; // [layers].*（默认仅 monitoring）
     bool configLoaded = false; // 无配置时执行门禁全关（保守默认）
+    bool memoryQueryEnabled = true; // CFG-006：[memory].query_enabled（无配置 = 放行）
     if (argc >= 4) {
         const std::filesystem::path mainPath(argv[3]);
         const std::wstring localPath =
@@ -652,12 +820,15 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
             optimizer::config::LoadConfigWithLocal(argv[3], localPath);
         if (!config) {
             const auto& error = config.ErrorValue();
-            std::wcerr << L"  config load failed ["
+            ErrorLine{} << L"  config load failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
         }
         configLoaded = true;
+        memoryQueryEnabled = config.Value().memory.queryEnabled; // CFG-006
+        applicationMode = config.Value().application.mode;       // CFG-007
+        layersConfig = config.Value().layers;                    // CFG-007
         games = config.Value().games;
         policyConfig = config.Value().policy;
         powerConfig = config.Value().power;
@@ -687,7 +858,7 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     auto setup = watcher.SetRules(games);
     if (!setup) {
         const auto& error = setup.ErrorValue();
-        std::wcerr << L"  rule setup failed ["
+        ErrorLine{} << L"  rule setup failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -714,17 +885,38 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     // PWR-002：决策经配置门禁后落地为 R1 执行器动作；
     // 无配置或门禁关闭 = 纯咨询（POL-001 行为不变）。
     optimizer::policy::ExecutorConfig executorConfig;
+    // CFG-006：配置显式关闭内存查询时拒绝本命令（内存余量是策略决策的输入，不静默降级）。
+    if (configLoaded && !memoryQueryEnabled) {
+        ErrorLine{} << L"  memory query disabled by config ([memory].query_enabled = false)\n";
+        return 2;
+    }
+
+    // CFG-007（2026-09-17）：[application].mode 与 [layers].* 纳入 R1 门禁（叠加关系，保守默认）。
+    // 效果：默认 mode=observe 且 layers 默认 maintenance/emergency=false -> R1 动作全部被抑制；
+    // 要启用 R1 需显式 mode=balanced/experimental **且** layers.maintenance（或 emergency）= true。
+    const bool r1Allowed =
+        configLoaded && optimizer::config::AllowsLocalReversibleActions(
+                            applicationMode, layersConfig);
     executorConfig.priorityEnabled =
-        configLoaded && priorityConfig.enabled;
+        r1Allowed && priorityConfig.enabled;
     executorConfig.priorityMaxLevel = priorityConfig.maxLevel;
     executorConfig.powerExecutionRequired =
-        configLoaded && powerConfig.executionRequired;
+        r1Allowed && powerConfig.executionRequired;
+    // CFG-003：消费 [power].display_required（默认 false -> 零回归）。
+    executorConfig.powerDisplayRequired =
+        r1Allowed && powerConfig.displayRequired;
     executorConfig.consecutiveActionFailuresToHalt = static_cast<std::size_t>(
         std::max(0, policyConfig.haltAfterActionFailures));
-    // AUD-001：R1 动作审计（进程内有界记录；观察者接入执行器每次后端调用）。
-    optimizer::audit::AuditLog auditLog(optimizer::audit::AuditLog::Options{});
+    // AUD-001/002：R1 动作审计（观察者接入执行器每次后端调用）。
+    // AUD-002：同时持久化到每用户审计文件（一行一条）；落盘失败如实计入失败计数。
+    std::size_t auditWriteFailures = 0;
+    const auto auditLogPath = DefaultAuditLogPath();
+    optimizer::audit::AuditLog::Options auditOptions;
+    auditOptions.filePath = auditLogPath;
+    optimizer::audit::AuditLog auditLog(auditOptions);
     executorConfig.actionObserver =
-        [&auditLog](const optimizer::policy::ExecutorActionEvent& event) {
+        [&auditLog, &auditWriteFailures](
+            const optimizer::policy::ExecutorActionEvent& event) {
             optimizer::audit::AuditRecord record;
             record.operationId = event.operationId;
             record.risk = optimizer::audit::RiskLevel::R1;
@@ -732,7 +924,9 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
             record.target = event.target;
             record.detail = event.detail;
             record.ok = event.ok;
-            (void)auditLog.Append(std::move(record));
+            if (!auditLog.Append(std::move(record))) {
+                ++auditWriteFailures; // 审计不可用：动作已发生但未能落盘
+            }
         };
     optimizer::priority::PriorityBooster::Options boosterOptions;
     boosterOptions.maxLevel = executorConfig.priorityMaxLevel;
@@ -743,7 +937,8 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     optimizer::policy::PolicyExecutor executor(powerLocker, booster,
                                                executorConfig);
     const bool executionOn =
-        executorConfig.priorityEnabled || executorConfig.powerExecutionRequired;
+        executorConfig.priorityEnabled || executorConfig.powerExecutionRequired ||
+        executorConfig.powerDisplayRequired;
 
     if (executionOn) {
         std::wcout
@@ -754,7 +949,11 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
                    << L", power "
                    << (executorConfig.powerExecutionRequired
                            ? L"on"
-                           : L"off (gated)");
+                           : L"off (gated)")
+                   << L" (display "
+                   << (executorConfig.powerDisplayRequired ? L"on"
+                                                           : L"off")
+                   << L")";
         if (executorConfig.consecutiveActionFailuresToHalt > 0) {
             std::wcout << L", halt after "
                        << executorConfig.consecutiveActionFailuresToHalt
@@ -784,6 +983,8 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     std::size_t execUnboost = 0;
     std::size_t execPowerHold = 0;
     std::size_t execPowerRelease = 0;
+    std::size_t execDisplayHold = 0;
+    std::size_t execDisplayRelease = 0;
 
     while (std::chrono::steady_clock::now() < deadline) {
         const auto now = std::chrono::steady_clock::now();
@@ -919,6 +1120,16 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
                     L"  [exec] power request released");
                 ++execPowerRelease;
             }
+            if (effect.displayHeld) {
+                optimizer::common::WriteConsoleLine(
+                    L"  [exec] display power request held (game running)");
+                ++execDisplayHold;
+            }
+            if (effect.displayReleased) {
+                optimizer::common::WriteConsoleLine(
+                    L"  [exec] display power request released");
+                ++execDisplayRelease;
+            }
             if (!effect.skipped.empty()) {
                 std::wostringstream out;
                 out << L"  [exec] skipped: " << effect.skipped;
@@ -948,19 +1159,103 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
         execSummary << L"  exec     : boost " << execBoost << L" / unboost "
                     << execUnboost << L" / power+ " << execPowerHold
                     << L" / power- " << execPowerRelease;
+        if (execDisplayHold > 0 || execDisplayRelease > 0) {
+            execSummary << L" / display+ " << execDisplayHold
+                        << L" / display- " << execDisplayRelease;
+        }
         optimizer::common::WriteConsoleLine(execSummary.str());
     }
     if (auditLog.Size() > 0) {
         std::wostringstream auditLine;
         auditLine << L"  audit    : " << auditLog.Size()
-                  << L" R1 action record(s) recorded (in-memory)";
+                  << L" R1 action record(s) appended to "
+                  << auditLogPath.wstring();
         optimizer::common::WriteConsoleLine(auditLine.str());
         for (const auto& record : auditLog.Records()) {
             optimizer::common::WriteConsoleLine(
                 optimizer::audit::FormatAuditRecord(record));
         }
     }
+    if (auditWriteFailures > 0) {
+        // 审计不可用：不把失败当成功（R2/R3 门禁将以此为拒绝依据，见门禁设计）。
+        std::wostringstream auditFailLine;
+        auditFailLine << L"  audit    : " << auditWriteFailures
+                      << L" record(s) failed to persist (audit unavailable)";
+        optimizer::common::WriteConsoleLine(auditFailLine.str());
+    }
     return 0;
+}
+
+int RunStartupCommand(int argc, wchar_t* argv[]) {
+    // --startup <status|install|remove>：每用户自启动项（HKCU Run 键）。
+    // R1 局部可逆：仅当前用户、标准用户即可、remove 即恢复；默认不自动安装（须显式命令）。
+    if (argc < 3) {
+        ErrorLine{} << L"  --startup requires status|install|remove";
+        return 2;
+    }
+    const std::wstring_view action(argv[2]);
+    if (action == L"status") {
+        const auto queried = optimizer::service::QueryStartupEntry();
+        if (!queried) {
+            const auto& error = queried.ErrorValue();
+            ErrorLine{} << L"  startup query failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message;
+            return 2;
+        }
+        optimizer::common::WriteConsoleLine(L"Startup entry (per-user, HKCU Run)");
+        optimizer::common::WriteConsoleLine(
+            queried.Value().empty()
+                ? L"  state    : not installed"
+                : L"  state    : installed -> " + queried.Value());
+        return 0;
+    }
+    if (action == L"install") {
+        std::wstring exePath(MAX_PATH, L' ');
+        const DWORD written = ::GetModuleFileNameW(
+            nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
+        if (written == 0 || written >= exePath.size()) {
+            ErrorLine{} << L"  cannot resolve current executable path";
+            return 2;
+        }
+        exePath.resize(written);
+        // AGENT-A2：启动项必须写入**能拉起常驻托盘宿主的命令行**（仅写 exe 路径的话，
+        // 登录后启动的进程无参数 -> 只打印 usage，起不到 Agent 形态的作用）。
+        auto backend = optimizer::service::CreateWin32StartupEntryBackend();
+        if (!backend) {
+            ErrorLine{} << L"  startup install failed: 无法创建注册表后端";
+            return 2;
+        }
+        const std::wstring command =
+            L"\"" + exePath + L"\" --service console run --tray";
+        const auto installed = backend->Write(command);
+        if (!installed) {
+            const auto& error = installed.ErrorValue();
+            ErrorLine{} << L"  startup install failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message;
+            return 2;
+        }
+        optimizer::common::WriteConsoleLine(
+            L"  startup  : installed (per-user) -> " + command);
+        optimizer::common::WriteConsoleLine(
+            L"  revert   : CppOptimizer.exe --startup remove");
+        return 0;
+    }
+    if (action == L"remove") {
+        const auto removed = optimizer::service::RemoveStartupEntry();
+        if (!removed) {
+            const auto& error = removed.ErrorValue();
+            ErrorLine{} << L"  startup remove failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message;
+            return 2;
+        }
+        optimizer::common::WriteConsoleLine(L"  startup  : removed (idempotent)");
+        return 0;
+    }
+    ErrorLine{} << L"  --startup requires status|install|remove";
+    return 2;
 }
 
 int RunPowerLockCommand(int argc, wchar_t* argv[]) {
@@ -972,7 +1267,7 @@ int RunPowerLockCommand(int argc, wchar_t* argv[]) {
     std::uint32_t seconds = 0;
     if (!ParseUint32(argv[2], seconds) || seconds == 0 ||
         seconds > kMaxSeconds) {
-        std::wcerr << L"  --power-lock seconds must be in 1.." << kMaxSeconds
+        ErrorLine{} << L"  --power-lock seconds must be in 1.." << kMaxSeconds
                    << L"\n";
         return 2;
     }
@@ -1027,7 +1322,7 @@ int RunPowerLockCommand(int argc, wchar_t* argv[]) {
         const auto acquired = locker.AcquireLock(type, reason);
         if (!acquired) {
             const auto& error = acquired.ErrorValue();
-            std::wcerr
+            ErrorLine{}
                 << L"  acquire "
                 << optimizer::power::PowerLockTypeToString(type)
                 << L" failed [" << optimizer::common::ToString(error.domain)
@@ -1061,13 +1356,13 @@ int RunPriorityBoostCommand(int argc, wchar_t* argv[]) {
     std::uint32_t seconds = 0;
     if (!ParseUint32(argv[2], seconds) || seconds == 0 ||
         seconds > kMaxSeconds) {
-        std::wcerr << L"  --priority-boost seconds must be in 1.."
+        ErrorLine{} << L"  --priority-boost seconds must be in 1.."
                    << kMaxSeconds << L"\n";
         return 2;
     }
     std::uint32_t pid = 0;
     if (argc < 4 || !ParseUint32(argv[3], pid) || pid == 0) {
-        std::wcerr << L"  --priority-boost requires a positive pid\n";
+        ErrorLine{} << L"  --priority-boost requires a positive pid\n";
         return 2;
     }
 
@@ -1080,7 +1375,7 @@ int RunPriorityBoostCommand(int argc, wchar_t* argv[]) {
             optimizer::config::LoadConfigWithLocal(argv[4], localPath);
         if (!config) {
             const auto& error = config.ErrorValue();
-            std::wcerr << L"  config load failed ["
+            ErrorLine{} << L"  config load failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -1089,7 +1384,7 @@ int RunPriorityBoostCommand(int argc, wchar_t* argv[]) {
     }
     const auto level = priorityConfig.maxLevel;
     if (level == optimizer::config::PriorityLevel::None) {
-        std::wcerr << L"  [priority].max_level is \"none\"; nothing to boost\n";
+        ErrorLine{} << L"  [priority].max_level is \"none\"; nothing to boost\n";
         return 2;
     }
 
@@ -1124,7 +1419,7 @@ int RunPriorityBoostCommand(int argc, wchar_t* argv[]) {
         booster.AcquireBoost("cli-demo", pid, 0, level);
     if (!acquired) {
         const auto& error = acquired.ErrorValue();
-        std::wcerr << L"  acquire failed ["
+        ErrorLine{} << L"  acquire failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -1163,7 +1458,7 @@ int RunListProcesses(int argc, wchar_t* argv[]) {
         optimizer::process::EnumerateProcessDetails(windowOnly);
     if (!result) {
         const auto& error = result.ErrorValue();
-        std::wcerr << L"  process list failed ["
+        ErrorLine{} << L"  process list failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -1239,7 +1534,7 @@ int RunDiagnostics() {
     auto result = optimizer::platform::NativeApi::Instance().Probe();
     if (!result) {
         const auto& error = result.ErrorValue();
-        std::wcerr << L"  native probe : failed ["
+        ErrorLine{} << L"  native probe : failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -1355,7 +1650,7 @@ int RunAddGameCommand(int argc, wchar_t* argv[]) {
         } else if (mainPath.empty()) {
             mainPath = argv[i];
         } else {
-            std::wcerr << L"  unexpected argument: " << argv[i] << L"\n";
+            ErrorLine{} << L"  unexpected argument: " << argv[i] << L"\n";
             return 2;
         }
     }
@@ -1367,7 +1662,7 @@ int RunAddGameCommand(int argc, wchar_t* argv[]) {
         auto result = optimizer::process::EnumerateProcessDetails(true);
         if (!result) {
             const auto& error = result.ErrorValue();
-            std::wcerr << L"  process list failed ["
+            ErrorLine{} << L"  process list failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -1405,7 +1700,7 @@ int RunAddGameCommand(int argc, wchar_t* argv[]) {
         auto query = optimizer::process::QueryProcessDetails(pid);
         if (!query) {
             const auto& error = query.ErrorValue();
-            std::wcerr << L"  query pid failed ["
+            ErrorLine{} << L"  query pid failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -1418,7 +1713,7 @@ int RunAddGameCommand(int argc, wchar_t* argv[]) {
     auto existing = LoadExistingGameRules(mainPath, localPath);
     if (!existing) {
         const auto& error = existing.ErrorValue();
-        std::wcerr << L"  config load failed ["
+        ErrorLine{} << L"  config load failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -1427,7 +1722,7 @@ int RunAddGameCommand(int argc, wchar_t* argv[]) {
         selected.value(), existing.Value());
     if (!rule) {
         const auto& error = rule.ErrorValue();
-        std::wcerr << L"  rule build failed ["
+        ErrorLine{} << L"  rule build failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -1455,7 +1750,7 @@ int RunAddGameCommand(int argc, wchar_t* argv[]) {
     auto append = optimizer::config::AppendGameRules(localPath, toWrite);
     if (!append) {
         const auto& error = append.ErrorValue();
-        std::wcerr << L"  write failed ["
+        ErrorLine{} << L"  write failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -1532,7 +1827,15 @@ struct ServiceHostDemoState {
 };
 
 optimizer::common::Result<void> ServiceWorkloadTick(
-    ServiceHostDemoState& state) noexcept {
+    ServiceHostDemoState& state, bool memoryQueryEnabled = true) noexcept {
+    // CFG-006：[memory].query_enabled = false -> 不查询，且如实拒绝（不把“未查询”伪装成
+    // “查询失败”或报 0）。
+    if (!memoryQueryEnabled) {
+        return optimizer::common::Result<void>::Failure(
+            optimizer::common::Error::Unsupported(
+                "ServiceWorkloadTick",
+                L"内存查询已被配置关闭（[memory].query_enabled = false）"));
+    }
     auto status = optimizer::memory::QueryMemoryStatus();
     if (!status) {
         return optimizer::common::Result<void>::Failure(status.ErrorValue());
@@ -1721,7 +2024,11 @@ void SetupServiceLogger(optimizer::logger::Logger& logger) noexcept {
         return;
     }
     const auto logPath = logDir / L"CppOptimizerService.log";
-    if (const auto file = logger.SetFileSink(logPath.wstring()); !file) {
+    // SCM 服务读不到用户配置（服务侧配置目录属另一安全边界），故按与 [logging] 默认值
+    // 一致的口径轮转：单文件 10 MiB、最多 5 个文件——长跑的服务日志不会无限增长。
+    if (const auto file = logger.SetFileSink(logPath.wstring(),
+                                             optimizer::logger::FileSinkOptions{});
+        !file) {
         logger.SetDebugSink();
     }
 }
@@ -1754,6 +2061,11 @@ std::filesystem::path DefaultPresenceTimelinePath() noexcept {
     return DefaultHostConfigPath().parent_path() / L"presence-timeline.log";
 }
 
+// AUD-002：审计记录持久化文件（同一每用户数据目录；仅在门禁开启且真实发生 R1 动作时创建）。
+std::filesystem::path DefaultAuditLogPath() noexcept {
+    return DefaultHostConfigPath().parent_path() / L"audit.log";
+}
+
 int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     // --service console <s|run> [config.toml] [--ipc-facts] [--confirm-recovery] [--tray]：
     // 控制台托管——前台、Ctrl+C 优雅停止；<s> 为 1..60 秒有界窗口，run 表示常驻
@@ -1771,7 +2083,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         resident = true;
     } else if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
                seconds > kMaxSeconds) {
-        std::wcerr << L"  --service console needs <seconds 1.." << kMaxSeconds
+        ErrorLine{} << L"  --service console needs <seconds 1.." << kMaxSeconds
                    << L"|run>\n";
         return 2;
     }
@@ -1797,46 +2109,45 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     }
 
     // IPC-014/SVC-004：Safe Mode 门禁窗口参数（供 banner/门禁构造引用，缺省 = 状态机默认）。
-    // [ipc] 配置仅在 --ipc-facts 时消费（无门禁则配置无意义）。配置来源优先级：
-    // 显式 [config.toml] -> 每用户默认配置（%LOCALAPPDATA%\CppOptimizer\config.local.toml，
-    // 与恢复标记/凭据同目录，存在才消费）-> 状态机默认（零回归）。显式配置无效 = 语义错误，
-    // 启动期直接拒绝（错误配置显式暴露）；默认配置无效按环境异常处理 -> Safe Mode「配置无效」
-    // 离散锁存（常驻宿主不因损坏的环境配置退出，R0 负载照常、暂停受理 Agent，见启动异常块）。
     optimizer::service::SafeModeGuard::Options safeModeOptions;
     std::optional<optimizer::config::ConfigSnapshot> consoleConfigSnapshot;
     std::filesystem::path hostConfigPath; // 实际消费的配置路径（空 = 未消费配置）
     std::wstring hostConfigError;         // 默认配置无效时的错误描述（供日志）
     bool hostConfigIsDefault = false;     // 消费的是每用户默认配置
     bool hostConfigInvalid = false;       // 默认配置存在但无效（Safe Mode 触发源）
-    if (ipcFacts) {
-        if (consoleConfig) {
-            hostConfigPath = consoleConfig.value();
-        } else {
-            std::error_code ec;
-            const auto defaultPath = DefaultHostConfigPath();
-            if (std::filesystem::exists(defaultPath, ec)) {
-                hostConfigPath = defaultPath;
-                hostConfigIsDefault = true;
-            }
+    // [logging] 总是消费（宿主日志口径）；[ipc] 仅在 --ipc-facts 时消费。配置来源优先级：
+    // 显式 [config.toml] -> 每用户默认配置（%LOCALAPPDATA%\CppOptimizer\config.local.toml，
+    // 与恢复标记/凭据同目录，存在才消费）-> 内置默认（零回归）。显式配置无效 = 语义错误，
+    // 启动期直接拒绝（错误配置显式暴露）；默认配置无效按环境异常处理 -> Safe Mode「配置无效」
+    // 离散锁存（常驻宿主不因损坏的环境配置退出，R0 负载照常、暂停受理 Agent，见启动异常块）。
+    if (consoleConfig) {
+        hostConfigPath = consoleConfig.value();
+    } else {
+        std::error_code ec;
+        const auto defaultPath = DefaultHostConfigPath();
+        if (std::filesystem::exists(defaultPath, ec)) {
+            hostConfigPath = defaultPath;
+            hostConfigIsDefault = true;
         }
-        if (!hostConfigPath.empty()) {
-            auto loaded =
-                optimizer::config::LoadConfig(hostConfigPath.wstring());
-            if (!loaded) {
-                const auto& error = loaded.ErrorValue();
-                hostConfigError =
-                    L"[" +
-                    std::wstring(optimizer::common::ToString(error.domain)) +
-                    L":" + std::to_wstring(error.code) + L"] " +
-                    error.message;
-                if (hostConfigIsDefault) {
-                    hostConfigInvalid = true; // 锁存延后到门禁构造后（见启动异常块）
-                } else {
-                    std::wcerr << L"  --service console config load failed "
-                               << hostConfigError << L"\n";
-                    return 2;
-                }
+    }
+    if (!hostConfigPath.empty()) {
+        auto loaded = optimizer::config::LoadConfig(hostConfigPath.wstring());
+        if (!loaded) {
+            const auto& error = loaded.ErrorValue();
+            hostConfigError =
+                L"[" + std::wstring(optimizer::common::ToString(error.domain)) +
+                L":" + std::to_wstring(error.code) + L"] " + error.message;
+            if (hostConfigIsDefault) {
+                hostConfigInvalid = true; // 锁存延后到门禁构造后（见启动异常块）
             } else {
+                ErrorLine{} << L"  --service console config load failed "
+                           << hostConfigError << L"\n";
+                return 2;
+            }
+        } else {
+            consoleConfigSnapshot = loaded.Value();
+            if (ipcFacts) {
+                // [ipc] 门禁参数（无 --ipc-facts 时受理门禁不存在，配置无意义）。
                 const auto& safeMode = loaded.Value().ipc.safeMode;
                 safeModeOptions.enabled = safeMode.enabled;
                 safeModeOptions.failuresToEnter =
@@ -1845,7 +2156,6 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                     safeMode.countingWindowMs);
                 safeModeOptions.cooldown =
                     std::chrono::milliseconds(safeMode.cooldownMs);
-                consoleConfigSnapshot = loaded.Value();
             }
         }
     }
@@ -1861,7 +2171,70 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
     }
 
     ServiceHostDemoState state;
-    state.logger.SetStderrSink();
+    // LOG-004：宿主日志消费 [logging]——目录（空 = 每用户默认目录）、级别、单文件上限、
+    // 历史文件数、控制台副本开关。未消费配置时按 [logging] 默认口径（info / 10 MiB x 5 / 控制台开）。
+    std::filesystem::path hostLogPath;
+    {
+        optimizer::config::LoggingConfig loggingConfig;
+        bool configConsumed = false;
+        if (consoleConfigSnapshot) {
+            loggingConfig = consoleConfigSnapshot->logging;
+            configConsumed = true;
+        }
+        std::filesystem::path logDir;
+        if (!loggingConfig.directory.empty()) {
+            logDir = std::filesystem::path(loggingConfig.directory);
+        } else {
+            logDir = DefaultHostConfigPath().parent_path();
+        }
+        hostLogPath = logDir / L"host.log";
+        // 级别：非法级别不装作为已知（回退 info 并如实告知），与“危险开关失败安全”同口径。
+        const auto level =
+            optimizer::logger::LevelFromString(
+                std::wstring(loggingConfig.level.begin(),
+                             loggingConfig.level.end()));
+        if (level) {
+            state.logger.SetLevel(level.Value());
+        }
+        optimizer::logger::FileSinkOptions fileOptions;
+        fileOptions.maxFileMb = loggingConfig.maxFileMb;
+        fileOptions.maxFiles = loggingConfig.maxFiles;
+        fileOptions.alsoConsole = loggingConfig.console;
+        // LOG-008（修正）：程序日志**恒定异步**——Write 不阻塞业务线程（不干扰正常功能）；
+        // 完整性由「Flush 同步保证 + 退出/析构排空」提供，而不是把写入变成同步。
+        const auto file = state.logger.SetAsyncFileSink(
+            hostLogPath.wstring(), fileOptions, 1024);
+        if (!file) {
+            // 日志文件不可用：降级到控制台（与既有 sink 降级契约一致），不伪装成功。
+            state.logger.SetStderrSink();
+            optimizer::common::WriteConsoleLine(
+                L"  logging  : file sink unavailable, console only");
+        }
+        std::wostringstream loggingLine;
+        loggingLine << L"  logging  : level "
+                    << optimizer::logger::LevelToString(
+                           level ? level.Value()
+                                 : optimizer::logger::LogLevel::Info)
+                    << L", file " << hostLogPath.wstring() << L" ("
+                    << loggingConfig.maxFileMb << L" MB x "
+                    << loggingConfig.maxFiles << L" backup), console "
+                    << (loggingConfig.console ? L"on" : L"off")
+                    << L", async on (flush-synced, drained on exit)"
+                    << (configConsumed ? L"" : L" [defaults: no config consumed]");
+        if (!level) {
+            loggingLine << L" [level '"
+                        << std::wstring(loggingConfig.level.begin(),
+                                        loggingConfig.level.end())
+                        << L"' unknown -> info]";
+        }
+        optimizer::common::WriteConsoleLine(loggingLine.str());
+        if (hostConfigInvalid) {
+            // 默认配置无效且本模式不受 Safe Mode 门禁影响（无 --ipc-facts）：如实告知使用默认口径。
+            optimizer::common::WriteConsoleLine(
+                L"  logging  : default config is invalid -> [logging] defaults used: " +
+                hostConfigError);
+        }
+    }
     // IPC-018：恢复标记路径（会话开始写、正常结束清；异常退出留存供下次检测）。
     const auto recoveryMarkerPath =
         optimizer::service::DefaultRecoveryMarkerPath();
@@ -1876,7 +2249,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         std::wstring ipcToken;
         if (FindIpcToken(argc, argv, flagsStart, ipcToken)) {
             if (!IsValidIpcToken(ipcToken)) {
-                std::wcerr
+                ErrorLine{}
                     << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
                 return 2;
             }
@@ -1885,7 +2258,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         if (auto tokenFile = FindIpcTokenFile(argc, argv, flagsStart)) {
             auto stored = optimizer::ipc::ReadAgentTokenFile(*tokenFile);
             if (!stored) {
-                std::wcerr << L"  --ipc-token-file unreadable; run "
+                ErrorLine{} << L"  --ipc-token-file unreadable; run "
                               L"--ipc-credential provision first\n";
                 return 2;
             }
@@ -1895,7 +2268,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             if (std::wstring_view(argv[i]) == L"--ipc-allow-user") {
                 const std::wstring sid = argv[i + 1];
                 if (sid.empty() || sid.size() > 192) {
-                    std::wcerr
+                    ErrorLine{}
                         << L"  --ipc-allow-user needs a valid SID string\n";
                     return 2;
                 }
@@ -2075,7 +2448,7 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
         auto started = trayHost->Start([&host] { host.RequestStop(); });
         if (!started) {
             const auto& error = started.ErrorValue();
-            std::wcerr << L"  tray start failed ["
+            ErrorLine{} << L"  tray start failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             if (ipcFacts) {
@@ -2314,6 +2687,8 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             optimizer::common::WriteConsoleLine(safeLine.str());
         }
     }
+    // LOG-008：异步模式（用户显式开启）下，窗口结束前冲刷一次，使本窗口记录在读文件时可见。
+    state.logger.Flush();
     std::wostringstream stoppedLine;
     stoppedLine << L"  stopped  : "
                 << (host.IsStopRequested() ? L"user (Ctrl+C or tray exit)"
@@ -2608,26 +2983,26 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
         seconds > kMaxSeconds) {
-        std::wcerr << L"  --agent run seconds must be in 1.." << kMaxSeconds
+        ErrorLine{} << L"  --agent run seconds must be in 1.." << kMaxSeconds
                    << L"\n";
         return 2;
     }
     const std::wstring suffix = FindIpcSuffix(argc, argv, 4);
     const std::wstring pipeName = IpcPipeName(suffix);
     if (pipeName.empty()) {
-        std::wcerr << L"  --agent suffix must be ASCII letters/digits/-/_\n";
+        ErrorLine{} << L"  --agent suffix must be ASCII letters/digits/-/_\n";
         return 2;
     }
     const std::uint32_t intervalMs = FindIpcIntervalMs(argc, argv, 4);
     if (intervalMs == 0 || intervalMs < 50 || intervalMs > 10000) {
-        std::wcerr << L"  --interval-ms must be in 50..10000\n";
+        ErrorLine{} << L"  --interval-ms must be in 50..10000\n";
         return 2;
     }
     // 自适应节奏放大上限（IPC-012）：显式须 >= interval；缺省 max(3*interval, 5s)。
     const std::uint32_t intervalCapMs = FindIpcMaxIntervalMs(argc, argv, 4);
     if (intervalCapMs != 0 &&
         (intervalCapMs < intervalMs || intervalCapMs > 60000)) {
-        std::wcerr << L"  --max-interval-ms must be in [" << intervalMs
+        ErrorLine{} << L"  --max-interval-ms must be in [" << intervalMs
                    << L"..60000]\n";
         return 2;
     }
@@ -2645,7 +3020,7 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
             std::uint32_t value = 0;
             if (!ParseUint32(argv[i + 1], value) || value == 0 ||
                 value > 86400) {
-                std::wcerr
+                ErrorLine{}
                     << L"  --away-after-seconds must be in 1..86400\n";
                 return 2;
             }
@@ -2654,7 +3029,7 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
             std::uint32_t value = 0;
             if (!ParseUint32(argv[i + 1], value) || value < intervalMs ||
                 value > 60000) {
-                std::wcerr << L"  --away-cap-ms must be in [" << intervalMs
+                ErrorLine{} << L"  --away-cap-ms must be in [" << intervalMs
                            << L"..60000]\n";
                 return 2;
             }
@@ -2668,7 +3043,7 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     bool hasToken = false;
     if (FindIpcToken(argc, argv, 4, token)) {
         if (!IsValidIpcToken(token)) {
-            std::wcerr
+            ErrorLine{}
                 << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
             return 2;
         }
@@ -2677,7 +3052,7 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
     if (auto tokenFile = FindIpcTokenFile(argc, argv, 4)) {
         auto stored = optimizer::ipc::ReadAgentTokenFile(*tokenFile);
         if (!stored) {
-            std::wcerr << L"  --ipc-token-file unreadable; run "
+            ErrorLine{} << L"  --ipc-token-file unreadable; run "
                           L"--ipc-credential provision first\n";
             return 2;
         }
@@ -2814,7 +3189,7 @@ int RunAgentCommand(int argc, wchar_t* argv[]) {
                                                       idleProvider);
     if (!result) {
         const auto& error = result.ErrorValue();
-        std::wcerr << L"  agent run failed ["
+        ErrorLine{} << L"  agent run failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -2854,7 +3229,7 @@ int RunIpcCredentialCommand(int argc, wchar_t* argv[]) {
         path = optimizer::ipc::DefaultAgentTokenFilePath();
     }
     if (path.empty()) {
-        std::wcerr
+        ErrorLine{}
             << L"  cannot locate LOCALAPPDATA; provide an explicit <path>\n";
         return 2;
     }
@@ -2862,7 +3237,7 @@ int RunIpcCredentialCommand(int argc, wchar_t* argv[]) {
         if (auto result = optimizer::ipc::ProvisionAgentTokenFile(path, force);
             !result) {
             const auto& error = result.ErrorValue();
-            std::wcerr << L"  provision failed ["
+            ErrorLine{} << L"  provision failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -2885,7 +3260,7 @@ int RunIpcCredentialCommand(int argc, wchar_t* argv[]) {
         }
         return 0;
     }
-    std::wcerr << L"  --ipc-credential requires provision|status\n";
+    ErrorLine{} << L"  --ipc-credential requires provision|status\n";
     return 2;
 }
 
@@ -2903,14 +3278,14 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
     std::uint32_t seconds = 0;
     if (argc < 4 || !ParseUint32(argv[3], seconds) || seconds == 0 ||
         seconds > kMaxSeconds) {
-        std::wcerr << L"  --ipc-pipe server seconds must be in 1.." << kMaxSeconds
+        ErrorLine{} << L"  --ipc-pipe server seconds must be in 1.." << kMaxSeconds
                    << L"\n";
         return 2;
     }
     const std::wstring suffix = FindIpcSuffix(argc, argv, 4);
     const std::wstring pipeName = IpcPipeName(suffix);
     if (pipeName.empty()) {
-        std::wcerr << L"  --ipc-pipe suffix must be ASCII letters/digits/-/_\n";
+        ErrorLine{} << L"  --ipc-pipe suffix must be ASCII letters/digits/-/_\n";
         return 2;
     }
 
@@ -2918,7 +3293,7 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
     std::wstring token;
     if (FindIpcToken(argc, argv, 4, token)) {
         if (!IsValidIpcToken(token)) {
-            std::wcerr
+            ErrorLine{}
                 << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
             return 2;
         }
@@ -2928,7 +3303,7 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
     if (auto tokenFile = FindIpcTokenFile(argc, argv, 4)) {
         auto stored = optimizer::ipc::ReadAgentTokenFile(*tokenFile);
         if (!stored) {
-            std::wcerr << L"  --ipc-token-file unreadable; run "
+            ErrorLine{} << L"  --ipc-token-file unreadable; run "
                           L"--ipc-credential provision first\n";
             return 2;
         }
@@ -2939,7 +3314,7 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
         if (std::wstring_view(argv[i]) == L"--ipc-allow-user") {
             const std::wstring sid = argv[i + 1];
             if (sid.empty() || sid.size() > 192) {
-                std::wcerr << L"  --ipc-allow-user needs a valid SID string\n";
+                ErrorLine{} << L"  --ipc-allow-user needs a valid SID string\n";
                 return 2;
             }
             sessionOptions.allowedClientSids.push_back(sid);
@@ -2950,7 +3325,7 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
     const bool sessionMode = HasIpcSessionFlag(argc, argv, 4);
     const std::uint32_t instances = FindIpcInstances(argc, argv, 4);
     if (instances == 0 || instances > 8) {
-        std::wcerr << L"  --instances must be 1..8\n";
+        ErrorLine{} << L"  --instances must be 1..8\n";
         return 2;
     }
     const bool concurrentMode = instances > 1; // 多实例并发受理（IPC-009）
@@ -2998,7 +3373,7 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
             });
         if (!result) {
             const auto& error = result.ErrorValue();
-            std::wcerr << L"  concurrent serve failed ["
+            ErrorLine{} << L"  concurrent serve failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -3043,7 +3418,7 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
                        << L" s (bounded window ended)\n";
             return 0;
         }
-        std::wcerr << L"  serve failed ["
+        ErrorLine{} << L"  serve failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -3089,14 +3464,14 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
     const std::wstring suffix = FindIpcSuffix(argc, argv, 3);
     const std::wstring pipeName = IpcPipeName(suffix);
     if (pipeName.empty()) {
-        std::wcerr << L"  --ipc-pipe suffix must be ASCII letters/digits/-/_\n";
+        ErrorLine{} << L"  --ipc-pipe suffix must be ASCII letters/digits/-/_\n";
         return 2;
     }
     std::wstring token;
     bool hasToken = false;
     if (FindIpcToken(argc, argv, 3, token)) {
         if (!IsValidIpcToken(token)) {
-            std::wcerr
+            ErrorLine{}
                 << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
             return 2;
         }
@@ -3106,7 +3481,7 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
     if (auto tokenFile = FindIpcTokenFile(argc, argv, 3)) {
         auto stored = optimizer::ipc::ReadAgentTokenFile(*tokenFile);
         if (!stored) {
-            std::wcerr << L"  --ipc-token-file unreadable; run "
+            ErrorLine{} << L"  --ipc-token-file unreadable; run "
                           L"--ipc-credential provision first\n";
             return 2;
         }
@@ -3115,7 +3490,7 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
     }
     const std::uint32_t frames = FindIpcFrames(argc, argv, 3);
     if (frames == 0 || frames > 16) {
-        std::wcerr << L"  --frames must be 1..16\n";
+        ErrorLine{} << L"  --frames must be 1..16\n";
         return 2;
     }
     const bool sessionMode = frames > 1;
@@ -3129,7 +3504,7 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
                       std::vector<std::byte>>> {
         auto memoryStatus = optimizer::memory::QueryMemoryStatus();
         if (!memoryStatus) {
-            std::wcerr << L"  memory query failed ["
+            ErrorLine{} << L"  memory query failed ["
                        << optimizer::common::ToString(
                               memoryStatus.ErrorValue().domain)
                        << L"] " << memoryStatus.ErrorValue().message << L"\n";
@@ -3163,7 +3538,7 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
         }
         auto encoded = optimizer::ipc::SerializeFactsV1(facts);
         if (!encoded) {
-            std::wcerr << L"  serialize facts failed ["
+            ErrorLine{} << L"  serialize facts failed ["
                        << optimizer::common::ToString(
                               encoded.ErrorValue().domain)
                        << L"] " << encoded.ErrorValue().message << L"\n";
@@ -3221,7 +3596,7 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
             payload, 1, kIpcTimeout);
         if (!reply) {
             const auto& error = reply.ErrorValue();
-            std::wcerr << L"  round trip failed ["
+            ErrorLine{} << L"  round trip failed ["
                        << optimizer::common::ToString(error.domain) << L":"
                        << error.code << L"] " << error.message << L"\n";
             return 2;
@@ -3256,7 +3631,7 @@ int RunIpcClientCommand(int argc, wchar_t* argv[]) {
                                                        requests, kIpcTimeout);
     if (!replies) {
         const auto& error = replies.ErrorValue();
-        std::wcerr << L"  round trip session failed ["
+        ErrorLine{} << L"  round trip session failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
         return 2;
@@ -3287,8 +3662,15 @@ void PrintUsage() {
         << L"                             (GetForegroundWindow/GetWindowThreadProcessId) on\n"
         << L"                             active/idle samples only\n"
 
+        << L"  CppOptimizer.exe --startup <status|install|remove>  Per-user startup entry\n"
+        << L"                             (HKCU Run; R1, reversible, standard user;\n"
+        << L"                             never installed by default)\n"
         << L"  CppOptimizer.exe --log <module> <message...> Write one Info log line to stderr\n"
         << L"                             (read-only, foreground, bounded)\n"
+"\n"
+        << L"  CppOptimizer.exe --audit-log [path] [lines]  Read back the tail of the\n"
+        << L"                             persisted audit trail (read-only; default: per-user\n"
+        << L"                             audit.log, last 20 lines, max 200)\n"
         << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
         << L"  CppOptimizer.exe --cpu          Sample CPU usage (read-only, PDH)\n"
         << L"  CppOptimizer.exe --watch <s> [config.toml]  Watch game process lifecycle\n"
@@ -3384,7 +3766,10 @@ int wmain(int argc, wchar_t* argv[]) {
             return RunDiagnostics();
         }
         if (argc == 2 && std::wstring_view(argv[1]) == L"--status") {
-            return RunStatus();
+            return RunStatus(L"");
+        }
+        if (argc == 3 && std::wstring_view(argv[1]) == L"--status") {
+            return RunStatus(argv[2]);
         }
         if (argc == 2 && std::wstring_view(argv[1]) == L"--cpu") {
             return RunCpuCommand();
@@ -3393,10 +3778,19 @@ int wmain(int argc, wchar_t* argv[]) {
             return RunObserve(argv[2], L"");
         }
         if (argc == 4 && std::wstring_view(argv[1]) == L"--observe") {
-            return RunObserve(argv[2], argv[3]);
+            // 第 3 个参数：能当阈值就是阈值，否则按配置路径处理（CFG-006）。
+            std::uint32_t threshold = 0;
+            if (ParseUint32(argv[3], threshold)) {
+                return RunObserve(argv[2], argv[3]);
+            }
+            return RunObserve(argv[2], L"", argv[3]);
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--log") {
             return RunLogCommand(argc, argv);
+        }
+        if (argc >= 2 && argc <= 4 &&
+            std::wstring_view(argv[1]) == L"--audit-log") {
+            return RunAuditLogCommand(argc, argv);
         }
         if (argc == 3 && std::wstring_view(argv[1]) == L"--config") {
             return RunConfigCommand(argv[2]);
@@ -3431,7 +3825,7 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--service") {
             const auto mode = optimizer::service::ParseRunMode(argv[2]);
             if (!mode) {
-                std::wcerr
+                ErrorLine{}
                     << L"  --service requires console|service|install|uninstall\n";
                 return 2;
             }
@@ -3448,7 +3842,7 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--agent") {
             if (std::wstring_view(argv[2]) != L"run") {
-                std::wcerr << L"  --agent requires run\n";
+                ErrorLine{} << L"  --agent requires run\n";
                 return 2;
             }
             return RunAgentCommand(argc, argv);
@@ -3460,14 +3854,17 @@ int wmain(int argc, wchar_t* argv[]) {
             if (std::wstring_view(argv[2]) == L"client") {
                 return RunIpcClientCommand(argc, argv);
             }
-            std::wcerr << L"  --ipc-pipe requires server|client\n";
+            ErrorLine{} << L"  --ipc-pipe requires server|client\n";
             return 2;
+        }
+        if (argc >= 2 && std::wstring_view(argv[1]) == L"--startup") {
+            return RunStartupCommand(argc, argv);
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--ipc-credential") {
             return RunIpcCredentialCommand(argc, argv);
         }
         PrintUsage();
-        return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;
+        return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;;
     } catch (const std::exception& exception) {
         std::cerr << "Fatal C++ exception: " << exception.what() << '\n';
         return 100;

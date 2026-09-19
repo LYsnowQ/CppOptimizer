@@ -31,6 +31,7 @@ struct ExecutorConfig {
     config::PriorityLevel priorityMaxLevel =
         config::PriorityLevel::AboveNormal;       // [priority].max_level
     bool powerExecutionRequired = false;          // [power].execution_required
+    bool powerDisplayRequired = false;            // [power].display_required
     std::wstring powerReason = L"CppOptimizer policy: game running (R1)";
     // R1 动作连续失败停摆（IPC-017，执行器侧）：
     // >0 时 ApplyDecision 连续 N 次因 R1 动作失败（优先级/电源获取或释放出错）后执行器进入
@@ -55,8 +56,10 @@ struct ExecutorTarget {
 struct ExecutorEffect {
     bool priorityBoosted = false;  // 本轮新提升
     bool priorityReleased = false; // 本轮释放提升
-    bool powerHeld = false;        // 本轮新持有电源请求
-    bool powerReleased = false;    // 本轮释放电源请求
+    bool powerHeld = false;        // 本轮新持有执行电源请求
+    bool powerReleased = false;    // 本轮释放执行电源请求
+    bool displayHeld = false;      // 本轮新持有显示器电源请求（[power].display_required）
+    bool displayReleased = false;  // 本轮释放显示器电源请求
     std::wstring skipped;          // 门禁/条件未满足时的原因（空表示无跳过）
 };
 
@@ -92,6 +95,8 @@ public:
     // 当前是否持有（供 CLI 输出/测试）。
     [[nodiscard]] bool IsPriorityHeld() const noexcept;
     [[nodiscard]] bool IsPowerHeld() const noexcept;
+    // 是否持有显示器电源请求（[power].display_required 开启时与执行请求各自配对）。
+    [[nodiscard]] bool IsDisplayHeld() const noexcept;
 
     // 是否处于 R1 动作连续失败停摆（IPC-017）。停摆期间 ApplyDecision 不再调用后端，
     // 返回 Success{skipped=说明}（决策保持纯咨询），直至 ResetHalt。
@@ -105,9 +110,14 @@ private:
     [[nodiscard]] common::Result<void> ReconcilePriority(
         const PolicyDecision& decision, const ExecutorTarget& target,
         ExecutorEffect& effect);
-    // 期望状态对账：游戏运行期电源请求（门禁开启）。
+    // 期望状态对账：游戏运行期电源请求（门禁开启）。execution / display 两种类型各自
+    // 开关、各自配对，互不隐式联动。
     [[nodiscard]] common::Result<void> ReconcilePower(
         const ExecutorTarget& target, ExecutorEffect& effect);
+    // 单类型电源请求的获取/释放配对：desired 变化才动作，失败不改变计数（可重试）。
+    [[nodiscard]] common::Result<void> ReconcilePowerLock(
+        optimizer::power::PowerLockType type, bool& held, bool desired,
+        const char* detail, bool& heldFlag, bool& releasedFlag);
     // 发出动作事件（AUD-001；观察者空/抛异常均安全）。
     void EmitAction(std::string operationId, std::string target,
                     std::string detail, bool ok) noexcept;
@@ -116,6 +126,7 @@ private:
     std::shared_ptr<optimizer::priority::PriorityBooster> priority_;
     ExecutorConfig config_;
     bool powerHeld_ = false;
+    bool displayHeld_ = false;
     std::string priorityGameId_; // 当前已提升的 gameId（空 = 未持有）
     std::uint32_t priorityPid_ = 0;
     std::size_t consecutiveActionFailures_ = 0; // 连续 R1 动作失败计数（IPC-017）

@@ -124,35 +124,51 @@ common::Result<void> PolicyExecutor::ReconcilePriority(
     return common::Result<void>::Success();
 }
 
-common::Result<void> PolicyExecutor::ReconcilePower(
-    const ExecutorTarget& target, ExecutorEffect& effect) {
-    const bool desired = config_.powerExecutionRequired && target.running;
-    if (desired && !powerHeld_) {
-        auto locked = power_->AcquireLock(
-            optimizer::power::PowerLockType::ExecutionRequired,
-            config_.powerReason);
+common::Result<void> PolicyExecutor::ReconcilePowerLock(
+    optimizer::power::PowerLockType type, bool& held, bool desired,
+    const char* detail, bool& heldFlag, bool& releasedFlag) {
+    if (desired && !held) {
+        auto locked = power_->AcquireLock(type, config_.powerReason);
         // 审计详情用固定 ASCII 描述（不把宽字符 reason 窄化回显到审计记录）。
-        EmitAction("power.hold", "policy (game running)",
-                   "execution power request", locked.HasValue());
+        EmitAction("power.hold", "policy (game running)", detail,
+                   locked.HasValue());
         if (!locked) {
             return locked; // 失败不伪装成功
         }
-        powerHeld_ = true;
-        effect.powerHeld = true;
+        held = true;
+        heldFlag = true;
         return common::Result<void>::Success();
     }
-    if (!desired && powerHeld_) {
-        auto released = power_->ReleaseLock(
-            optimizer::power::PowerLockType::ExecutionRequired);
+    if (!desired && held) {
+        auto released = power_->ReleaseLock(type);
         EmitAction("power.release", "policy",
-                   "game exit or no longer desired", released.HasValue());
+                   std::string(detail) + " (game exit or no longer desired)",
+                   released.HasValue());
         if (!released) {
-            return released;
+            return released; // 释放失败保持持有，下次重试
         }
-        powerHeld_ = false;
-        effect.powerReleased = true;
+        held = false;
+        releasedFlag = true;
     }
     return common::Result<void>::Success();
+}
+
+common::Result<void> PolicyExecutor::ReconcilePower(
+    const ExecutorTarget& target, ExecutorEffect& effect) {
+    // execution：既有语义（[power].execution_required + 游戏运行）。
+    auto execution = ReconcilePowerLock(
+        optimizer::power::PowerLockType::ExecutionRequired, powerHeld_,
+        config_.powerExecutionRequired && target.running,
+        "execution power request", effect.powerHeld, effect.powerReleased);
+    if (!execution) {
+        return execution;
+    }
+    // display：CFG-003 消费 [power].display_required（默认 false -> 零回归），
+    // 与 execution 各自配对；两者同时开启时持有两个独立电源请求。
+    return ReconcilePowerLock(
+        optimizer::power::PowerLockType::DisplayRequired, displayHeld_,
+        config_.powerDisplayRequired && target.running,
+        "display power request", effect.displayHeld, effect.displayReleased);
 }
 
 void PolicyExecutor::ReleaseAll() noexcept {
@@ -173,6 +189,13 @@ void PolicyExecutor::ReleaseAll() noexcept {
                    released.HasValue());
         powerHeld_ = false;
     }
+    if (displayHeld_ && power_) {
+        auto released = power_->ReleaseLock(
+            optimizer::power::PowerLockType::DisplayRequired);
+        EmitAction("power.release", "policy", "release-all on exit (display)",
+                   released.HasValue());
+        displayHeld_ = false;
+    }
 }
 
 bool PolicyExecutor::IsPriorityHeld() const noexcept {
@@ -181,6 +204,10 @@ bool PolicyExecutor::IsPriorityHeld() const noexcept {
 
 bool PolicyExecutor::IsPowerHeld() const noexcept {
     return powerHeld_;
+}
+
+bool PolicyExecutor::IsDisplayHeld() const noexcept {
+    return displayHeld_;
 }
 
 bool PolicyExecutor::IsHalted() const noexcept {

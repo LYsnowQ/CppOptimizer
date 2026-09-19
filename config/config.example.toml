@@ -1,4 +1,4 @@
-version = 1
+version = "1.0.0"          # 三段数字；可带预发布标识（如 "1.2.0-beta.1"）；旧式整数仍兼容
 
 [application]
 mode = "observe"              # observe / balanced / experimental
@@ -8,7 +8,7 @@ safe_mode_on_recovery_error = true
 level = "info"
 directory = ""                # 空表示使用 LocalAppData 下的默认目录
 max_file_mb = 10
-max_files = 5
+max_files = 5                 # 保留的历史文件数上限（不含当前文件；磁盘上至多 6 个）
 console = true
 
 [layers]

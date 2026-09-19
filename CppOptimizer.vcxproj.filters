@@ -60,6 +60,9 @@
     <ClInclude Include="include\audit\audit_log.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\service\startup_entry.hpp">
+      <Filter>include\service</Filter>
+    </ClInclude>
     <ClInclude Include="include\service\service_host.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -136,6 +139,9 @@
     </ClCompile>
     <ClCompile Include="source\audit\audit_log.cpp">
       <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\service\startup_entry.cpp">
+      <Filter>source\service</Filter>
     </ClCompile>
     <ClCompile Include="source\service\service_host.cpp">
       <Filter>源文件</Filter>

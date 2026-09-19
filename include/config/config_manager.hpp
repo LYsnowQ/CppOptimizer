@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "common/error.hpp"
 
@@ -140,8 +140,32 @@ struct MemoryConfig {
 
 // 不可变配置快照。读取后拷贝使用，运行期不变量：所有字段已通过校验，
 // 危险开关保持默认或显式开启。
+// 配置 schema 版本（三段数字 + 可选预发布标识，如 "1.0.0" / "1.2.0-beta.1"）。
+// 主版本相同的配置均受支持（当前为 1）；其它主版本、非法形式、超长与非法字符均拒绝。
+// 旧式整数（如 `version = 1`）按兼容读取并视为 "1.0.0"（既有配置零回归）。
+struct ConfigVersion {
+    std::uint32_t major = 1;
+    std::uint32_t minor = 0;
+    std::uint32_t patch = 0;
+    std::string prerelease; // 不含前导 '-'（如 "beta.1"）；空 = 正式版
+};
+
+// 当前支持的配置 schema 主版本。
+inline constexpr std::uint32_t kSupportedConfigMajor = 1;
+
+// 解析与格式化（纯函数，可单测）：ParseConfigVersion 接受 "M.m.p[-pre]"；
+// FormatConfigVersion 输出带预发布标识的规范文本（用于回显，保证 beta 等可显示）。
+[[nodiscard]] common::Result<ConfigVersion> ParseConfigVersion(
+    std::string_view text);
+[[nodiscard]] std::string FormatConfigVersion(const ConfigVersion& version);
+
 struct ConfigSnapshot {
-    std::int64_t version = 0;
+    // 配置 schema 版本：三段数字 + 可选预发布标识；主版本不受支持或格式非法时 LoadConfig 直接拒绝。
+    ConfigVersion version;
+    // 解析时遇到的**未知键**（点分路径，如 "logging.leval"、"totally_unknown_section"、
+    // "games[0].nmae"）。未知键按“缺失的键使用默认值”原则被忽略以保持兼容，但必须
+    // 如实上报——否则拼写错误会被静默吞掉（用户以为配置生效，实际用的是默认值）。
+    std::vector<std::string> unknownKeys;
     ApplicationConfig application;
     LoggingConfig logging;
     LayerConfig layers;
@@ -166,6 +190,16 @@ struct ConfigSnapshot {
 
 // 纯校验：运行模式名（observe/balanced/experimental，大小写不敏感）。
 [[nodiscard]] common::Result<RunMode> ParseRunMode(std::string_view name);
+
+// 能力门禁（纯函数，适合单测；保守默认：不明就拒）。
+// 模式：observe 仅只读；balanced 允许 R1；experimental 可进入 R2/R3 门禁评估（真实动作仍须满足
+// 全部安全条件（默认 fake/dry-run、逐条门禁、有界时长、可立即回滚、全程错误捕捉））。
+// 层：monitoring 覆盖只读；maintenance 覆盖 R1/R2；emergency 覆盖 R3。
+// 模式与层是**与**关系（都要允许才放行）：叠加门禁，避免单一开关被误认为“已获授权”。
+[[nodiscard]] bool AllowsLocalReversibleActions(
+    RunMode mode, const LayerConfig& layers) noexcept;
+[[nodiscard]] bool AllowsSystemLevelActions(
+    RunMode mode, const LayerConfig& layers) noexcept;
 
 // 纯校验：清理级别名（none/light，大小写不敏感）。
 [[nodiscard]] common::Result<CleanLevel> ParseCleanLevel(std::string_view name);

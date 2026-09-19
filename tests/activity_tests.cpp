@@ -1,4 +1,4 @@
-#include "activity/user_activity.hpp"
+﻿#include "activity/user_activity.hpp"
 #include "activity/raw_input.hpp"
 
 #include <cstdint>

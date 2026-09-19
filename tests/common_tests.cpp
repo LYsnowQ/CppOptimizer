@@ -45,6 +45,27 @@ bool TestWideToUtf8Empty() {
     return utf8.HasValue() && utf8.Value().empty();
 }
 
+bool TestUtf8ToWideRoundTrip() {
+    // 与 WideToUtf8 互为逆：中文往返必须逐字符一致；空串返回空串。
+    const std::wstring original = L"中文 UTF-8 往返 audit=1";
+    const auto utf8 = optimizer::common::WideToUtf8(original);
+    if (!utf8) {
+        return false;
+    }
+    const auto back = optimizer::common::Utf8ToWide(utf8.Value());
+    const auto empty = optimizer::common::Utf8ToWide("");
+    return back && back.Value() == original && empty &&
+           empty.Value().empty();
+}
+
+bool TestUtf8ToWideRejectsInvalidBytes() {
+    // 孤立续字节 0x80：非法 UTF-8，必须如实失败（不宽松替换成 U+FFFD）。
+    const std::string invalid = "\x80\x80";
+    const auto result = optimizer::common::Utf8ToWide(invalid);
+    return !result &&
+           result.ErrorValue().domain == optimizer::common::ErrorDomain::Win32;
+}
+
 } // namespace
 
 int wmain() {
@@ -62,5 +83,7 @@ int wmain() {
     run(L"UniqueHandle move transfers ownership", &TestUniqueHandleMove);
     run(L"WideToUtf8 keeps Chinese round-trip", &TestWideToUtf8);
     run(L"WideToUtf8 empty", &TestWideToUtf8Empty);
+    run(L"Utf8ToWide keeps Chinese round-trip", &TestUtf8ToWideRoundTrip);
+    run(L"Utf8ToWide rejects invalid bytes", &TestUtf8ToWideRejectsInvalidBytes);
     return failed == 0 ? 0 : 1;
 }

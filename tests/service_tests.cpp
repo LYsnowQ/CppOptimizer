@@ -2,6 +2,7 @@
 #include "service/recovery_marker.hpp"
 #include "service/tray_host.hpp"
 #include "service/presence.hpp"
+#include "service/startup_entry.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -1002,6 +1003,88 @@ bool TestRecoveryMarkerMalformedContentNotSet() {
 
 } // namespace
 
+// ---------- AGENT-A1：自启动项（fake 后端；不触碰真实注册表） ----------
+
+class FakeStartupBackend final : public optimizer::service::StartupEntryBackend {
+public:
+    std::wstring stored;          // 已写入的命令行（空 = 未注册）
+    bool failWrite = false;
+    bool failRemove = false;
+    int writeCalls = 0;
+    int removeCalls = 0;
+
+    [[nodiscard]] optimizer::common::Result<std::wstring> Read() override {
+        return optimizer::common::Result<std::wstring>::Success(stored);
+    }
+    [[nodiscard]] optimizer::common::Result<void> Write(
+        const std::wstring& quotedCommand) override {
+        ++writeCalls;
+        if (failWrite) {
+            return optimizer::common::Result<void>::Failure(
+                optimizer::common::Error::FromWin32(5u, "FakeStartupBackend::Write"));
+        }
+        stored = quotedCommand;
+        return optimizer::common::Result<void>::Success();
+    }
+    [[nodiscard]] optimizer::common::Result<void> Remove() override {
+        ++removeCalls;
+        if (failRemove) {
+            return optimizer::common::Result<void>::Failure(optimizer::common::Error::FromWin32(
+                5u, "FakeStartupBackend::Remove"));
+        }
+        stored.clear(); // 不存在也视为成功（幂等）
+        return optimizer::common::Result<void>::Success();
+    }
+};
+
+bool TestStartupInstallRejectsEmptyPath() {
+    FakeStartupBackend backend;
+    const auto result =
+        optimizer::service::InstallStartupEntry(backend, std::wstring());
+    return !result && backend.writeCalls == 0 &&
+           result.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
+}
+
+bool TestStartupInstallQuotesPathAndReadsBack() {
+    FakeStartupBackend backend;
+    const std::wstring exe = L"C:\\Program Files\\CppOptimizer\\CppOptimizer.exe";
+    if (!optimizer::service::InstallStartupEntry(backend, exe)) {
+        return false;
+    }
+    // 后端收到的是带引号的完整命令行（路径含空格仍可正确启动）。
+    if (backend.stored != L"\"" + exe + L"\"") {
+        return false;
+    }
+    const auto read = optimizer::service::QueryStartupEntry(backend);
+    return read && read.Value() == backend.stored;
+}
+
+bool TestStartupQueryUnregisteredIsEmpty() {
+    FakeStartupBackend backend;
+    const auto read = optimizer::service::QueryStartupEntry(backend);
+    return read && read.Value().empty(); // 未注册 = 空串（Success，不是错误）
+}
+
+bool TestStartupRemoveIsIdempotent() {
+    FakeStartupBackend backend;
+    (void)optimizer::service::InstallStartupEntry(backend, L"C:\\x\\a.exe");
+    const auto first = optimizer::service::RemoveStartupEntry(backend);
+    const auto second = optimizer::service::RemoveStartupEntry(backend); // 幂等
+    return first && second && backend.stored.empty() && backend.removeCalls == 2;
+}
+
+bool TestStartupBackendFailureIsReported() {
+    FakeStartupBackend backend;
+    backend.failWrite = true;
+    const auto write = optimizer::service::InstallStartupEntry(backend, L"C:\\x\\a.exe");
+    backend.failRemove = true;
+    const auto remove = optimizer::service::RemoveStartupEntry(backend);
+    // 失败如实上报（不伪成功）且域为 Win32。
+    return !write && write.ErrorValue().domain == optimizer::common::ErrorDomain::Win32 &&
+           !remove &&
+           remove.ErrorValue().domain == optimizer::common::ErrorDomain::Win32;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -1076,5 +1159,12 @@ int wmain() {
     run(L"recovery marker absent file not set", &TestRecoveryMarkerAbsentFileNotSet);
     run(L"recovery marker malformed content not set",
         &TestRecoveryMarkerMalformedContentNotSet);
+    run(L"startup install rejects empty path", &TestStartupInstallRejectsEmptyPath);
+    run(L"startup install quotes path and reads back",
+        &TestStartupInstallQuotesPathAndReadsBack);
+    run(L"startup query unregistered is empty", &TestStartupQueryUnregisteredIsEmpty);
+    run(L"startup remove is idempotent", &TestStartupRemoveIsIdempotent);
+    run(L"startup backend failure is reported",
+        &TestStartupBackendFailureIsReported);
     return failed == 0 ? 0 : 1;
 }

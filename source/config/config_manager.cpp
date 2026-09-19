@@ -1,4 +1,4 @@
-#include "config/config_manager.hpp"
+﻿#include "config/config_manager.hpp"
 
 #include "common/unique_resource.hpp"
 
@@ -41,7 +41,148 @@ common::Error TomlFailure(const toml::parse_error& error) {
                                    error.description().end()));
 }
 
+// 未知键核对（如实上报，不改变解析结果）：known 为该表允许的键集合，
+// prefix 为点分路径前缀（顶层为空）。
+void CollectUnknownKeys(const toml::table& table,
+                        std::initializer_list<std::string_view> known,
+                        std::string_view prefix,
+                        std::vector<std::string>& out) {
+    for (const auto& [key, node] : table) {
+        (void)node;
+        const std::string name(key.str());
+        bool isKnown = false;
+        for (const auto candidate : known) {
+            if (name == candidate) {
+                isKnown = true;
+                break;
+            }
+        }
+        if (!isKnown) {
+            out.push_back(prefix.empty() ? name
+                                         : std::string(prefix) + "." + name);
+        }
+    }
+}
+
 } // namespace
+
+common::Result<ConfigVersion> ParseConfigVersion(std::string_view text) {
+    // 规范形式：MAJOR.MINOR.PATCH[-PRERELEASE]（ASCII；段位数 <=4；预发布 <=32 字符）。
+    constexpr std::size_t kMaxTextLength = 48;
+    constexpr std::size_t kMaxDigitsPerSegment = 4;
+    constexpr std::size_t kMaxPrereleaseLength = 32;
+    if (text.empty() || text.size() > kMaxTextLength) {
+        return common::Result<ConfigVersion>::Failure(common::Error::Validation(
+            "ParseConfigVersion", L"version must be 1..48 ASCII characters"));
+    }
+    const auto dash = text.find('-');
+    const std::string_view body =
+        dash == std::string_view::npos ? text : text.substr(0, dash);
+    const std::string_view prerelease =
+        dash == std::string_view::npos ? std::string_view()
+                                       : text.substr(dash + 1);
+    const auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
+    std::uint32_t segments[3] = {0, 0, 0};
+    std::size_t segmentIndex = 0;
+    std::size_t digits = 0;
+    bool segmentFirstDigitZero = false; // 用于仅拒绝“多位数且以 0 开头”的段（0 本身合法）
+    for (const char c : body) {
+        if (c == '.') {
+            if (digits == 0 || segmentIndex >= 2) {
+                return common::Result<ConfigVersion>::Failure(
+                    common::Error::Validation(
+                        "ParseConfigVersion",
+                        L"version must be MAJOR.MINOR.PATCH (three numeric segments)"));
+            }
+            ++segmentIndex;
+            digits = 0;
+            segmentFirstDigitZero = false;
+            continue;
+        }
+        if (!isDigit(c)) {
+            return common::Result<ConfigVersion>::Failure(
+                common::Error::Validation(
+                    "ParseConfigVersion",
+                    L"version must be MAJOR.MINOR.PATCH (ASCII digits and '.')"));
+        }
+        if (digits >= kMaxDigitsPerSegment) {
+            return common::Result<ConfigVersion>::Failure(
+                common::Error::Validation(
+                    "ParseConfigVersion", L"version segments must be <= 4 digits"));
+        }
+        if (digits == 0) {
+            segmentFirstDigitZero = (c == '0');
+        } else if (segmentFirstDigitZero) {
+            // 仅拒绝“多位数且以 0 开头”（如 01）；单独的 0 合法（如 1.0.0）。
+            return common::Result<ConfigVersion>::Failure(
+                common::Error::Validation(
+                    "ParseConfigVersion", L"version segments must not have leading zeros"));
+        }
+        segments[segmentIndex] =
+            segments[segmentIndex] * 10 + static_cast<std::uint32_t>(c - '0');
+        ++digits;
+    }
+    if (digits == 0 || segmentIndex != 2) {
+        return common::Result<ConfigVersion>::Failure(common::Error::Validation(
+            "ParseConfigVersion",
+            L"version must be MAJOR.MINOR.PATCH (three numeric segments)"));
+    }
+    if (dash != std::string_view::npos) {
+        if (prerelease.empty() || prerelease.size() > kMaxPrereleaseLength) {
+            return common::Result<ConfigVersion>::Failure(
+                common::Error::Validation(
+                    "ParseConfigVersion",
+                    L"prerelease must be 1..32 characters after '-'"));
+        }
+        if (prerelease.front() == '.' || prerelease.back() == '.' ||
+            prerelease.find("..") != std::string_view::npos) {
+            return common::Result<ConfigVersion>::Failure(
+                common::Error::Validation(
+                    "ParseConfigVersion",
+                    L"prerelease must not contain empty segments"));
+        }
+        for (const char c : prerelease) {
+            const bool allowed = isDigit(c) || (c >= 'a' && c <= 'z') ||
+                                 (c >= 'A' && c <= 'Z') || c == '.' || c == '-';
+            if (!allowed) {
+                return common::Result<ConfigVersion>::Failure(
+                    common::Error::Validation(
+                        "ParseConfigVersion",
+                        L"prerelease accepts ASCII letters/digits/'.'/'-' only"));
+            }
+        }
+    }
+    ConfigVersion version;
+    version.major = segments[0];
+    version.minor = segments[1];
+    version.patch = segments[2];
+    version.prerelease = std::string(prerelease);
+    return common::Result<ConfigVersion>::Success(std::move(version));
+}
+
+std::string FormatConfigVersion(const ConfigVersion& version) {
+    std::string text = std::to_string(version.major) + "." +
+                       std::to_string(version.minor) + "." +
+                       std::to_string(version.patch);
+    if (!version.prerelease.empty()) {
+        text += "-" + version.prerelease; // 预发布标识（beta 等）原样显示
+    }
+    return text;
+}
+
+bool AllowsLocalReversibleActions(RunMode mode,
+                                  const LayerConfig& layers) noexcept {
+    // 叠加门禁：模式（非 observe）与维护层（或应急层）都要允许。
+    const bool modeAllows = mode != RunMode::Observe;
+    const bool layerAllows = layers.maintenance || layers.emergency;
+    return modeAllows && layerAllows;
+}
+
+bool AllowsSystemLevelActions(RunMode mode,
+                              const LayerConfig& layers) noexcept {
+    // R2/R3 仅在 experimental + 应急层开启时进入“门禁评估”（真实动作仍须逐条满足全部安全条件）。
+    return mode == RunMode::Experimental && layers.emergency;
+}
 
 common::Result<RunMode> ParseRunMode(std::string_view name) {
     const std::string lower = ToLower(name);
@@ -298,8 +439,37 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
 
     ConfigSnapshot snapshot;
 
-    if (const auto version = table["version"].value<std::int64_t>()) {
-        snapshot.version = *version;
+    if (table.contains("version")) {
+        // CFG-008：三段数字 + 可选预发布标识（如 "1.0.0" / "1.2.0-beta.1"）；
+        // 旧式整数（`version = 1`）按兼容处理为 "1.0.0"（既有配置零回归）；
+        // 其它主版本、非法形式、非法字符/超长均拒绝（不做宽松转换）。
+        const auto* versionNode = table.get("version");
+        std::string versionText;
+        // 先判类型再取值：toml++ 的 value<T>() 允许宽松转换（布尔会被当成整数），
+        // 而本字段要求“类型不符必须拒绝”（不做宽松转换）。
+        if (versionNode->type() == toml::node_type::integer) {
+            versionText = std::to_string(*versionNode->value<std::int64_t>()) +
+                          ".0.0"; // 旧式整数兼容
+        } else if (versionNode->type() == toml::node_type::string) {
+            versionText = *versionNode->value<std::string>();
+        } else {
+            return common::Result<ConfigSnapshot>::Failure(
+                common::Error::Validation(
+                    "LoadConfig",
+                    L"version must be a string \"M.m.p[-pre]\" (or legacy integer)"));
+        }
+        auto parsedVersion = ParseConfigVersion(versionText);
+        if (!parsedVersion) {
+            return common::Result<ConfigSnapshot>::Failure(
+                parsedVersion.ErrorValue());
+        }
+        if (parsedVersion.Value().major != kSupportedConfigMajor) {
+            return common::Result<ConfigSnapshot>::Failure(
+                common::Error::Validation(
+                    "LoadConfig",
+                    L"unsupported config version major (supported: 1.x.y)"));
+        }
+        snapshot.version = std::move(parsedVersion.Value());
     }
 
     // [application]
@@ -575,6 +745,55 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
             if (!game.id.empty()) {
                 snapshot.games.push_back(std::move(game));
             }
+        }
+    }
+
+    // 未知键核对（如实上报，不改变解析结果）：与“缺失的键使用默认值”原则共存——
+    // 未知键仍被忽略以保证兼容，但用户必须能看到（否则拼写错误被静默吞掉）。
+    CollectUnknownKeys(
+        table,
+        {"version", "application", "logging", "layers", "power", "priority",
+         "memory", "gpu_heartbeat", "scheduler", "disk_cache", "policy",
+         "ipc", "games"},
+        "", snapshot.unknownKeys);
+    const auto collectSection =
+        [&snapshot, &table](const char* section,
+                            std::initializer_list<std::string_view> keys) {
+            if (const auto* sectionTable = table[section].as_table()) {
+                CollectUnknownKeys(*sectionTable, keys, section,
+                                   snapshot.unknownKeys);
+            }
+        };
+    collectSection("application", {"mode", "safe_mode_on_recovery_error"});
+    collectSection("logging", {"level", "directory", "max_file_mb", "max_files",
+                               "console"});
+    collectSection("layers", {"monitoring", "maintenance", "emergency"});
+    collectSection("power", {"execution_required", "display_required",
+                             "switch_power_scheme"});
+    collectSection("priority", {"enabled", "max_level"});
+    collectSection("memory", {"query_enabled", "scheduled_clean_enabled",
+                              "allow_native_write", "max_clean_level"});
+    collectSection("gpu_heartbeat", {"enabled", "max_measured_load_percent"});
+    collectSection("scheduler", {"enabled"});
+    collectSection("disk_cache", {"enabled"});
+    collectSection("policy", {"comfortable_margin_percent",
+                               "adequate_margin_percent", "tight_margin_percent",
+                               "cooldown_ms", "user_away_idle_seconds",
+                               "halt_after_action_failures"});
+    collectSection("ipc", {"safe_mode_enabled", "safe_mode_failures",
+                            "safe_mode_window_ms", "safe_mode_cooldown_ms"});
+    if (const auto* games = table["games"].as_array()) {
+        std::size_t index = 0;
+        for (const auto& entry : *games) {
+            if (const auto* gameTable = entry.as_table()) {
+                CollectUnknownKeys(*gameTable,
+                                   {"id", "display_name", "process_names",
+                                    "pause_when_background",
+                                    "window_title_contains"},
+                                   "games[" + std::to_string(index) + "]",
+                                   snapshot.unknownKeys);
+            }
+            ++index;
         }
     }
 

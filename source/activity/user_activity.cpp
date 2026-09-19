@@ -1,4 +1,4 @@
-#include "activity/user_activity.hpp"
+﻿#include "activity/user_activity.hpp"
 
 #include <windows.h>
 #include <wtsapi32.h>

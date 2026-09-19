@@ -1,7 +1,8 @@
-#include "config/config_manager.hpp"
+﻿#include "config/config_manager.hpp"
 
 #include <windows.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -43,6 +44,160 @@ bool TestParseRunMode() {
            !optimizer::config::ParseRunMode("hack").HasValue();
 }
 
+bool TestConfigReportsUnknownKeys() {
+    // 拼写错误（max_file_mbb / leval）、未知节与 games 内拼错键必须被如实上报；
+    // 同时未知键仍被忽略（行为不变，用的是默认值）。
+    const std::wstring path = MakeTempConfigPath();
+    const std::string content =
+        "version = 1\n"
+        "[logging]\n"
+        "max_file_mbb = 50\n"
+        "leval = \"debug\"\n"
+        "[totally_unknown_section]\n"
+        "foo = 1\n"
+        "[[games]]\n"
+        "id = \"g\"\n"
+        "process_names = [\"g.exe\"]\n"
+        "nmae = \"typo\"\n";
+    if (!WriteTempConfig(path, content)) {
+        return false;
+    }
+    const auto loaded = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!loaded) {
+        return false;
+    }
+    const auto& c = loaded.Value();
+    const auto contains = [&c](const std::string& key) {
+        return std::find(c.unknownKeys.begin(), c.unknownKeys.end(), key) !=
+               c.unknownKeys.end();
+    };
+    return c.unknownKeys.size() == 4 &&
+           contains("logging.max_file_mbb") && contains("logging.leval") &&
+           contains("totally_unknown_section") && contains("games[0].nmae") &&
+           c.logging.maxFileMb == 10 && c.logging.level == "info";
+}
+
+bool TestConfigNoUnknownKeysWhenClean() {
+    // 全合法配置：不得报出任何未知键（零回归）。
+    const std::wstring path = MakeTempConfigPath();
+    const std::string content =
+        "version = 1\n"
+        "[application]\n"
+        "mode = \"balanced\"\n"
+        "[logging]\n"
+        "level = \"info\"\n"
+        "directory = \"\"\n"
+        "max_file_mb = 10\n"
+        "max_files = 5\n"
+        "console = true\n"
+        "[layers]\n"
+        "monitoring = true\n"
+        "[power]\n"
+        "execution_required = true\n"
+        "display_required = false\n"
+        "switch_power_scheme = false\n"
+        "[priority]\n"
+        "enabled = false\n"
+        "max_level = \"above_normal\"\n"
+        "[memory]\n"
+        "query_enabled = true\n"
+        "scheduled_clean_enabled = false\n"
+        "allow_native_write = false\n"
+        "max_clean_level = \"light\"\n"
+        "[gpu_heartbeat]\n"
+        "enabled = false\n"
+        "max_measured_load_percent = 1.0\n"
+        "[scheduler]\n"
+        "enabled = false\n"
+        "[disk_cache]\n"
+        "enabled = false\n"
+        "[policy]\n"
+        "comfortable_margin_percent = 30\n"
+        "adequate_margin_percent = 15\n"
+        "tight_margin_percent = 5\n"
+        "cooldown_ms = 5000\n"
+        "user_away_idle_seconds = 0\n"
+        "halt_after_action_failures = 0\n"
+        "[ipc]\n"
+        "safe_mode_enabled = true\n"
+        "safe_mode_failures = 3\n"
+        "safe_mode_window_ms = 5000\n"
+        "safe_mode_cooldown_ms = 2000\n"
+        "[[games]]\n"
+        "id = \"g\"\n"
+        "display_name = \"G\"\n"
+        "process_names = [\"g.exe\"]\n"
+        "pause_when_background = true\n"
+        "window_title_contains = \"\"\n";
+    if (!WriteTempConfig(path, content)) {
+        return false;
+    }
+    const auto loaded = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return loaded && loaded.Value().unknownKeys.empty() &&
+           loaded.Value().games.size() == 1;
+}
+
+bool TestConfigVersionValidation() {
+    // version：缺失 = 采用当前版本；显式 1 = 接受；显式其它整数 = 拒绝；
+    // 类型不是整数（如字符串 "1.0.0-beta"）= 拒绝（不得被误当成缺失）。
+    const std::wstring path = MakeTempConfigPath();
+    const auto loadWith = [&path](const std::string& head) {
+        if (!WriteTempConfig(path, head + "[logging]\nlevel = \"info\"\n")) {
+            return optimizer::common::Result<optimizer::config::ConfigSnapshot>::Failure(
+                optimizer::common::Error::Validation("test", L"write failed"));
+        }
+        const auto loaded = optimizer::config::LoadConfig(path);
+        std::filesystem::remove(std::filesystem::path(path));
+        return loaded;
+    };
+    const auto missing = loadWith("");
+    const auto legacyInt = loadWith("version = 1\n");
+    const auto tri = loadWith("version = \"1.2.3\"\n");
+    const auto beta = loadWith("version = \"1.2.0-beta.1\"\n");
+    const auto rc = loadWith("version = \"1.0.0-rc.2\"\n");
+    const auto otherMajor = loadWith("version = \"2.0.0\"\n");
+    const auto legacyOtherMajor = loadWith("version = 2\n");
+    const auto twoSeg = loadWith("version = \"1.0\"\n");
+    const auto emptyPre = loadWith("version = \"1.0.0-\"\n");
+    const auto badChar = loadWith("version = \"1.0.0-be ta\"\n");
+    const auto leadZero = loadWith("version = \"01.0.0\"\n");
+    const auto boolType = loadWith("version = true\n");
+    return missing && legacyInt && tri && beta && rc &&
+           missing.Value().version.major == 1 &&
+           missing.Value().version.minor == 0 &&
+           legacyInt.Value().version.major == 1 &&
+           tri.Value().version.minor == 2 && tri.Value().version.patch == 3 &&
+           optimizer::config::FormatConfigVersion(beta.Value().version) ==
+               "1.2.0-beta.1" &&
+           optimizer::config::FormatConfigVersion(rc.Value().version) ==
+               "1.0.0-rc.2" &&
+           !otherMajor && !legacyOtherMajor && !twoSeg && !emptyPre &&
+           !badChar && !leadZero && !boolType;
+}
+
+bool TestModeAndLayerGates() {
+    using optimizer::config::AllowsLocalReversibleActions;
+    using optimizer::config::AllowsSystemLevelActions;
+    using optimizer::config::LayerConfig;
+    using optimizer::config::RunMode;
+    LayerConfig layers; // 默认：monitoring=true, maintenance=false, emergency=false
+    const LayerConfig maintenance{true, true, false};
+    const LayerConfig emergency{true, false, true};
+    // R1：模式与层叠加（都要允许）。
+    const bool r1 = !AllowsLocalReversibleActions(RunMode::Observe, maintenance) &&
+                    AllowsLocalReversibleActions(RunMode::Balanced, maintenance) &&
+                    AllowsLocalReversibleActions(RunMode::Experimental, maintenance) &&
+                    !AllowsLocalReversibleActions(RunMode::Balanced, layers) &&
+                    AllowsLocalReversibleActions(RunMode::Balanced, emergency);
+    // R2/R3：仅 experimental + emergency。
+    const bool system = !AllowsSystemLevelActions(RunMode::Balanced, emergency) &&
+                        !AllowsSystemLevelActions(RunMode::Experimental, maintenance) &&
+                        AllowsSystemLevelActions(RunMode::Experimental, emergency);
+    return r1 && system;
+}
+
 bool TestParseCleanLevel() {
     return optimizer::config::ParseCleanLevel("none").HasValue() &&
            optimizer::config::ParseCleanLevel("LIGHT").HasValue() &&
@@ -61,7 +216,7 @@ bool TestLoadConfigDefaults() {
         return false;
     }
     const auto& c = result.Value();
-    return c.version == 1 &&
+    return c.version.major == 1 && c.version.minor == 0 &&
            c.application.mode == optimizer::config::RunMode::Observe &&
            c.application.safeModeOnRecoveryError &&
            c.logging.level == "info" &&
@@ -75,8 +230,10 @@ bool TestLoadConfigDefaults() {
 
 bool TestLoadConfigFull() {
     const std::wstring path = MakeTempConfigPath();
+    // 注：原为 `version = 2`（旧行为静默接受任意版本）。CFG-005 起未知版本被拒绝，
+    // 故本用例改用当前支持版本 1；未知版本的拒绝路径由 TestConfigVersionValidation 覆盖。
     const std::string content = R"(
-version = 2
+version = 1
 
 [application]
 mode = "balanced"
@@ -104,7 +261,7 @@ max_clean_level = "light"
         return false;
     }
     const auto& c = result.Value();
-    return c.version == 2 &&
+    return c.version.major == 1 && c.version.minor == 0 &&
            c.application.mode == optimizer::config::RunMode::Balanced &&
            !c.application.safeModeOnRecoveryError &&
            c.logging.level == "debug" &&
@@ -612,7 +769,7 @@ bool TestAppendGameRulesKeepsOriginal() {
         return false;
     }
     const auto& c = result.Value();
-    return c.version == 1 && c.games.size() == 1 && c.games[0].id == "added";
+    return c.version.major == 1 && c.version.minor == 0 && c.games.size() == 1 && c.games[0].id == "added";
 }
 
 bool TestAppendGameRulesCreatesFile() {
@@ -682,7 +839,7 @@ bool TestLoadConfigWithLocalMissingLocal() {
     auto result =
         optimizer::config::LoadConfigWithLocal(mainPath, L"Z:\\nonexistent\\local.toml");
     std::filesystem::remove(std::filesystem::path(mainPath));
-    return result.HasValue() && result.Value().version == 1;
+    return result.HasValue() && result.Value().version.major == 1;
 }
 
 bool TestLoadConfigWithLocalBrokenLocal() {
@@ -764,5 +921,10 @@ int wmain() {
     run(L"LoadConfigWithLocal merges games", &TestLoadConfigWithLocal);
     run(L"LoadConfigWithLocal missing local", &TestLoadConfigWithLocalMissingLocal);
     run(L"LoadConfigWithLocal broken local fails", &TestLoadConfigWithLocalBrokenLocal);
+    run(L"Config reports unknown keys", &TestConfigReportsUnknownKeys);
+    run(L"Config version validation", &TestConfigVersionValidation);
+    run(L"Mode and layer gates", &TestModeAndLayerGates);
+    run(L"Config clean file has no unknown keys",
+        &TestConfigNoUnknownKeysWhenClean);
     return failed == 0 ? 0 : 1;
 }

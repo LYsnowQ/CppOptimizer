@@ -1,5 +1,6 @@
 ﻿#include "policy/policy_executor.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <set>
@@ -33,6 +34,7 @@ public:
 
     std::uint64_t nextHandle = 1000;
     std::vector<std::string> ops; // create / set / clear / close
+    std::vector<PowerLockType> lockTypes; // 每次 set/clear 记录类型（CFG-003 验证 display 请求）
     std::set<std::uint64_t> open;
 
     Result<std::uint64_t> CreateRequest(std::wstring_view) override {
@@ -48,8 +50,9 @@ public:
         return Result<std::uint64_t>::Success(h);
     }
 
-    Result<void> SetRequest(std::uint64_t, PowerLockType) override {
+    Result<void> SetRequest(std::uint64_t, PowerLockType type) override {
         ops.push_back("set");
+        lockTypes.push_back(type);
         if (failNextSet) {
             failNextSet = false;
             return Result<void>::Failure(
@@ -59,8 +62,9 @@ public:
         return Result<void>::Success();
     }
 
-    Result<void> ClearRequest(std::uint64_t, PowerLockType) override {
+    Result<void> ClearRequest(std::uint64_t, PowerLockType type) override {
         ops.push_back("clear");
+        lockTypes.push_back(type);
         if (failNextClear) {
             failNextClear = false;
             return Result<void>::Failure(
@@ -725,6 +729,46 @@ bool TestNoGameNoAction() {
     return !executor.IsPriorityHeld() && !executor.IsPowerHeld();
 }
 
+// ---------- CFG-003：[power].display_required 消费 ----------
+
+bool TestDisplayRequestHeldWhenConfigured() {
+    Harness h;
+    h.config.powerDisplayRequired = true; // [power].display_required
+    PolicyExecutor executor = h.Make();
+    const auto held = executor.ApplyDecision(
+        MakeDecision(PolicyAction::NoOp, "mem_ok"), MakeTarget(true));
+    if (!held || !held.Value().displayHeld || !executor.IsDisplayHeld() ||
+        !executor.IsPowerHeld()) {
+        return false;
+    }
+    const bool askedDisplay =
+        std::find(h.power->lockTypes.begin(), h.power->lockTypes.end(),
+                  PowerLockType::DisplayRequired) != h.power->lockTypes.end();
+    const auto released = executor.ApplyDecision(
+        MakeDecision(PolicyAction::NoOp, "no_game"), MakeTarget(false));
+    const bool clearedDisplay =
+        std::find(h.power->lockTypes.begin(), h.power->lockTypes.end(),
+                  PowerLockType::DisplayRequired) != h.power->lockTypes.end();
+    return askedDisplay && clearedDisplay && released &&
+           released.Value().displayReleased && released.Value().powerReleased &&
+           !executor.IsDisplayHeld() && !executor.IsPowerHeld() &&
+           h.power->open.empty();
+}
+
+bool TestDisplayRequestOffByDefault() {
+    // 默认不开（零回归）：即使游戏在运行也不得产生 display 请求。
+    Harness h; // powerDisplayRequired 保持默认 false
+    PolicyExecutor executor = h.Make();
+    const auto result = executor.ApplyDecision(
+        MakeDecision(PolicyAction::NoOp, "mem_ok"), MakeTarget(true));
+    if (!result || result.Value().displayHeld || executor.IsDisplayHeld()) {
+        return false;
+    }
+    return std::find(h.power->lockTypes.begin(), h.power->lockTypes.end(),
+                     PowerLockType::DisplayRequired) ==
+           h.power->lockTypes.end();
+}
+
 } // namespace
 
 int wmain() {
@@ -769,5 +813,8 @@ int wmain() {
     run(L"reset halt clears halted executor", &TestResetHaltClearsHaltedExecutor);
     run(L"release all releases both", &TestReleaseAllReleasesBoth);
     run(L"no game no action", &TestNoGameNoAction);
+    run(L"display request off by default", &TestDisplayRequestOffByDefault);
+    run(L"display request held when configured",
+        &TestDisplayRequestHeldWhenConfigured);
     return failed == 0 ? 0 : 1;
 }

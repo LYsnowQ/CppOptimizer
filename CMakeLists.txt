@@ -46,6 +46,7 @@ add_executable(CppOptimizer
     source/activity/user_activity.cpp
     source/activity/raw_input.cpp
     source/audit/audit_log.cpp
+    source/service/startup_entry.cpp
     source/service/service_host.cpp
     source/service/recovery_marker.cpp
     source/service/tray_host.cpp
@@ -322,6 +323,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
     add_executable(CppOptimizerServiceTests
         tests/service_tests.cpp
         source/common/error.cpp
+        source/service/startup_entry.cpp
         source/service/service_host.cpp
         source/service/recovery_marker.cpp
         source/service/tray_host.cpp

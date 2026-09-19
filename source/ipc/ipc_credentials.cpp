@@ -1,4 +1,4 @@
-#include "ipc/ipc_credentials.hpp"
+﻿#include "ipc/ipc_credentials.hpp"
 
 #include "common/unique_resource.hpp"
 
