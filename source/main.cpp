@@ -21,6 +21,7 @@
 #include "process/process_watcher.hpp"
 #include "service/service_host.hpp"
 #include "service/startup_entry.hpp"
+#include "service/agent_form.hpp"
 #include "service/scheduled_task.hpp"
 #include "service/recovery_marker.hpp"
 #include "service/tray_host.hpp"
@@ -3053,6 +3054,178 @@ int RunServiceUninstallCommand() {
     return 0;
 }
 
+int RunServiceStatusCommand() {
+    // --service status：只读查询 SCM 服务安装状态（不需要管理员）。
+    // 未安装不是错误；查询本身失败（如无权限）如实失败，不冒充“未安装”。
+    const auto queried = optimizer::service::QueryService(kServiceName);
+    if (!queried) {
+        const auto& error = queried.ErrorValue();
+        ErrorLine{} << L"  service status failed ["
+                    << optimizer::common::ToString(error.domain) << L":"
+                    << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+    optimizer::common::WriteConsoleLine(
+        L"Service (SCM; install and uninstall need admin)");
+    {
+        std::wostringstream line;
+        line << L"  name     : " << kServiceName;
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (!queried.Value().installed) {
+        optimizer::common::WriteConsoleLine(L"  state    : not installed");
+        return 0;
+    }
+    {
+        std::wostringstream line;
+        line << L"  state    : installed ("
+             << optimizer::service::StateToString(queried.Value().state)
+             << L")";
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    {
+        std::wostringstream line;
+        line << L"  start    : "
+             << optimizer::service::StartTypeToString(
+                    queried.Value().autoStart, queried.Value().startTypeKnown);
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    return 0;
+}
+
+// 以合成参数调用既有命令实现：复用其权限校验/幂等/输出语义，不重复实现。
+int InvokeFormAction(int (*command)(int, wchar_t**), const wchar_t* action) {
+    std::wstring verb(action);
+    wchar_t* argv[4] = {const_cast<wchar_t*>(L"CppOptimizer.exe"),
+                        const_cast<wchar_t*>(L"--agent-form"), verb.data(),
+                        nullptr};
+    return command(3, argv);
+}
+
+int RunAgentFormCommand(int argc, wchar_t* argv[]) {
+    // --agent-form <status|install|remove> [startup_tray|task|service]：常驻形态入口。
+    // 语义：
+    // - **默认形态不可更改**：唯一默认是 startup_tray；本命令的 install/remove 只是“本次动作”，
+    //   不写配置（配置 [agent].form 取值开放属后续切片）；
+    // - 三个形态各自保持原有权限语义：startup_tray 标准用户即可；task 注册需管理员
+    //   （任务本身不提权）；service 安装需管理员；
+    // - status 只读汇总：逐个形态查询，单个形态查询失败只影响它自己的行（如实标注）；
+    // - 未指定形态一律拒绝，不隐式回退到默认形态去安装。
+    if (argc < 3) {
+        ErrorLine{} << L"  --agent-form requires status|install|remove\n";
+        return 2;
+    }
+    const std::wstring_view action(argv[2]);
+    if (action == L"status") {
+        optimizer::common::WriteConsoleLine(
+            L"Agent forms (read-only; the default is startup_tray and cannot be changed)");
+        {
+            const auto queried = optimizer::service::QueryStartupEntry();
+            if (!queried) {
+                ErrorLine{} << L"  startup_tray : query failed ["
+                            << optimizer::common::ToString(
+                                   queried.ErrorValue().domain)
+                            << L":" << queried.ErrorValue().code << L"] "
+                            << queried.ErrorValue().message << L"\n";
+            } else {
+                std::wostringstream line;
+                line << L"  startup_tray : ";
+                if (queried.Value().empty()) {
+                    line << L"not installed";
+                } else {
+                    line << L"installed -> " << queried.Value();
+                }
+                optimizer::common::WriteConsoleLine(line.str());
+            }
+        }
+        {
+            const auto queried = optimizer::service::QueryScheduledTask(
+                optimizer::service::kScheduledTaskName);
+            if (!queried) {
+                ErrorLine{} << L"  task         : query failed ["
+                            << optimizer::common::ToString(
+                                   queried.ErrorValue().domain)
+                            << L":" << queried.ErrorValue().code << L"] "
+                            << queried.ErrorValue().message << L"\n";
+            } else {
+                std::wostringstream line;
+                line << L"  task         : ";
+                if (!queried.Value().installed) {
+                    line << L"not installed";
+                } else {
+                    line << L"installed";
+                    if (!queried.Value().trigger.empty()) {
+                        line << L" (trigger " << queried.Value().trigger << L")";
+                    }
+                    if (!queried.Value().commandLine.empty()) {
+                        line << L" -> " << queried.Value().commandLine;
+                    }
+                }
+                optimizer::common::WriteConsoleLine(line.str());
+            }
+        }
+        {
+            const auto queried = optimizer::service::QueryService(kServiceName);
+            if (!queried) {
+                ErrorLine{} << L"  service      : query failed ["
+                            << optimizer::common::ToString(
+                                   queried.ErrorValue().domain)
+                            << L":" << queried.ErrorValue().code << L"] "
+                            << queried.ErrorValue().message << L"\n";
+            } else {
+                std::wostringstream line;
+                line << L"  service      : ";
+                if (!queried.Value().installed) {
+                    line << L"not installed";
+                } else {
+                    line << L"installed ("
+                         << optimizer::service::StateToString(queried.Value().state)
+                         << L", start "
+                         << optimizer::service::StartTypeToString(
+                                queried.Value().autoStart,
+                                queried.Value().startTypeKnown)
+                         << L")";
+                }
+                optimizer::common::WriteConsoleLine(line.str());
+            }
+        }
+        optimizer::common::WriteConsoleLine(
+            L"  act          : CppOptimizer.exe --agent-form install|remove <startup_tray|task|service>");
+        return 0;
+    }
+    if (action != L"install" && action != L"remove") {
+        ErrorLine{} << L"  --agent-form requires status|install|remove\n";
+        return 2;
+    }
+    if (argc < 4) {
+        ErrorLine{} << L"  --agent-form " << action
+                    << L" needs a form: startup_tray|task|service\n";
+        return 2;
+    }
+    const auto form = optimizer::service::ParseAgentForm(argv[3]);
+    if (!form) {
+        ErrorLine{} << L"  unknown agent form: " << argv[3]
+                    << L" (expected startup_tray|task|service)\n";
+        return 2;
+    }
+    const bool installing = action == L"install";
+    switch (*form) {
+        case optimizer::service::AgentForm::StartupTray:
+            return InvokeFormAction(&RunStartupCommand,
+                                    installing ? L"install" : L"remove");
+        case optimizer::service::AgentForm::ScheduledTask:
+            return InvokeFormAction(&RunScheduledTaskCommand,
+                                    installing ? L"install" : L"remove");
+        case optimizer::service::AgentForm::Service:
+            if (installing) {
+                return RunServiceInstallCommand(1, nullptr);
+            }
+            return RunServiceUninstallCommand();
+    }
+    ErrorLine{} << L"  unknown agent form\n";
+    return 2;
+}
+
 // 命名管道基名：服务端与客户端必须使用同一名称（可选后缀区分实例）。
 constexpr wchar_t kIpcPipeBase[] = L"\\\\.\\pipe\\CppOptimizerIpc";
 
@@ -3926,6 +4099,10 @@ void PrintUsage() {
         << L"                             (GetForegroundWindow/GetWindowThreadProcessId) on\n"
         << L"                             active/idle samples only\n"
 
+        << L"  CppOptimizer.exe --agent-form <status|install|remove> [form]  Report or apply one\n"
+        << L"                             agent form (startup_tray|task|service); default startup_tray\n"
+        << L"                             stays default, registration of task/service needs admin\n"
+        << L"  CppOptimizer.exe --service status  Report the SCM service install state (read-only)\n"
         << L"  CppOptimizer.exe --startup <status|install|remove>  Per-user startup entry\n"
         << L"                             (HKCU Run; R1, reversible, standard user;\n"
         << L"                             never installed by default)\n"
@@ -4119,6 +4296,8 @@ int wmain(int argc, wchar_t* argv[]) {
                     return RunServiceInstallCommand(argc, argv);
                 case optimizer::service::RunMode::Uninstall:
                     return RunServiceUninstallCommand();
+                case optimizer::service::RunMode::Status:
+                    return RunServiceStatusCommand();
             }
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--agent") {
@@ -4141,9 +4320,12 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argc >= 2 && std::wstring_view(argv[1]) == L"--startup") {
             return RunStartupCommand(argc, argv);
         }
-        if (argc >= 2 && argc <= 4 &&
-            std::wstring_view(argv[1]) == L"--scheduled-task") {
+        if (argc >= 3 && std::wstring_view(argv[1]) == L"--scheduled-task") {
             return RunScheduledTaskCommand(argc, argv);
+        }
+        if (argc >= 2 && argc <= 4 &&
+            std::wstring_view(argv[1]) == L"--agent-form") {
+            return RunAgentFormCommand(argc, argv);
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--ipc-credential") {
             return RunIpcCredentialCommand(argc, argv);

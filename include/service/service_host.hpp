@@ -23,7 +23,8 @@ enum class RunMode {
     Console,    // 控制台托管：前台、有界、Ctrl+C 优雅停止
     Service,    // Windows 服务模式：由 SCM 启动（StartServiceCtrlDispatcher）
     Install,    // 安装服务（需要管理员）
-    Uninstall   // 卸载服务（需要管理员）
+    Uninstall,  // 卸载服务（需要管理员）
+    Status      // 只读查询服务安装状态（不需要管理员）
 };
 
 // 运行模式名（纯查询，恒成功）。
@@ -51,6 +52,10 @@ enum class ServiceState {
 
 // 状态名（纯查询，恒成功）。
 [[nodiscard]] const wchar_t* StateToString(ServiceState state) noexcept;
+
+// 安装类型名（纯查询，恒成功）："demand" / "auto" / "unknown"（未取到时不伪装）。
+[[nodiscard]] const wchar_t* StartTypeToString(bool autoStart,
+                                              bool startTypeKnown) noexcept;
 
 // 运行态接受的控制码：STOP | SHUTDOWN。
 inline constexpr std::uint32_t kServiceControlsAccepted =
@@ -118,6 +123,47 @@ public:
 // 卸载服务：OpenService(DELETE) + DeleteService。
 // 服务正在运行时 SCM 标记删除，停止后移除；未安装返回 ERROR_SERVICE_DOES_NOT_EXIST。
 [[nodiscard]] common::Result<void> UninstallService(
+    std::wstring_view name) noexcept;
+
+// ---------- 服务安装/卸载后端（可注入；单测用 fake，不触碰真实 SCM） ----------
+
+// 安装状态查询结果：`installed == false` 表示未安装（Success，不是错误）。
+struct ServiceInstallStatus {
+    bool installed = false;
+    ServiceState state = ServiceState::Unknown; // 已安装时的运行状态
+    bool autoStart = false;                     // 启动类型是否为 SERVICE_AUTO_START
+    bool startTypeKnown = false;                // false = 未取到启动类型（不伪装为 demand）
+};
+
+// 后端契约：Create 收到完整身份（ImagePath 带引号由后端负责）；Delete 未安装视为
+// 失败并如实返回 ERROR_SERVICE_DOES_NOT_EXIST（是否幂等由上层决定）；Query 未安装返回
+// installed=false（不是错误），查询本身失败（如无权限）必须如实返回错误。
+class ScmInstallBackend {
+public:
+    virtual ~ScmInstallBackend() = default;
+
+    [[nodiscard]] virtual common::Result<void> Create(
+        const ServiceIdentity& identity) = 0;
+    [[nodiscard]] virtual common::Result<void> Delete(
+        std::wstring_view name) = 0;
+    [[nodiscard]] virtual common::Result<ServiceInstallStatus> Query(
+        std::wstring_view name) = 0;
+};
+
+// 真实 Win32 后端（SCM）。
+[[nodiscard]] std::shared_ptr<ScmInstallBackend>
+CreateWin32ScmInstallBackend() noexcept;
+
+// 面向后端的操作（纯逻辑：空服务名/空显示名校验；校验失败不调用后端）。
+[[nodiscard]] common::Result<void> InstallService(
+    ScmInstallBackend& backend, const ServiceIdentity& identity) noexcept;
+[[nodiscard]] common::Result<void> UninstallService(
+    ScmInstallBackend& backend, std::wstring_view name) noexcept;
+[[nodiscard]] common::Result<ServiceInstallStatus> QueryService(
+    ScmInstallBackend& backend, std::wstring_view name) noexcept;
+
+// 只读查询安装状态（不需要管理员；未安装返回 installed=false）。
+[[nodiscard]] common::Result<ServiceInstallStatus> QueryService(
     std::wstring_view name) noexcept;
 
 // ---------- 服务宿主 ----------

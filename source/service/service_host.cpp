@@ -153,6 +153,8 @@ const wchar_t* RunModeToString(RunMode mode) noexcept {
             return L"install";
         case RunMode::Uninstall:
             return L"uninstall";
+        case RunMode::Status:
+            return L"status";
     }
     return L"unknown";
 }
@@ -185,6 +187,9 @@ std::optional<RunMode> ParseRunMode(std::wstring_view text) noexcept {
     }
     if (eq(text, L"uninstall")) {
         return RunMode::Uninstall;
+    }
+    if (eq(text, L"status")) {
+        return RunMode::Status;
     }
     return std::nullopt;
 }
@@ -256,60 +261,184 @@ std::shared_ptr<ScmBackend> CreateWin32ScmBackend() {
     return std::make_shared<Win32ScmBackend>();
 }
 
+namespace {
+
+// ImagePath 用的 exe 路径：为空则取当前模块路径（两阶段查询，处理长度变化）。
+common::Result<std::wstring> ResolveImagePath(
+    const std::wstring& executablePath) {
+    if (!executablePath.empty()) {
+        return common::Result<std::wstring>::Success(executablePath);
+    }
+    std::vector<wchar_t> buffer(MAX_PATH);
+    for (;;) {
+        const DWORD copied = ::GetModuleFileNameW(
+            nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (copied == 0) {
+            return common::Result<std::wstring>::Failure(common::Error::FromWin32(
+                ::GetLastError(), "GetModuleFileNameW"));
+        }
+        if (copied < buffer.size()) {
+            return common::Result<std::wstring>::Success(std::wstring(buffer.data(), copied));
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+}
+
+// SCM 运行状态常量 -> 项目枚举（未知值不猜测，回 Unknown）。
+ServiceState FromScmState(DWORD state) noexcept {
+    switch (state) {
+        case SERVICE_START_PENDING:
+            return ServiceState::StartPending;
+        case SERVICE_RUNNING:
+            return ServiceState::Running;
+        case SERVICE_STOP_PENDING:
+            return ServiceState::StopPending;
+        case SERVICE_STOPPED:
+            return ServiceState::Stopped;
+        default:
+            return ServiceState::Unknown;
+    }
+}
+
+// 真实 SCM 后端：注册/删除服务 + 只读安装状态查询（需管理员才能注册/删除）。
+class Win32ScmInstallBackend final : public ScmInstallBackend {
+public:
+    [[nodiscard]] common::Result<void> Create(
+        const ServiceIdentity& identity) override {
+        auto imagePath = ResolveImagePath(identity.executablePath);
+        if (!imagePath) {
+            return common::Result<void>::Failure(imagePath.ErrorValue());
+        }
+        // ImagePath 带引号：路径含空格时 SCM 解析依赖引号。
+        const std::wstring quoted = L"\"" + imagePath.Value() + L"\"";
+        common::UniqueServiceHandle scm(
+            ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE));
+        if (!scm) {
+            return common::Result<void>::Failure(
+                common::Error::FromWin32(::GetLastError(), "OpenSCManagerW"));
+        }
+        // 服务句柄最小权限：SERVICE_CHANGE_CONFIG（仅用于设置描述）。
+        common::UniqueServiceHandle svc(::CreateServiceW(
+            scm.Get(), identity.name.c_str(), identity.displayName.c_str(),
+            SERVICE_CHANGE_CONFIG, SERVICE_WIN32_OWN_PROCESS,
+            SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, quoted.c_str(),
+            nullptr, nullptr, nullptr, nullptr, nullptr));
+        if (!svc) {
+            return common::Result<void>::Failure(
+                common::Error::FromWin32(::GetLastError(), "CreateServiceW"));
+        }
+        // 描述为装饰性字段：写入失败不阻断安装，仅留诊断输出。
+        if (!identity.description.empty()) {
+            SERVICE_DESCRIPTIONW description{};
+            description.lpDescription =
+                const_cast<LPWSTR>(identity.description.c_str());
+            if (!::ChangeServiceConfig2W(svc.Get(), SERVICE_CONFIG_DESCRIPTION,
+                                         &description)) {
+                ::OutputDebugStringW(
+                    L"CppOptimizer: ChangeServiceConfig2W(description) failed");
+            }
+        }
+        return common::Result<void>::Success();
+    }
+
+    [[nodiscard]] common::Result<void> Delete(std::wstring_view name) override {
+        common::UniqueServiceHandle scm(
+            ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+        if (!scm) {
+            return common::Result<void>::Failure(
+                common::Error::FromWin32(::GetLastError(), "OpenSCManagerW"));
+        }
+        const std::wstring owned(name);
+        common::UniqueServiceHandle svc(
+            ::OpenServiceW(scm.Get(), owned.c_str(), DELETE));
+        if (!svc) {
+            return common::Result<void>::Failure(
+                common::Error::FromWin32(::GetLastError(), "OpenServiceW"));
+        }
+        if (!::DeleteService(svc.Get())) {
+            return common::Result<void>::Failure(
+                common::Error::FromWin32(::GetLastError(), "DeleteService"));
+        }
+        return common::Result<void>::Success();
+    }
+
+    [[nodiscard]] common::Result<ServiceInstallStatus> Query(
+        std::wstring_view name) override {
+        common::UniqueServiceHandle scm(
+            ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+        if (!scm) {
+            // 连不上 SCM 属查询失败（如权限不足）：不得冒充“未安装”。
+            return common::Result<ServiceInstallStatus>::Failure(
+                common::Error::FromWin32(::GetLastError(), "OpenSCManagerW"));
+        }
+        const std::wstring owned(name);
+        common::UniqueServiceHandle svc(::OpenServiceW(
+            scm.Get(), owned.c_str(), SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG));
+        if (!svc) {
+            const DWORD code = ::GetLastError();
+            if (code == ERROR_SERVICE_DOES_NOT_EXIST) {
+                return common::Result<ServiceInstallStatus>::Success(
+                    ServiceInstallStatus{}); // 未安装不是错误
+            }
+            return common::Result<ServiceInstallStatus>::Failure(
+                common::Error::FromWin32(code, "OpenServiceW(query)"));
+        }
+        ServiceInstallStatus status;
+        status.installed = true;
+        SERVICE_STATUS_PROCESS statusProcess{};
+        DWORD needed = 0;
+        if (::QueryServiceStatusEx(svc.Get(), SC_STATUS_PROCESS_INFO,
+                                   reinterpret_cast<LPBYTE>(&statusProcess),
+                                   sizeof(statusProcess), &needed)) {
+            status.state = FromScmState(statusProcess.dwCurrentState);
+        }
+        // 启动类型单独查询；取不到时保持 startTypeKnown=false（不伪装为 demand）。
+        DWORD configBytes = 0;
+        (void)::QueryServiceConfigW(svc.Get(), nullptr, 0, &configBytes);
+        if (configBytes > 0) {
+            std::vector<BYTE> buffer(configBytes);
+            if (::QueryServiceConfigW(
+                    svc.Get(),
+                    reinterpret_cast<LPQUERY_SERVICE_CONFIGW>(buffer.data()),
+                    configBytes, &configBytes)) {
+                const auto* config =
+                    reinterpret_cast<const QUERY_SERVICE_CONFIGW*>(buffer.data());
+                status.startTypeKnown = true;
+                status.autoStart = config->dwStartType == SERVICE_AUTO_START;
+            }
+        }
+        return common::Result<ServiceInstallStatus>::Success(std::move(status));
+    }
+};
+
+} // namespace
+
+const wchar_t* StartTypeToString(bool autoStart, bool startTypeKnown) noexcept {
+    if (!startTypeKnown) {
+        return L"unknown";
+    }
+    return autoStart ? L"auto" : L"demand";
+}
+
+std::shared_ptr<ScmInstallBackend> CreateWin32ScmInstallBackend() noexcept {
+    try {
+        return std::make_shared<Win32ScmInstallBackend>();
+    } catch (...) {
+        return nullptr; // 分配失败：如实返回空
+    }
+}
+
 common::Result<void> InstallService(const ServiceIdentity& identity) noexcept {
     if (identity.name.empty() || identity.displayName.empty()) {
         return common::Result<void>::Failure(common::Error::Validation(
             "InstallService", L"服务名与显示名不能为空"));
     }
-    // exe 路径：为空则取当前模块路径（两阶段查询，处理长度变化）。
-    std::wstring exePath = identity.executablePath;
-    if (exePath.empty()) {
-        std::vector<wchar_t> buffer(MAX_PATH);
-        for (;;) {
-            const DWORD copied = ::GetModuleFileNameW(
-                nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-            if (copied == 0) {
-                return common::Result<void>::Failure(common::Error::FromWin32(
-                    ::GetLastError(), "GetModuleFileNameW"));
-            }
-            if (copied < buffer.size()) {
-                exePath.assign(buffer.data(), copied);
-                break;
-            }
-            buffer.resize(buffer.size() * 2);
-        }
+    auto backend = CreateWin32ScmInstallBackend();
+    if (!backend) {
+        return common::Result<void>::Failure(common::Error::Unsupported(
+            "InstallService", L"无法创建服务安装后端"));
     }
-    // ImagePath 带引号：路径含空格时 SCM 解析依赖引号。
-    const std::wstring imagePath = L"\"" + exePath + L"\"";
-
-    common::UniqueServiceHandle scm(
-        ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE));
-    if (!scm) {
-        return common::Result<void>::Failure(
-            common::Error::FromWin32(::GetLastError(), "OpenSCManagerW"));
-    }
-    // 服务句柄最小权限：SERVICE_CHANGE_CONFIG（仅用于设置描述）。
-    common::UniqueServiceHandle svc(::CreateServiceW(
-        scm.Get(), identity.name.c_str(), identity.displayName.c_str(),
-        SERVICE_CHANGE_CONFIG, SERVICE_WIN32_OWN_PROCESS,
-        SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, imagePath.c_str(), nullptr,
-        nullptr, nullptr, nullptr, nullptr));
-    if (!svc) {
-        return common::Result<void>::Failure(
-            common::Error::FromWin32(::GetLastError(), "CreateServiceW"));
-    }
-    // 描述为装饰性字段：写入失败不阻断安装，仅留诊断输出。
-    if (!identity.description.empty()) {
-        SERVICE_DESCRIPTIONW description{};
-        description.lpDescription =
-            const_cast<LPWSTR>(identity.description.c_str());
-        if (!::ChangeServiceConfig2W(svc.Get(), SERVICE_CONFIG_DESCRIPTION,
-                                     &description)) {
-            ::OutputDebugStringW(
-                L"CppOptimizer: ChangeServiceConfig2W(description) failed");
-        }
-    }
-    return common::Result<void>::Success();
+    return InstallService(*backend, identity);
 }
 
 common::Result<void> UninstallService(std::wstring_view name) noexcept {
@@ -317,23 +446,54 @@ common::Result<void> UninstallService(std::wstring_view name) noexcept {
         return common::Result<void>::Failure(common::Error::Validation(
             "UninstallService", L"服务名不能为空"));
     }
-    common::UniqueServiceHandle scm(
-        ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
-    if (!scm) {
-        return common::Result<void>::Failure(
-            common::Error::FromWin32(::GetLastError(), "OpenSCManagerW"));
+    auto backend = CreateWin32ScmInstallBackend();
+    if (!backend) {
+        return common::Result<void>::Failure(common::Error::Unsupported(
+            "UninstallService", L"无法创建服务安装后端"));
     }
-    common::UniqueServiceHandle svc(
-        ::OpenServiceW(scm.Get(), std::wstring(name).c_str(), DELETE));
-    if (!svc) {
-        return common::Result<void>::Failure(
-            common::Error::FromWin32(::GetLastError(), "OpenServiceW"));
+    return UninstallService(*backend, name);
+}
+
+common::Result<ServiceInstallStatus> QueryService(
+    std::wstring_view name) noexcept {
+    if (name.empty()) {
+        return common::Result<ServiceInstallStatus>::Failure(
+            common::Error::Validation("QueryService", L"服务名不能为空"));
     }
-    if (!::DeleteService(svc.Get())) {
-        return common::Result<void>::Failure(
-            common::Error::FromWin32(::GetLastError(), "DeleteService"));
+    auto backend = CreateWin32ScmInstallBackend();
+    if (!backend) {
+        return common::Result<ServiceInstallStatus>::Failure(
+            common::Error::Unsupported("QueryService",
+                                       L"无法创建服务安装后端"));
     }
-    return common::Result<void>::Success();
+    return QueryService(*backend, name);
+}
+
+common::Result<void> InstallService(ScmInstallBackend& backend,
+                                    const ServiceIdentity& identity) noexcept {
+    if (identity.name.empty() || identity.displayName.empty()) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "InstallService", L"服务名与显示名不能为空"));
+    }
+    return backend.Create(identity); // 校验先于后端：非法输入不产生系统副作用
+}
+
+common::Result<void> UninstallService(ScmInstallBackend& backend,
+                                      std::wstring_view name) noexcept {
+    if (name.empty()) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "UninstallService", L"服务名不能为空"));
+    }
+    return backend.Delete(name);
+}
+
+common::Result<ServiceInstallStatus> QueryService(
+    ScmInstallBackend& backend, std::wstring_view name) noexcept {
+    if (name.empty()) {
+        return common::Result<ServiceInstallStatus>::Failure(
+            common::Error::Validation("QueryService", L"服务名不能为空"));
+    }
+    return backend.Query(name); // 未安装 => installed=false（Success）由后端保证
 }
 
 ServiceHost::ServiceHost(Workload workload, Options options,

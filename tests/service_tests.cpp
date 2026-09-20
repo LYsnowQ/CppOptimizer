@@ -3,6 +3,7 @@
 #include "service/tray_host.hpp"
 #include "service/presence.hpp"
 #include "service/startup_entry.hpp"
+#include "service/agent_form.hpp"
 #include "service/scheduled_task.hpp"
 
 #include <atomic>
@@ -115,13 +116,16 @@ bool TestParseRunMode() {
            ParseRunMode(L"service") == RunMode::Service &&
            ParseRunMode(L"install") == RunMode::Install &&
            ParseRunMode(L"Uninstall") == RunMode::Uninstall &&
+           ParseRunMode(L"status") == RunMode::Status &&
+           ParseRunMode(L"STATUS") == RunMode::Status &&
            !ParseRunMode(L"") && !ParseRunMode(L"wat") &&
            !ParseRunMode(L"consolex");
 }
 
 bool TestRunModeToStringRoundTrip() {
     for (const auto mode : {RunMode::Console, RunMode::Service,
-                            RunMode::Install, RunMode::Uninstall}) {
+                            RunMode::Install, RunMode::Uninstall,
+                            RunMode::Status}) {
         const wchar_t* name = RunModeToString(mode);
         if (name == nullptr || ParseRunMode(name) != mode) {
             return false;
@@ -1236,6 +1240,173 @@ bool TestScheduledTaskFailuresAreReported() {
            !read && read.ErrorValue().domain == optimizer::common::ErrorDomain::HResult;
 }
 
+// ---------- AGENT-A5：形态选择（纯函数）与 SCM 安装后端（fake） ----------
+
+bool TestParseAgentForm() {
+    using optimizer::service::AgentForm;
+    using optimizer::service::DefaultAgentForm;
+    using optimizer::service::IsDefaultAgentForm;
+    using optimizer::service::ParseAgentForm;
+    // 默认形态唯一且不可更改。
+    const bool defaultIsStartupTray =
+        DefaultAgentForm() == AgentForm::StartupTray &&
+        IsDefaultAgentForm(AgentForm::StartupTray) &&
+        !IsDefaultAgentForm(AgentForm::ScheduledTask) &&
+        !IsDefaultAgentForm(AgentForm::Service);
+    // 大小写不敏感；横线/下划线互换（书写习惯差异不改语义）；未知文本不猜。
+    const bool parsed = ParseAgentForm(L"startup_tray") == AgentForm::StartupTray &&
+                        ParseAgentForm(L"STARTUP-TRAY") == AgentForm::StartupTray &&
+                        ParseAgentForm(L"Task") == AgentForm::ScheduledTask &&
+                        ParseAgentForm(L"service") == AgentForm::Service;
+    const bool rejected = !ParseAgentForm(L"") && !ParseAgentForm(L"startup") &&
+                          !ParseAgentForm(L"tray") &&
+                          !ParseAgentForm(L"计划任务") &&
+                          !ParseAgentForm(L"startup_trayx");
+    return defaultIsStartupTray && parsed && rejected;
+}
+
+bool TestAgentFormRoundTripAndElevation() {
+    using optimizer::service::AgentForm;
+    using optimizer::service::AgentFormRequiresElevation;
+    using optimizer::service::AgentFormToString;
+    using optimizer::service::ParseAgentForm;
+    bool roundTrip = true;
+    for (const auto form : {AgentForm::StartupTray, AgentForm::ScheduledTask,
+                            AgentForm::Service}) {
+        const wchar_t* name = AgentFormToString(form);
+        roundTrip = roundTrip && name != nullptr && ParseAgentForm(name) == form;
+    }
+    // 注册权限与运行身份是两件事：只有启动项标准用户即可。
+    const bool elevation = !AgentFormRequiresElevation(AgentForm::StartupTray) &&
+                           AgentFormRequiresElevation(AgentForm::ScheduledTask) &&
+                           AgentFormRequiresElevation(AgentForm::Service);
+    return roundTrip && elevation;
+}
+
+class FakeScmInstallBackend final : public optimizer::service::ScmInstallBackend {
+public:
+    optimizer::service::ServiceIdentity created;
+    optimizer::service::ServiceInstallStatus status; // installed=false 表示未安装
+    bool failCreate = false;
+    bool failDelete = false;
+    bool failQuery = false;
+    int createCalls = 0;
+    int deleteCalls = 0;
+    int queryCalls = 0;
+
+    [[nodiscard]] optimizer::common::Result<void> Create(
+        const optimizer::service::ServiceIdentity& identity) override {
+        ++createCalls;
+        if (failCreate) {
+            return optimizer::common::Result<void>::Failure(
+                optimizer::common::Error::FromWin32(5u,
+                                                    "FakeScmInstallBackend::Create"));
+        }
+        created = identity;
+        status.installed = true;
+        status.state = optimizer::service::ServiceState::Stopped;
+        status.startTypeKnown = true;
+        status.autoStart = false;
+        return optimizer::common::Result<void>::Success();
+    }
+    [[nodiscard]] optimizer::common::Result<void> Delete(
+        std::wstring_view name) override {
+        ++deleteCalls;
+        if (failDelete) {
+            return optimizer::common::Result<void>::Failure(
+                optimizer::common::Error::FromWin32(5u,
+                                                    "FakeScmInstallBackend::Delete"));
+        }
+        (void)name;
+        status = optimizer::service::ServiceInstallStatus{};
+        return optimizer::common::Result<void>::Success();
+    }
+    [[nodiscard]] optimizer::common::Result<optimizer::service::ServiceInstallStatus>
+    Query(std::wstring_view name) override {
+        ++queryCalls;
+        if (failQuery) {
+            return optimizer::common::Result<optimizer::service::ServiceInstallStatus>::Failure(
+                optimizer::common::Error::FromWin32(5u, "FakeScmInstallBackend::Query"));
+        }
+        (void)name;
+        return optimizer::common::Result<optimizer::service::ServiceInstallStatus>::Success(
+            status); // 未安装 = installed=false（Success，不是错误）
+    }
+};
+
+bool TestServiceInstallRejectsBeforeBackend() {
+    using optimizer::service::InstallService;
+    using optimizer::service::ServiceIdentity;
+    FakeScmInstallBackend backend;
+    ServiceIdentity identity;
+    identity.name = L"CppOptimizerService";
+    identity.displayName = L"CppOptimizer Service";
+    identity.name.clear();
+    const auto noName = InstallService(backend, identity);
+    identity.name = L"CppOptimizerService";
+    identity.displayName.clear();
+    const auto noDisplay = InstallService(backend, identity);
+    // 校验失败不得触发后端（不产生系统副作用）。
+    return !noName && !noDisplay &&
+           noName.ErrorValue().domain == optimizer::common::ErrorDomain::Validation &&
+           backend.createCalls == 0;
+}
+
+bool TestServiceInstallQueryDeleteRoundTrip() {
+    using optimizer::service::InstallService;
+    using optimizer::service::QueryService;
+    using optimizer::service::ServiceIdentity;
+    using optimizer::service::UninstallService;
+    FakeScmInstallBackend backend;
+    ServiceIdentity identity;
+    identity.name = L"CppOptimizerService";
+    identity.displayName = L"CppOptimizer Service";
+    identity.executablePath = L"C:\\x\\CppOptimizer.exe";
+    const auto missing = QueryService(backend, identity.name);
+    if (!missing || missing.Value().installed) {
+        return false; // 未安装 = Success + installed=false
+    }
+    if (!InstallService(backend, identity)) {
+        return false;
+    }
+    const bool recorded = backend.created.name == identity.name &&
+                          backend.created.displayName == identity.displayName &&
+                          backend.created.executablePath == identity.executablePath;
+    const auto installed = QueryService(backend, identity.name);
+    const bool queried = installed && installed.Value().installed &&
+                         installed.Value().startTypeKnown &&
+                         !installed.Value().autoStart; // demand start：不伪装为自动
+    const auto first = UninstallService(backend, identity.name);
+    const auto second = UninstallService(backend, identity.name); // 幂等
+    const bool removed = first && second && backend.deleteCalls == 2 &&
+                         !QueryService(backend, identity.name).Value().installed;
+    return recorded && queried && removed;
+}
+
+bool TestServiceInstallFailuresAreReported() {
+    using optimizer::service::InstallService;
+    using optimizer::service::QueryService;
+    using optimizer::service::ServiceIdentity;
+    using optimizer::service::UninstallService;
+    FakeScmInstallBackend backend;
+    backend.failCreate = true;
+    ServiceIdentity identity;
+    identity.name = L"CppOptimizerService";
+    identity.displayName = L"CppOptimizer Service";
+    const auto created = InstallService(backend, identity);
+    backend.failDelete = true;
+    const auto removed = UninstallService(backend, L"CppOptimizerService");
+    backend.failQuery = true;
+    const auto queried = QueryService(backend, L"CppOptimizerService");
+    // 失败如实上报（不伪成功），域为 Win32（非提升时的真实形态）。
+    // 注意：失败结果不得访问 Value()——那会抛 bad_variant_access。
+    return !created && created.ErrorValue().domain == optimizer::common::ErrorDomain::Win32 &&
+           created.ErrorValue().code == 5u && !removed &&
+           removed.ErrorValue().domain == optimizer::common::ErrorDomain::Win32 &&
+           !queried &&
+           queried.ErrorValue().domain == optimizer::common::ErrorDomain::Win32;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -1329,5 +1500,14 @@ int wmain() {
         &TestScheduledTaskRemoveIsIdempotent);
     run(L"scheduled task failures are reported",
         &TestScheduledTaskFailuresAreReported);
+    run(L"parse agent form", &TestParseAgentForm);
+    run(L"agent form round trip and elevation",
+        &TestAgentFormRoundTripAndElevation);
+    run(L"service install rejects before backend",
+        &TestServiceInstallRejectsBeforeBackend);
+    run(L"service install query delete round trip",
+        &TestServiceInstallQueryDeleteRoundTrip);
+    run(L"service install failures are reported",
+        &TestServiceInstallFailuresAreReported);
     return failed == 0 ? 0 : 1;
 }

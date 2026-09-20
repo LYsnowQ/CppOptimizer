@@ -63,6 +63,8 @@
     <ClInclude Include="include\service\startup_entry.hpp">
     </ClInclude>
     <ClInclude Include="include\service\scheduled_task.hpp">
+    </ClInclude>
+    <ClInclude Include="include\service\agent_form.hpp">
       <Filter>include\service</Filter>
     </ClInclude>
     <ClInclude Include="include\service\service_host.hpp">
@@ -145,6 +147,8 @@
     <ClCompile Include="source\service\startup_entry.cpp">
     </ClCompile>
     <ClCompile Include="source\service\scheduled_task.cpp">
+    </ClCompile>
+    <ClCompile Include="source\service\agent_form.cpp">
       <Filter>source\service</Filter>
     </ClCompile>
     <ClCompile Include="source\service\service_host.cpp">
