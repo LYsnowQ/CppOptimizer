@@ -12,8 +12,12 @@ max_files = 5                 # 保留的历史文件数上限（不含当前文
 console = true
 
 [agent]
-form = "startup_tray"          # 常驻形态（唯一默认）：登录后随用户会话拉起启动项 + 托盘常驻；
-                               # 标准用户即可、无需提权。服务/计划任务形态属后续高级切片，当前会被拒绝。
+form = "startup_tray"          # 常驻形态（**声明的意图**，不会自动注册）：
+                               #   startup_tray = 登录后随用户会话拉起启动项 + 托盘常驻（默认；标准用户、无提权）；
+                               #   task         = 计划任务（登录触发；注册需管理员，任务本身不提权）；
+                               #   service      = SCM 服务（安装需管理员；Session 0，无托盘界面）。
+                               # 注册始终是显式命令（--agent-form install <form>，一次性 UAC）；
+                               # 配置只表达选择，不会自动安装或提权；未配置时回到默认 startup_tray。
 
 [layers]
 monitoring = true

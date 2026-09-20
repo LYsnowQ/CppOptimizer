@@ -331,7 +331,7 @@ int RunConfigCommand(std::wstring_view path) {
     std::wcout << L"  games      : " << c.games.size() << L" rule(s)\n";
     std::wcout << L"  agent      : form "
                << std::wstring(c.agent.form.begin(), c.agent.form.end())
-               << L" (per-user startup + tray; default, not changeable yet)\n";
+               << L" (declared preference; registration is always an explicit command)\n";
     // 如实区分“已解析”与“已生效”：以下字段尚无消费者（能力待落地或模块未实施），
     // 回显它们不代表行为已生效（与日志/审计同口径：不伪装成功）。
     std::wcout << L"  pending    : parsed but not effective yet:\n"
@@ -3116,9 +3116,26 @@ int RunAgentFormCommand(int argc, wchar_t* argv[]) {
         return 2;
     }
     const std::wstring_view action(argv[2]);
+    bool startupInstalled = false;
+    bool taskInstalled = false;
+    bool serviceInstalled = false;
     if (action == L"status") {
+        // 可选配置路径：显示“声明的形态”与实态的差异（配置只表达意图，不自动注册）。
+        // 先加载后输出：配置无效时干净失败（exit 2），不产生一半输出。
+        std::optional<std::string> declaredForm;
+        if (argc >= 4) {
+            const auto loaded = optimizer::config::LoadConfig(argv[3]);
+            if (!loaded) {
+                const auto& error = loaded.ErrorValue();
+                ErrorLine{} << L"  config load failed ["
+                            << optimizer::common::ToString(error.domain) << L":"
+                            << error.code << L"] " << error.message << L"\n";
+                return 2;
+            }
+            declaredForm = loaded.Value().agent.form;
+        }
         optimizer::common::WriteConsoleLine(
-            L"Agent forms (read-only; the default is startup_tray and cannot be changed)");
+            L"Agent forms (read-only; the default is startup_tray)");
         {
             const auto queried = optimizer::service::QueryStartupEntry();
             if (!queried) {
@@ -3128,9 +3145,10 @@ int RunAgentFormCommand(int argc, wchar_t* argv[]) {
                             << L":" << queried.ErrorValue().code << L"] "
                             << queried.ErrorValue().message << L"\n";
             } else {
+                startupInstalled = !queried.Value().empty();
                 std::wostringstream line;
                 line << L"  startup_tray : ";
-                if (queried.Value().empty()) {
+                if (!startupInstalled) {
                     line << L"not installed";
                 } else {
                     line << L"installed -> " << queried.Value();
@@ -3148,9 +3166,10 @@ int RunAgentFormCommand(int argc, wchar_t* argv[]) {
                             << L":" << queried.ErrorValue().code << L"] "
                             << queried.ErrorValue().message << L"\n";
             } else {
+                taskInstalled = queried.Value().installed;
                 std::wostringstream line;
                 line << L"  task         : ";
-                if (!queried.Value().installed) {
+                if (!taskInstalled) {
                     line << L"not installed";
                 } else {
                     line << L"installed";
@@ -3173,9 +3192,10 @@ int RunAgentFormCommand(int argc, wchar_t* argv[]) {
                             << L":" << queried.ErrorValue().code << L"] "
                             << queried.ErrorValue().message << L"\n";
             } else {
+                serviceInstalled = queried.Value().installed;
                 std::wostringstream line;
                 line << L"  service      : ";
-                if (!queried.Value().installed) {
+                if (!serviceInstalled) {
                     line << L"not installed";
                 } else {
                     line << L"installed ("
@@ -3191,6 +3211,22 @@ int RunAgentFormCommand(int argc, wchar_t* argv[]) {
         }
         optimizer::common::WriteConsoleLine(
             L"  act          : CppOptimizer.exe --agent-form install|remove <startup_tray|task|service>");
+        if (declaredForm) {
+            // 声明与实态的差异：如实列出，并给出**显式**下一步命令（不代劳注册）。
+            const std::wstring declared(declaredForm->begin(), declaredForm->end());
+            optimizer::common::WriteConsoleLine(
+                L"  declared     : " + declared +
+                L" (from config; a declared form never installs itself)");
+            const bool declaredInstalled =
+                *declaredForm == "startup_tray"
+                    ? startupInstalled
+                    : (*declaredForm == "task" ? taskInstalled : serviceInstalled);
+            if (!declaredInstalled) {
+                optimizer::common::WriteConsoleLine(
+                    L"  note         : the declared form is not installed yet; run: "
+                    L"CppOptimizer.exe --agent-form install " + declared);
+            }
+        }
         return 0;
     }
     if (action != L"install" && action != L"remove") {
@@ -4099,9 +4135,9 @@ void PrintUsage() {
         << L"                             (GetForegroundWindow/GetWindowThreadProcessId) on\n"
         << L"                             active/idle samples only\n"
 
-        << L"  CppOptimizer.exe --agent-form <status|install|remove> [form]  Report or apply one\n"
-        << L"                             agent form (startup_tray|task|service); default startup_tray\n"
-        << L"                             stays default, registration of task/service needs admin\n"
+        << L"  CppOptimizer.exe --agent-form <status|install|remove> [form] [config.toml]  Report or apply\n"
+        << L"                             one agent form (startup_tray|task|service); a declared form\n"
+        << L"                             never installs itself; task/service registration needs admin\n"
         << L"  CppOptimizer.exe --service status  Report the SCM service install state (read-only)\n"
         << L"  CppOptimizer.exe --startup <status|install|remove>  Per-user startup entry\n"
         << L"                             (HKCU Run; R1, reversible, standard user;\n"
@@ -4323,7 +4359,7 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--scheduled-task") {
             return RunScheduledTaskCommand(argc, argv);
         }
-        if (argc >= 2 && argc <= 4 &&
+        if (argc >= 2 && argc <= 5 &&
             std::wstring_view(argv[1]) == L"--agent-form") {
             return RunAgentFormCommand(argc, argv);
         }

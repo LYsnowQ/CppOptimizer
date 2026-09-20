@@ -189,10 +189,34 @@ bool TestAgentFormDefaultAccepted() {
            loaded.Value().unknownKeys.empty();
 }
 
-bool TestAgentFormNonDefaultRejected() {
-    // “默认不可更改”的结构保证：非默认形态必须被显式拒绝（不是静默忽略）。
+bool TestAgentFormDeclaredAdvancedAccepted() {
+    // A6：`[agent].form` 是**声明的意图**——高级形态可写入配置（仅表达选择，不触发注册）。
     const std::wstring path = MakeTempConfigPath();
     if (!WriteTempConfig(path, "version = \"1.0.0\"\n[agent]\nform = \"service\"\n")) {
+        return false;
+    }
+    const auto loaded = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    if (!loaded || loaded.Value().agent.form != "service" ||
+        !loaded.Value().unknownKeys.empty()) {
+        return false;
+    }
+    const std::wstring taskPath = MakeTempConfigPath();
+    if (!WriteTempConfig(taskPath,
+                         "version = \"1.0.0\"\n[agent]\nform = \"TASK\"\n")) {
+        return false;
+    }
+    const auto loadedTask = optimizer::config::LoadConfig(taskPath);
+    std::filesystem::remove(std::filesystem::path(taskPath));
+    // 大小写不敏感，但归一化为小写存储（下游按枚举比对）。
+    return loadedTask && loadedTask.Value().agent.form == "task";
+}
+
+bool TestAgentFormUnknownRejected() {
+    // 未知形态显式拒绝（不做宽松猜测）；错误域为 Validation。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path,
+                         "version = \"1.0.0\"\n[agent]\nform = \"startup\"\n")) {
         return false;
     }
     const auto loaded = optimizer::config::LoadConfig(path);
@@ -949,7 +973,9 @@ int wmain() {
     run(L"Config version validation", &TestConfigVersionValidation);
     run(L"Mode and layer gates", &TestModeAndLayerGates);
     run(L"Agent form default accepted", &TestAgentFormDefaultAccepted);
-    run(L"Agent form non-default rejected", &TestAgentFormNonDefaultRejected);
+    run(L"Agent form declared advanced accepted",
+        &TestAgentFormDeclaredAdvancedAccepted);
+    run(L"Agent form unknown rejected", &TestAgentFormUnknownRejected);
     run(L"Config clean file has no unknown keys",
         &TestConfigNoUnknownKeysWhenClean);
     return failed == 0 ? 0 : 1;

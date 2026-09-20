@@ -798,17 +798,18 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
         }
     }
 
-    // [agent]：常驻 Agent 形态。当前仅接受默认形态（启动项 + 托盘）；其余形态属后续高级切片，
-    // 显式拒绝而不是静默接受（“默认不可更改”的结构保证）。
+    // [agent]：常驻 Agent 形态（**声明的意图**，不触发任何注册动作）。
+    // 受理“启动项 + 托盘”（默认）/“计划任务”/“SCM 服务”；其余取值显式拒绝。
+    // 关键约束：配置只表达选择，**不自动注册、不自动提权**——注册始终是显式命令动作。
     if (auto* agentSection = table["agent"].as_table()) {
         if (const auto form = (*agentSection)["form"].value<std::string>()) {
             const std::string lower = ToLower(*form);
-            if (lower != "startup_tray") {
+            if (lower != "startup_tray" && lower != "task" && lower != "service") {
                 return common::Result<ConfigSnapshot>::Failure(
                     common::Error::Validation(
                         "LoadConfig",
-                        L"agent.form: 当前仅支持默认形态 \"startup_tray\""
-                        L"（服务/计划任务形态属后续高级切片）"));
+                        L"agent.form: 仅支持 \"startup_tray\"（默认）/\"task\"/\"service\""
+                        L"（未知形态不做宽松猜测）"));
             }
             snapshot.agent.form = lower;
         }

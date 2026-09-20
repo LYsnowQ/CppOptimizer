@@ -160,9 +160,9 @@ inline constexpr std::uint32_t kSupportedConfigMajor = 1;
 [[nodiscard]] std::string FormatConfigVersion(const ConfigVersion& version);
 
 // [agent] 节：常驻 Agent 形态。
-// 默认（且当前**唯一允许**）的形态是「启动项 + 托盘」：登录后随用户会话拉起、标准用户、无提权。
-// 其它形态（SCM 服务 / 计划任务）属后续高级切片（见危险操作策略里的提权分界），
-// 现在显式拒绝而不是静默接受——“默认不可更改”必须是解析层的结构保证，而非仅文档措辞。
+// **语义：声明的意图**——解析层受理 "startup_tray"（默认）/"task"/"service"，但**不触发任何注册动作**：
+// 注册需要提权，必须由用户显式执行命令（一次性 UAC），配置永远不会自动注册或自动提权。
+// 默认形态（启动项 + 托盘）仍是唯一默认值；"默认不可更改"由“未配置时恒回退默认值”保证。
 struct AgentConfig {
     std::string form = "startup_tray"; // 唯一允许取值（默认）
 };
