@@ -106,10 +106,34 @@ struct CompactOptions {
                                           std::size_t currentLines,
                                           const CompactOptions& options) noexcept;
 
-// 从汇总行读取被压缩行数 `total=N`（AUD-004 纯函数）：供只读回看如实披露“另有 N 行已压缩为
-// 汇总”。不含汇总标记或缺少 `total=` 时返回 nullopt（不当作 0——“无法判定”与“零”不同）。
-[[nodiscard]] std::optional<std::size_t> ParseAuditSummaryLineTotal(
+// 汇总行解析（AUD-004 纯函数）：从 `audit-summary.log` 的一行中取出时间范围与四项计数。
+// 不含汇总标记、缺少任一必需字段/字段非数字时返回 nullopt——调用方不得把“无法判定”当作 0。
+struct AuditSummaryRecord {
+    std::string firstTimestamp;
+    std::string lastTimestamp;
+    std::size_t total = 0;
+    std::size_t ok = 0;
+    std::size_t fail = 0;
+    std::size_t unparsed = 0;
+};
+[[nodiscard]] std::optional<AuditSummaryRecord> ParseAuditSummaryLine(
     std::string_view line) noexcept;
+
+// 汇总文件聚合（AUD-004 纯函数）：跨多行汇总给出“被压缩总量 + 整体时间范围”，并把非汇总/畸形行
+// 计入 `unparsable`（不得静默丢弃，否则回看会少报）。`firstTimestamp`/`lastTimestamp` 取参与聚合
+// 的汇总行的首/末时间点（按文件顺序，不重新排序）。
+struct AuditCompactionTotals {
+    std::size_t ranges = 0;
+    std::size_t total = 0;
+    std::size_t ok = 0;
+    std::size_t fail = 0;
+    std::size_t unparsed = 0;
+    std::size_t unparsable = 0; // 未被计入计数的行（非汇总行或字段残缺）
+    std::string firstTimestamp;
+    std::string lastTimestamp;
+};
+[[nodiscard]] AuditCompactionTotals AnalyzeAuditSummaryLines(
+    const std::vector<std::string>& lines);
 
 // 汇总文件路径（AUD-004）：与审计文件**同目录**的 `<stem>-summary<ext>`（`CompactAuditFile` 的
 // 追加目标，也是“压缩不删除”后计数的所在）。纯路径推导，不访问文件系统。

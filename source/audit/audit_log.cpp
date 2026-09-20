@@ -55,6 +55,34 @@ void AppendSanitized(std::string& out, const std::string& field) {
     }
 }
 
+// 从汇总行的字段段中读取 `<key><digits>`（key 形如 "total="）。缺失/非数字/溢出返回 false：
+// “无法判定”不得当作 0（回看时少报比报错更危险）。
+bool ExtractCount(std::string_view fields, std::string_view key,
+                  std::size_t& out) noexcept {
+    const auto at = fields.find(key);
+    if (at == std::string_view::npos) {
+        return false;
+    }
+    std::size_t value = 0;
+    std::size_t digits = 0;
+    for (std::size_t i = at + key.size(); i < fields.size(); ++i) {
+        const char ch = fields[i];
+        if (ch < '0' || ch > '9') {
+            break;
+        }
+        if (value > (std::numeric_limits<std::size_t>::max() - 9) / 10) {
+            return false;
+        }
+        value = value * 10 + static_cast<std::size_t>(ch - '0');
+        ++digits;
+    }
+    if (digits == 0) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
 // 回看上限：文件超此值拒绝读取（避免无界内存/IO），单行超长截断。
 constexpr std::uintmax_t kMaxAuditReadBytes = 8u * 1024u * 1024u;
 constexpr std::size_t kMaxAuditLineBytes = 4096;
@@ -409,35 +437,58 @@ common::Result<AuditTail> ReadAuditTail(const std::filesystem::path& path,
     return common::Result<AuditTail>::Success(std::move(tail));
 }
 
-std::optional<std::size_t> ParseAuditSummaryLineTotal(
+std::optional<AuditSummaryRecord> ParseAuditSummaryLine(
     std::string_view line) noexcept {
     constexpr std::string_view kMarker = " [audit-summary] ";
-    constexpr std::string_view kField = "total=";
     const auto markerAt = line.find(kMarker);
     if (markerAt == std::string_view::npos) {
         return std::nullopt; // 非汇总行
     }
-    const auto fieldAt = line.find(kField, markerAt + kMarker.size());
-    if (fieldAt == std::string_view::npos) {
-        return std::nullopt;
-    }
-    std::size_t value = 0;
-    std::size_t digits = 0;
-    for (std::size_t i = fieldAt + kField.size(); i < line.size(); ++i) {
-        const char ch = line[i];
-        if (ch < '0' || ch > '9') {
-            break;
+    AuditSummaryRecord record;
+    const std::string_view range = line.substr(0, markerAt);
+    if (!range.empty()) {
+        const auto dots = range.find("..");
+        if (dots == std::string_view::npos) {
+            return std::nullopt; // 时间范围形式非法（既非空也非 first..last）
         }
-        if (value > (std::numeric_limits<std::size_t>::max() - 9) / 10) {
-            return std::nullopt; // 数值溢出：视为不可解析，不静默回绕
+        record.firstTimestamp = std::string(range.substr(0, dots));
+        record.lastTimestamp = std::string(range.substr(dots + 2));
+        if (record.firstTimestamp.empty() || record.lastTimestamp.empty()) {
+            return std::nullopt;
         }
-        value = value * 10 + static_cast<std::size_t>(ch - '0');
-        ++digits;
     }
-    if (digits == 0) {
-        return std::nullopt;
+    const std::string_view fields = line.substr(markerAt + kMarker.size());
+    if (!ExtractCount(fields, "total=", record.total) ||
+        !ExtractCount(fields, "ok=", record.ok) ||
+        !ExtractCount(fields, "fail=", record.fail) ||
+        !ExtractCount(fields, "unparsed=", record.unparsed)) {
+        return std::nullopt; // 缺字段：整体视为不可解析，不按局部值静默部分采纳
     }
-    return value;
+    return record;
+}
+
+AuditCompactionTotals AnalyzeAuditSummaryLines(
+    const std::vector<std::string>& lines) {
+    AuditCompactionTotals totals;
+    for (const auto& line : lines) {
+        const auto record = ParseAuditSummaryLine(line);
+        if (!record) {
+            ++totals.unparsable; // 如实计入，不让回看少报
+            continue;
+        }
+        ++totals.ranges;
+        totals.total += record->total;
+        totals.ok += record->ok;
+        totals.fail += record->fail;
+        totals.unparsed += record->unparsed;
+        if (totals.firstTimestamp.empty()) {
+            totals.firstTimestamp = record->firstTimestamp;
+        }
+        if (!record->lastTimestamp.empty()) {
+            totals.lastTimestamp = record->lastTimestamp;
+        }
+    }
+    return totals;
 }
 
 std::filesystem::path AuditSummaryPath(const std::filesystem::path& path) {

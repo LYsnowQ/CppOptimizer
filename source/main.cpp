@@ -621,6 +621,84 @@ int RunLogCommand(int argc, wchar_t* argv[]) {
     return 0;
 }
 
+int RunAuditSummaryCommand(int argc, wchar_t* argv[]) {
+    // --audit-summary [path] [lines]：只读回看已压缩汇总（默认每用户 audit.log 对应的汇总文件，
+    // 最近 20 行、上限 200）。不写不删；“尚无已压缩汇总”与“读取失败”分开报（后者如实失败）。
+    // 路径参数指“审计文件”：汇总路径由同一命名规则推导（AuditSummaryPath），不重复实现命名。
+    constexpr std::size_t kDefaultLines = 20;
+    constexpr std::uint32_t kMaxLines = 200;
+    const std::filesystem::path auditPath =
+        argc >= 3 ? std::filesystem::path(argv[2]) : DefaultAuditLogPath();
+    const std::filesystem::path path =
+        optimizer::audit::AuditSummaryPath(auditPath);
+    std::size_t maxLines = kDefaultLines;
+    if (argc >= 4) {
+        std::uint32_t parsed = 0;
+        if (!ParseUint32(argv[3], parsed) || parsed < 1 || parsed > kMaxLines) {
+            optimizer::common::WriteConsoleLine(
+                L"  --audit-summary <lines> must be 1..200");
+            return 2;
+        }
+        maxLines = parsed;
+    }
+    const auto tail = optimizer::audit::ReadAuditTail(path, maxLines);
+    if (!tail) {
+        const auto& error = tail.ErrorValue();
+        ErrorLine{} << L"  audit summary read failed ["
+                    << optimizer::common::ToString(error.domain) << L":"
+                    << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+    optimizer::common::WriteConsoleLine(L"Audit compaction summary (read-only)");
+    {
+        std::wostringstream line;
+        line << L"  path    : " << path.wstring();
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (tail.Value().totalLines == 0) {
+        optimizer::common::WriteConsoleLine(
+            L"  note    : no compacted summaries yet (nothing was compacted)");
+        return 0;
+    }
+    // 先给聚合结论（跨多行汇总），再逐行展示；不可解析行计入 unparsable 并原样输出。
+    const auto totals =
+        optimizer::audit::AnalyzeAuditSummaryLines(tail.Value().lines);
+    {
+        std::wostringstream line;
+        line << L"  compacted: " << totals.total << L" line(s) in "
+             << totals.ranges << L" range(s); ok " << totals.ok << L", fail "
+             << totals.fail << L", unparsed " << totals.unparsed;
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (!totals.firstTimestamp.empty()) {
+        // 汇总行时间戳为 ASCII；仍走 UTF-8 解码路径以与其它回看输出一致（非法字节不伪装）。
+        const auto first = optimizer::common::Utf8ToWide(totals.firstTimestamp);
+        const auto last = optimizer::common::Utf8ToWide(totals.lastTimestamp);
+        std::wostringstream line;
+        line << L"  range   : " << (first ? first.Value() : L"<undecodable>")
+             << L" .. " << (last ? last.Value() : L"<undecodable>");
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (totals.unparsable > 0) {
+        std::wostringstream line;
+        line << L"  unreadable: " << totals.unparsable
+             << L" line(s) not counted (kept verbatim below)";
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    {
+        std::wostringstream line;
+        line << L"  lines   : showing last " << tail.Value().lines.size()
+             << L" of " << tail.Value().totalLines;
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    for (const auto& line : tail.Value().lines) {
+        const auto wide = optimizer::common::Utf8ToWide(line);
+        optimizer::common::WriteConsoleLine(
+            wide ? wide.Value() : L"  <undecodable audit summary line>");
+    }
+    return 0;
+}
+
 int RunAuditCompactCommand(int argc, wchar_t* argv[]) {
     // --audit-compact [path]：手动触发审计语义压缩（R0，仅本地文件）。压缩而非删除：旧记录
     // 聚合为一行汇总写入同目录汇总文件，计数与时间范围保留，逐条细节丢弃；不可解析行原样保留。
@@ -735,21 +813,19 @@ int RunAuditLogCommand(int argc, wchar_t* argv[]) {
                      << error.code << L"] " << error.message;
                 optimizer::common::WriteConsoleLine(line.str());
             } else {
-                std::size_t compactedLines = 0;
-                std::size_t ranges = 0;
-                for (const auto& summaryLine : summaryTail.Value().lines) {
-                    const auto total =
-                        optimizer::audit::ParseAuditSummaryLineTotal(summaryLine);
-                    if (total) {
-                        compactedLines += *total;
-                        ++ranges;
-                    }
-                }
-                if (ranges > 0) {
+                const auto totals = optimizer::audit::AnalyzeAuditSummaryLines(
+                    summaryTail.Value().lines);
+                if (totals.ranges > 0) {
                     std::wostringstream line;
-                    line << L"  compacted : " << compactedLines
-                         << L" line(s) in " << ranges << L" summarized range(s) -> "
+                    line << L"  compacted : " << totals.total << L" line(s) in "
+                         << totals.ranges << L" summarized range(s) -> "
                          << summaryPath.wstring();
+                    optimizer::common::WriteConsoleLine(line.str());
+                } else if (totals.unparsable > 0) {
+                    std::wostringstream line;
+                    line << L"  compacted : " << totals.unparsable
+                         << L" unreadable summary line(s) in "
+                         << summaryPath.wstring() << L" (counts unavailable)";
                     optimizer::common::WriteConsoleLine(line.str());
                 }
             }
@@ -3754,7 +3830,11 @@ void PrintUsage() {
         << L"                             audit.log, last 20 lines, max 200)\n"
         << L"  CppOptimizer.exe --audit-compact [path]  Summarize old audit records into one\n"
         << L"                             summary line (counts and time range kept; no counts\n"
-        << L"                             deleted; default: per-user audit.log)\n"        << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
+        << L"                             deleted; default: per-user audit.log)\n"
+        << L"  CppOptimizer.exe --audit-summary [path] [lines]  Read back compacted summary\n"
+        << L"                             totals (read-only; default: per-user summary file,\n"
+        << L"                             last 20 lines, max 200)\n"
+        << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
         << L"  CppOptimizer.exe --cpu          Sample CPU usage (read-only, PDH)\n"
         << L"  CppOptimizer.exe --watch <s> [config.toml]  Watch game process lifecycle\n"
         << L"                             for 1..60 s (read-only, foreground, Toolhelp)\n"
@@ -3878,6 +3958,10 @@ int wmain(int argc, wchar_t* argv[]) {
         if ((argc == 2 || argc == 3) &&
             std::wstring_view(argv[1]) == L"--audit-compact") {
             return RunAuditCompactCommand(argc, argv);
+        }
+        if (argc >= 2 && argc <= 4 &&
+            std::wstring_view(argv[1]) == L"--audit-summary") {
+            return RunAuditSummaryCommand(argc, argv);
         }
         if (argc == 3 && std::wstring_view(argv[1]) == L"--config") {
             return RunConfigCommand(argv[2]);

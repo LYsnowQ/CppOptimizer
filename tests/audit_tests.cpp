@@ -488,23 +488,54 @@ std::string ReadAllBytes(const std::filesystem::path& path) {
     return buffer.str();
 }
 
-bool TestParseAuditSummaryLineTotal() {
-    using optimizer::audit::ParseAuditSummaryLineTotal;
+bool TestParseAuditSummaryLine() {
+    using optimizer::audit::ParseAuditSummaryLine;
     const std::string line =
         "2026-09-17 00:00:00..2026-09-17 01:00:00 [audit-summary] total=12 "
         "ok=10 fail=2 unparsed=1 priority.boost=10/0";
-    const auto total = ParseAuditSummaryLineTotal(line);
-    // “无法判定”与“零”不同：非汇总行/缺字段/非数字一律 nullopt。
-    const bool rejects = !ParseAuditSummaryLineTotal(
+    const auto record = ParseAuditSummaryLine(line);
+    // “无法判定”与“零”不同：非汇总行/缺字段/字段非数字一律 nullopt（不静默部分采纳）。
+    const bool rejects = !ParseAuditSummaryLine(
                              "2026-09-17 00:33:17 [audit] R1 op ok") &&
-                         !ParseAuditSummaryLineTotal("") &&
-                         !ParseAuditSummaryLineTotal(
-                             "[audit-summary] ok=1 fail=0") &&
-                         !ParseAuditSummaryLineTotal(
-                             "[audit-summary] total=x") &&
-                         !ParseAuditSummaryLineTotal(
-                             "[audit-summary] total=");
-    return total && *total == 12 && rejects;
+                         !ParseAuditSummaryLine("") &&
+                         !ParseAuditSummaryLine(
+                             "2026-09-17 00:00:00 [audit-summary] total=1 ok=1") &&
+                         !ParseAuditSummaryLine(
+                             "2026-09-17 [audit-summary] total=1 ok=1 fail=0 "
+                             "unparsed=0") &&
+                         !ParseAuditSummaryLine(
+                             "2026-09-17 00:00:00..2026-09-17 01:00:00 "
+                             "[audit-summary] total=x ok=1 fail=0 unparsed=0");
+    // 空时间范围是合法形式（无可用时间戳时仍输出计数），不得当作缺字段拒绝。
+    const auto noRange =
+        ParseAuditSummaryLine(" [audit-summary] total=3 ok=3 fail=0 unparsed=0");
+    return record && record->firstTimestamp == "2026-09-17 00:00:00" &&
+           record->lastTimestamp == "2026-09-17 01:00:00" &&
+           record->total == 12 && record->ok == 10 && record->fail == 2 &&
+           record->unparsed == 1 && noRange && noRange->total == 3 &&
+           noRange->firstTimestamp.empty() && rejects;
+}
+
+bool TestAnalyzeAuditSummaryLines() {
+    using optimizer::audit::AnalyzeAuditSummaryLines;
+    const std::vector<std::string> lines = {
+        "2026-09-17 00:00:00..2026-09-17 01:00:00 [audit-summary] total=10 "
+        "ok=8 fail=2 unparsed=1 power.hold=8/2",
+        "malformed summary line",
+        "2026-09-18 00:00:00..2026-09-18 00:30:00 [audit-summary] total=5 "
+        "ok=5 fail=0 unparsed=0 priority.boost=5/0",
+    };
+    const auto totals = AnalyzeAuditSummaryLines(lines);
+    const bool empty = [] {
+        const auto zero = AnalyzeAuditSummaryLines({});
+        return zero.ranges == 0 && zero.total == 0 && zero.unparsable == 0 &&
+               zero.firstTimestamp.empty() && zero.lastTimestamp.empty();
+    }();
+    return totals.ranges == 2 && totals.total == 15 && totals.ok == 13 &&
+           totals.fail == 2 && totals.unparsed == 1 &&
+           totals.unparsable == 1 &&
+           totals.firstTimestamp == "2026-09-17 00:00:00" &&
+           totals.lastTimestamp == "2026-09-18 00:30:00" && empty;
 }
 
 bool TestCompactAuditFileNoopBelowThreshold() {
@@ -545,7 +576,7 @@ bool TestCompactAuditFileSummarizesAndKeepsTail() {
     using optimizer::audit::AuditSummaryPath;
     using optimizer::audit::CompactAuditFile;
     using optimizer::audit::CompactOptions;
-    using optimizer::audit::ParseAuditSummaryLineTotal;
+    using optimizer::audit::ParseAuditSummaryLine;
     using optimizer::audit::ReadAuditTail;
     const auto path = TempAuditPath(L"compact");
     if (path.empty()) {
@@ -576,11 +607,14 @@ bool TestCompactAuditFileSummarizesAndKeepsTail() {
                         result.summaryPath == summaryPath;
     // 汇总行：计数与时间范围保留（不可只留“压缩过了”这一事实）。
     const auto summaryTail = ReadAuditTail(summaryPath, 10);
-    const auto summaryTotal =
+    const auto summaryRecord =
         summaryTail && summaryTail.Value().lines.size() == 1
-            ? ParseAuditSummaryLineTotal(summaryTail.Value().lines[0])
+            ? ParseAuditSummaryLine(summaryTail.Value().lines[0])
             : std::nullopt;
-    const bool summaryKeepsCounts = summaryTotal && *summaryTotal == 4;
+    const bool summaryKeepsCounts =
+        summaryRecord && summaryRecord->total == 4 && summaryRecord->ok == 2 &&
+        summaryRecord->fail == 2 &&
+        summaryRecord->firstTimestamp == summaryRecord->lastTimestamp;
     // 审计文件：仅留未压缩尾部（最后一条记录）+ 自审计行。
     const auto tail = ReadAuditTail(path, 10);
     const bool keptTail = tail && tail.Value().totalLines == 2 &&
@@ -604,7 +638,7 @@ bool TestCompactAuditFileKeepsUnparsedLines() {
     using optimizer::audit::AuditSummaryPath;
     using optimizer::audit::CompactAuditFile;
     using optimizer::audit::CompactOptions;
-    using optimizer::audit::ParseAuditSummaryLineTotal;
+    using optimizer::audit::ParseAuditSummaryLine;
     using optimizer::audit::ReadAuditTail;
     const auto path = TempAuditPath(L"compactunparsed");
     if (path.empty()) {
@@ -640,13 +674,13 @@ bool TestCompactAuditFileKeepsUnparsedLines() {
         tail.Value().lines[0] == "not an audit record" &&
         tail.Value().lines[1].find("op3") != std::string::npos;
     const auto summaryTail = ReadAuditTail(summaryPath, 10);
-    const auto summaryTotal =
+    const auto summaryRecord =
         summaryTail && !summaryTail.Value().lines.empty()
-            ? ParseAuditSummaryLineTotal(summaryTail.Value().lines[0])
+            ? ParseAuditSummaryLine(summaryTail.Value().lines[0])
             : std::nullopt;
-    const bool summaryReportsUnparsed =
-        summaryTotal && *summaryTotal == 2 &&
-        summaryTail.Value().lines[0].find("unparsed=1") != std::string::npos;
+    const bool summaryReportsUnparsed = summaryRecord &&
+                                        summaryRecord->total == 2 &&
+                                        summaryRecord->unparsed == 1;
     std::filesystem::remove(path, ec);
     std::filesystem::remove(summaryPath, ec);
     return counts && unparsedKept && summaryReportsUnparsed;
@@ -736,7 +770,8 @@ int wmain() {
         &TestSummarizeAuditLinesCountsAndKeepsRange);
     run(L"format audit summary line", &TestFormatAuditSummaryLine);
     run(L"should compact audit file thresholds", &TestShouldCompactAuditFile);
-    run(L"parse audit summary line total", &TestParseAuditSummaryLineTotal);
+    run(L"parse audit summary line total", &TestParseAuditSummaryLine);
+    run(L"analyze audit summary lines", &TestAnalyzeAuditSummaryLines);
     run(L"compact audit file noop below threshold",
         &TestCompactAuditFileNoopBelowThreshold);
     run(L"compact audit file rejects empty path",
