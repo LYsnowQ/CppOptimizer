@@ -11,6 +11,10 @@ max_file_mb = 10
 max_files = 5                 # 保留的历史文件数上限（不含当前文件；磁盘上至多 6 个）
 console = true
 
+[agent]
+form = "startup_tray"          # 常驻形态（唯一默认）：登录后随用户会话拉起启动项 + 托盘常驻；
+                               # 标准用户即可、无需提权。服务/计划任务形态属后续高级切片，当前会被拒绝。
+
 [layers]
 monitoring = true
 maintenance = false

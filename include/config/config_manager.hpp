@@ -159,6 +159,14 @@ inline constexpr std::uint32_t kSupportedConfigMajor = 1;
     std::string_view text);
 [[nodiscard]] std::string FormatConfigVersion(const ConfigVersion& version);
 
+// [agent] 节：常驻 Agent 形态。
+// 默认（且当前**唯一允许**）的形态是「启动项 + 托盘」：登录后随用户会话拉起、标准用户、无提权。
+// 其它形态（SCM 服务 / 计划任务）属后续高级切片（见危险操作策略里的提权分界），
+// 现在显式拒绝而不是静默接受——“默认不可更改”必须是解析层的结构保证，而非仅文档措辞。
+struct AgentConfig {
+    std::string form = "startup_tray"; // 唯一允许取值（默认）
+};
+
 struct ConfigSnapshot {
     // 配置 schema 版本：三段数字 + 可选预发布标识；主版本不受支持或格式非法时 LoadConfig 直接拒绝。
     ConfigVersion version;
@@ -178,6 +186,7 @@ struct ConfigSnapshot {
     PolicyConfig policy;
     IpcConfig ipc;
     std::vector<GameConfig> games;
+    AgentConfig agent;
 };
 
 // 从 TOML 文件加载配置。契约：

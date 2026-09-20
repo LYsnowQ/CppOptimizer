@@ -754,7 +754,7 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
         table,
         {"version", "application", "logging", "layers", "power", "priority",
          "memory", "gpu_heartbeat", "scheduler", "disk_cache", "policy",
-         "ipc", "games"},
+         "ipc", "games", "agent"},
         "", snapshot.unknownKeys);
     const auto collectSection =
         [&snapshot, &table](const char* section,
@@ -782,6 +782,7 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
                                "halt_after_action_failures"});
     collectSection("ipc", {"safe_mode_enabled", "safe_mode_failures",
                             "safe_mode_window_ms", "safe_mode_cooldown_ms"});
+    collectSection("agent", {"form"});
     if (const auto* games = table["games"].as_array()) {
         std::size_t index = 0;
         for (const auto& entry : *games) {
@@ -794,6 +795,22 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
                                    snapshot.unknownKeys);
             }
             ++index;
+        }
+    }
+
+    // [agent]：常驻 Agent 形态。当前仅接受默认形态（启动项 + 托盘）；其余形态属后续高级切片，
+    // 显式拒绝而不是静默接受（“默认不可更改”的结构保证）。
+    if (auto* agentSection = table["agent"].as_table()) {
+        if (const auto form = (*agentSection)["form"].value<std::string>()) {
+            const std::string lower = ToLower(*form);
+            if (lower != "startup_tray") {
+                return common::Result<ConfigSnapshot>::Failure(
+                    common::Error::Validation(
+                        "LoadConfig",
+                        L"agent.form: 当前仅支持默认形态 \"startup_tray\""
+                        L"（服务/计划任务形态属后续高级切片）"));
+            }
+            snapshot.agent.form = lower;
         }
     }
 

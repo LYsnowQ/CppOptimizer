@@ -327,6 +327,9 @@ int RunConfigCommand(std::wstring_view path) {
     }
     std::wcout << L"\n";
     std::wcout << L"  games      : " << c.games.size() << L" rule(s)\n";
+    std::wcout << L"  agent      : form "
+               << std::wstring(c.agent.form.begin(), c.agent.form.end())
+               << L" (per-user startup + tray; default, not changeable yet)\n";
     // 如实区分“已解析”与“已生效”：以下字段尚无消费者（能力待落地或模块未实施），
     // 回显它们不代表行为已生效（与日志/审计同口径：不伪装成功）。
     std::wcout << L"  pending    : parsed but not effective yet:\n"

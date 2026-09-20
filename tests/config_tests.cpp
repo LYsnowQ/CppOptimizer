@@ -177,6 +177,30 @@ bool TestConfigVersionValidation() {
            !badChar && !leadZero && !boolType;
 }
 
+bool TestAgentFormDefaultAccepted() {
+    // A3：默认形态（启动项 + 托盘）接受，且不产生未知键告警（白名单已同步）。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path, "version = \"1.0.0\"\n[agent]\nform = \"startup_tray\"\n")) {
+        return false;
+    }
+    const auto loaded = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return loaded && loaded.Value().agent.form == "startup_tray" &&
+           loaded.Value().unknownKeys.empty();
+}
+
+bool TestAgentFormNonDefaultRejected() {
+    // “默认不可更改”的结构保证：非默认形态必须被显式拒绝（不是静默忽略）。
+    const std::wstring path = MakeTempConfigPath();
+    if (!WriteTempConfig(path, "version = \"1.0.0\"\n[agent]\nform = \"service\"\n")) {
+        return false;
+    }
+    const auto loaded = optimizer::config::LoadConfig(path);
+    std::filesystem::remove(std::filesystem::path(path));
+    return !loaded &&
+           loaded.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
+}
+
 bool TestModeAndLayerGates() {
     using optimizer::config::AllowsLocalReversibleActions;
     using optimizer::config::AllowsSystemLevelActions;
@@ -924,6 +948,8 @@ int wmain() {
     run(L"Config reports unknown keys", &TestConfigReportsUnknownKeys);
     run(L"Config version validation", &TestConfigVersionValidation);
     run(L"Mode and layer gates", &TestModeAndLayerGates);
+    run(L"Agent form default accepted", &TestAgentFormDefaultAccepted);
+    run(L"Agent form non-default rejected", &TestAgentFormNonDefaultRejected);
     run(L"Config clean file has no unknown keys",
         &TestConfigNoUnknownKeysWhenClean);
     return failed == 0 ? 0 : 1;
