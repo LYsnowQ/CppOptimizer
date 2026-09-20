@@ -1,4 +1,4 @@
-#include "service/startup_entry.hpp"
+﻿#include "service/startup_entry.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
