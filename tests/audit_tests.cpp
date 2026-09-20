@@ -479,6 +479,217 @@ bool TestShouldCompactAuditFile() {
     return normal && disabled && neverTriggers;
 }
 
+// ---------- AUD-004：语义压缩（文件级） ----------
+
+std::string ReadAllBytes(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+}
+
+bool TestParseAuditSummaryLineTotal() {
+    using optimizer::audit::ParseAuditSummaryLineTotal;
+    const std::string line =
+        "2026-09-17 00:00:00..2026-09-17 01:00:00 [audit-summary] total=12 "
+        "ok=10 fail=2 unparsed=1 priority.boost=10/0";
+    const auto total = ParseAuditSummaryLineTotal(line);
+    // “无法判定”与“零”不同：非汇总行/缺字段/非数字一律 nullopt。
+    const bool rejects = !ParseAuditSummaryLineTotal(
+                             "2026-09-17 00:33:17 [audit] R1 op ok") &&
+                         !ParseAuditSummaryLineTotal("") &&
+                         !ParseAuditSummaryLineTotal(
+                             "[audit-summary] ok=1 fail=0") &&
+                         !ParseAuditSummaryLineTotal(
+                             "[audit-summary] total=x") &&
+                         !ParseAuditSummaryLineTotal(
+                             "[audit-summary] total=");
+    return total && *total == 12 && rejects;
+}
+
+bool TestCompactAuditFileNoopBelowThreshold() {
+    using optimizer::audit::AppendAuditLine;
+    using optimizer::audit::CompactAuditFile;
+    using optimizer::audit::CompactOptions;
+    const auto path = TempAuditPath(L"compactnoop");
+    if (path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(optimizer::audit::AuditSummaryPath(path), ec);
+    if (!AppendAuditLine(path, MakeRecord("power.hold")) ||
+        !AppendAuditLine(path, MakeRecord("power.release"))) {
+        return false;
+    }
+    const auto before = ReadAllBytes(path);
+    const auto result = CompactAuditFile(path, CompactOptions{});
+    const bool untouched = ReadAllBytes(path) == before &&
+                           !std::filesystem::exists(
+                               optimizer::audit::AuditSummaryPath(path), ec);
+    const bool ok = result && !result.Value().compacted &&
+                    result.Value().beforeLines == 2 && untouched;
+    std::filesystem::remove(path, ec);
+    return ok;
+}
+
+bool TestCompactAuditFileRejectsEmptyPath() {
+    using optimizer::audit::CompactAuditFile;
+    const auto result = CompactAuditFile({});
+    return !result && result.ErrorValue().domain ==
+                           optimizer::common::ErrorDomain::Validation;
+}
+
+bool TestCompactAuditFileSummarizesAndKeepsTail() {
+    using optimizer::audit::AppendAuditLine;
+    using optimizer::audit::AuditSummaryPath;
+    using optimizer::audit::CompactAuditFile;
+    using optimizer::audit::CompactOptions;
+    using optimizer::audit::ParseAuditSummaryLineTotal;
+    using optimizer::audit::ReadAuditTail;
+    const auto path = TempAuditPath(L"compact");
+    if (path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const auto summaryPath = AuditSummaryPath(path);
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(summaryPath, ec);
+    for (int i = 1; i <= 5; ++i) {
+        if (!AppendAuditLine(path, MakeRecord("op" + std::to_string(i),
+                                              i % 2 == 0))) {
+            return false;
+        }
+    }
+    CompactOptions options;
+    options.maxBytes = 0;    // 只按行数判定
+    options.maxLines = 3;    // 达到即触发
+    options.keepTailLines = 1;
+    const auto compacted = CompactAuditFile(path, options);
+    if (!compacted || !compacted.Value().compacted) {
+        return false;
+    }
+    const auto& result = compacted.Value();
+    const bool counts = result.beforeLines == 5 && result.afterLines == 2 &&
+                        result.summarizedLines == 4 &&
+                        result.unparsedKept == 0 &&
+                        result.summaryPath == summaryPath;
+    // 汇总行：计数与时间范围保留（不可只留“压缩过了”这一事实）。
+    const auto summaryTail = ReadAuditTail(summaryPath, 10);
+    const auto summaryTotal =
+        summaryTail && summaryTail.Value().lines.size() == 1
+            ? ParseAuditSummaryLineTotal(summaryTail.Value().lines[0])
+            : std::nullopt;
+    const bool summaryKeepsCounts = summaryTotal && *summaryTotal == 4;
+    // 审计文件：仅留未压缩尾部（最后一条记录）+ 自审计行。
+    const auto tail = ReadAuditTail(path, 10);
+    const bool keptTail = tail && tail.Value().totalLines == 2 &&
+                          tail.Value().lines[0].find("op5") != std::string::npos &&
+                          tail.Value().lines[1].find("audit.compact") !=
+                              std::string::npos;
+    // 重复调用：已低于阈值 -> 不再压缩（幂等，不重复计数）。
+    const auto again = CompactAuditFile(path, options);
+    const bool idempotent = again && !again.Value().compacted;
+    const auto summaryTailAgain = ReadAuditTail(summaryPath, 10);
+    const bool summaryNotDuplicated =
+        summaryTailAgain && summaryTailAgain.Value().totalLines == 1;
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(summaryPath, ec);
+    return counts && summaryKeepsCounts && keptTail && idempotent &&
+           summaryNotDuplicated;
+}
+
+bool TestCompactAuditFileKeepsUnparsedLines() {
+    using optimizer::audit::AppendAuditLine;
+    using optimizer::audit::AuditSummaryPath;
+    using optimizer::audit::CompactAuditFile;
+    using optimizer::audit::CompactOptions;
+    using optimizer::audit::ParseAuditSummaryLineTotal;
+    using optimizer::audit::ReadAuditTail;
+    const auto path = TempAuditPath(L"compactunparsed");
+    if (path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const auto summaryPath = AuditSummaryPath(path);
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(summaryPath, ec);
+    // 畸形行不得被压缩丢弃：它既不是可汇总的记录，也不得丢失。
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << "not an audit record\n";
+    }
+    for (int i = 1; i <= 3; ++i) {
+        if (!AppendAuditLine(path, MakeRecord("op" + std::to_string(i)))) {
+            return false;
+        }
+    }
+    CompactOptions options;
+    options.maxBytes = 0;
+    options.maxLines = 2;
+    options.keepTailLines = 1;
+    const auto compacted = CompactAuditFile(path, options);
+    if (!compacted || !compacted.Value().compacted) {
+        return false;
+    }
+    const bool counts = compacted.Value().summarizedLines == 2 &&
+                        compacted.Value().unparsedKept == 1;
+    const auto tail = ReadAuditTail(path, 10);
+    const bool unparsedKept =
+        tail && tail.Value().lines.size() == 3 &&
+        tail.Value().lines[0] == "not an audit record" &&
+        tail.Value().lines[1].find("op3") != std::string::npos;
+    const auto summaryTail = ReadAuditTail(summaryPath, 10);
+    const auto summaryTotal =
+        summaryTail && !summaryTail.Value().lines.empty()
+            ? ParseAuditSummaryLineTotal(summaryTail.Value().lines[0])
+            : std::nullopt;
+    const bool summaryReportsUnparsed =
+        summaryTotal && *summaryTotal == 2 &&
+        summaryTail.Value().lines[0].find("unparsed=1") != std::string::npos;
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(summaryPath, ec);
+    return counts && unparsedKept && summaryReportsUnparsed;
+}
+
+bool TestCompactAuditFileFailureKeepsOriginal() {
+    using optimizer::audit::AppendAuditLine;
+    using optimizer::audit::AuditSummaryPath;
+    using optimizer::audit::CompactAuditFile;
+    using optimizer::audit::CompactOptions;
+    const auto path = TempAuditPath(L"compactfail");
+    if (path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const auto summaryPath = AuditSummaryPath(path);
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(summaryPath, ec);
+    for (int i = 1; i <= 3; ++i) {
+        if (!AppendAuditLine(path, MakeRecord("op" + std::to_string(i)))) {
+            return false;
+        }
+    }
+    const auto before = ReadAllBytes(path);
+    // 用同名目录占位汇总文件路径：追加必然失败 -> 原文件必须字节不变、临时文件必须清理。
+    if (!std::filesystem::create_directory(summaryPath, ec) || ec) {
+        return false;
+    }
+    CompactOptions options;
+    options.maxBytes = 0;
+    options.maxLines = 2;
+    options.keepTailLines = 1;
+    const auto result = CompactAuditFile(path, options);
+    const bool failedHonestly = !result;
+    const bool originalKept = ReadAllBytes(path) == before;
+    std::error_code tempEc;
+    const bool tempCleaned =
+        !std::filesystem::exists(path.wstring() + L".tmp", tempEc);
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(summaryPath, ec);
+    return failedHonestly && originalKept && tempCleaned;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -525,5 +736,16 @@ int wmain() {
         &TestSummarizeAuditLinesCountsAndKeepsRange);
     run(L"format audit summary line", &TestFormatAuditSummaryLine);
     run(L"should compact audit file thresholds", &TestShouldCompactAuditFile);
+    run(L"parse audit summary line total", &TestParseAuditSummaryLineTotal);
+    run(L"compact audit file noop below threshold",
+        &TestCompactAuditFileNoopBelowThreshold);
+    run(L"compact audit file rejects empty path",
+        &TestCompactAuditFileRejectsEmptyPath);
+    run(L"compact audit file summarizes and keeps tail",
+        &TestCompactAuditFileSummarizesAndKeepsTail);
+    run(L"compact audit file keeps unparsed lines",
+        &TestCompactAuditFileKeepsUnparsedLines);
+    run(L"compact audit file failure keeps original",
+        &TestCompactAuditFileFailureKeepsOriginal);
     return failed == 0 ? 0 : 1;
 }

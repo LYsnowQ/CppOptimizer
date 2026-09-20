@@ -106,6 +106,40 @@ struct CompactOptions {
                                           std::size_t currentLines,
                                           const CompactOptions& options) noexcept;
 
+// 从汇总行读取被压缩行数 `total=N`（AUD-004 纯函数）：供只读回看如实披露“另有 N 行已压缩为
+// 汇总”。不含汇总标记或缺少 `total=` 时返回 nullopt（不当作 0——“无法判定”与“零”不同）。
+[[nodiscard]] std::optional<std::size_t> ParseAuditSummaryLineTotal(
+    std::string_view line) noexcept;
+
+// 汇总文件路径（AUD-004）：与审计文件**同目录**的 `<stem>-summary<ext>`（`CompactAuditFile` 的
+// 追加目标，也是“压缩不删除”后计数的所在）。纯路径推导，不访问文件系统。
+[[nodiscard]] std::filesystem::path AuditSummaryPath(
+    const std::filesystem::path& path);
+
+// 压缩结果（AUD-004）：`compacted=false` 表示未达阈值或无内容可压缩（文件未被触碰，
+// 重复调用无事发生）；`afterLines` 含压缩后追加的自审计行。
+struct CompactResult {
+    bool compacted = false;
+    std::size_t beforeLines = 0;
+    std::size_t afterLines = 0;
+    std::size_t summarizedLines = 0; // 被汇总的可解析行数（= 汇总行 total）
+    std::size_t unparsedKept = 0;    // 原样保留在 audit 文件里的不可解析行数
+    std::filesystem::path summaryPath{};
+};
+
+// 语义压缩审计文件（AUD-004）：达阈值时把**旧的可解析记录**聚合为**一行汇总**追加到同目录的
+// `<stem>-summary<ext>`，并把审计文件重写为「未压缩尾部 + 被压缩段内的不可解析行原样保留」——
+// 只丢弃逐条细节，不删除任何计数信息。安全边界：
+// - 先读 -> 汇总 -> 追加汇总行 -> 再重写，任一失败返回 Failure 且**不破坏原文件**；
+// - 重写走「临时文件 + flush + 原子替换（MoveFileExW）」，失败清理临时文件；
+// - 不可解析行绝不压缩丢弃（原文保留在审计文件中）；
+// - 未达阈值、文件不存在、或压缩后内容与原文一致（无可压缩内容）时均为 no-op（compacted=false）；
+// - 压缩成功后追加一条 `audit.compact` 自审计记录（含阈值与前后行数），追加失败如实返回 Failure。
+// 同一路径的并发调用需调用方串行化。
+[[nodiscard]] common::Result<CompactResult> CompactAuditFile(
+    const std::filesystem::path& path,
+    const CompactOptions& options = {}) noexcept;
+
 // 单条审计记录落盘（AUD-002）：以 UTF-8 追加一行到 path——本地时间戳（ASCII
 // `YYYY-MM-DD HH:MM:SS`）+ 与 FormatAuditRecord 一致的字段顺序（risk/operationId/ok|fail/
 // caller/target/detail）。父目录自动创建；空路径拒绝；打开/写/flush 失败如实返回 Failure

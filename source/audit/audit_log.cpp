@@ -8,13 +8,16 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <ctime>
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace optimizer::audit {
 
@@ -404,6 +407,204 @@ common::Result<AuditTail> ReadAuditTail(const std::filesystem::path& path,
     }
     tail.lines.assign(ring.begin(), ring.end());
     return common::Result<AuditTail>::Success(std::move(tail));
+}
+
+std::optional<std::size_t> ParseAuditSummaryLineTotal(
+    std::string_view line) noexcept {
+    constexpr std::string_view kMarker = " [audit-summary] ";
+    constexpr std::string_view kField = "total=";
+    const auto markerAt = line.find(kMarker);
+    if (markerAt == std::string_view::npos) {
+        return std::nullopt; // 非汇总行
+    }
+    const auto fieldAt = line.find(kField, markerAt + kMarker.size());
+    if (fieldAt == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::size_t value = 0;
+    std::size_t digits = 0;
+    for (std::size_t i = fieldAt + kField.size(); i < line.size(); ++i) {
+        const char ch = line[i];
+        if (ch < '0' || ch > '9') {
+            break;
+        }
+        if (value > (std::numeric_limits<std::size_t>::max() - 9) / 10) {
+            return std::nullopt; // 数值溢出：视为不可解析，不静默回绕
+        }
+        value = value * 10 + static_cast<std::size_t>(ch - '0');
+        ++digits;
+    }
+    if (digits == 0) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::filesystem::path AuditSummaryPath(const std::filesystem::path& path) {
+    std::wstring name = path.stem().wstring();
+    name += L"-summary";
+    name += path.extension().wstring();
+    return path.parent_path() / name;
+}
+
+common::Result<CompactResult> CompactAuditFile(
+    const std::filesystem::path& path, const CompactOptions& options) noexcept {    if (path.empty()) {
+        return common::Result<CompactResult>::Failure(
+            common::Error::Validation("CompactAuditFile", L"路径不能为空"));
+    }
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) {
+        return common::Result<CompactResult>::Failure(common::Error::FromWin32(
+            static_cast<std::uint32_t>(ec.value()), "exists(audit log)"));
+    }
+    CompactResult result;
+    if (!exists) {
+        return common::Result<CompactResult>::Success(std::move(result)); // 尚无记录
+    }
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        // 目录当文件等情形：如实失败，不当作“无可压缩内容”。
+        return common::Result<CompactResult>::Failure(common::Error::FromWin32(
+            static_cast<std::uint32_t>(ec.value()), "file_size(audit log)"));
+    }
+    if (size > kMaxAuditReadBytes) {
+        return common::Result<CompactResult>::Failure(common::Error::Validation(
+            "CompactAuditFile", L"审计文件超出可压缩上限（8 MiB）"));
+    }
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            return common::Result<CompactResult>::Failure(
+                common::Error::FromWin32(
+                    static_cast<std::uint32_t>(::GetLastError()),
+                    "open audit log for compact"));
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            lines.push_back(std::move(line));
+            line.clear();
+        }
+        if (in.bad()) {
+            return common::Result<CompactResult>::Failure(
+                common::Error::FromWin32(
+                    static_cast<std::uint32_t>(::GetLastError()),
+                    "read audit log for compact"));
+        }
+    }
+    result.beforeLines = lines.size();
+    result.afterLines = lines.size();
+    if (!ShouldCompactAuditFile(size, lines.size(), options)) {
+        return common::Result<CompactResult>::Success(std::move(result)); // 未达阈值
+    }
+    const std::size_t keep = std::min(options.keepTailLines, lines.size());
+    const std::size_t headCount = lines.size() - keep;
+    const auto headEnd =
+        lines.begin() + static_cast<std::ptrdiff_t>(headCount);
+    const std::vector<std::string> head(lines.begin(), headEnd);
+    const AuditLineSummary summary = SummarizeAuditLines(head);
+    // 保留 = 被压缩段内的不可解析行（原样保留，相对顺序不变）+ 未压缩尾部。
+    std::vector<std::string> retained;
+    retained.reserve(head.size() + keep + 1);
+    for (const auto& line : head) {
+        if (!ParseAuditLinePrefix(line)) {
+            retained.push_back(line);
+        }
+    }
+    retained.insert(retained.end(), headEnd, lines.end());
+    if (retained == lines) {
+        result.unparsedKept = summary.unparsed;
+        return common::Result<CompactResult>::Success(std::move(result));
+    }
+    // 自审计记录与前缀重写合并为一次原子替换：不留下“已压缩但自审计缺失”的半完成状态。
+    AuditRecord selfRecord;
+    selfRecord.operationId = "audit.compact";
+    selfRecord.risk = RiskLevel::R0;
+    selfRecord.caller = "audit";
+    selfRecord.target = path.stem().string() + path.extension().string();
+    selfRecord.ok = true;
+    selfRecord.detail = "before=" + std::to_string(result.beforeLines) +
+                        " after=" + std::to_string(retained.size() + 1) +
+                        " summarized=" + std::to_string(summary.total) +
+                        " unparsed=" + std::to_string(summary.unparsed) +
+                        " threshold_bytes=" + std::to_string(options.maxBytes) +
+                        " threshold_lines=" + std::to_string(options.maxLines);
+    retained.push_back(FormatAuditLineAscii(selfRecord));
+    const std::filesystem::path summaryPath = AuditSummaryPath(path);    // 顺序：先写临时文件 -> 追加汇总行 -> 原子替换。任一步失败都清理临时文件并保持原文件不变；
+    // 若替换失败，把汇总文件回滚到追加前的大小（避免重复调用造成重复计数）。
+    const std::wstring pathText = path.wstring();
+    const std::wstring tempText = pathText + L".tmp";
+    {
+        std::ofstream out(tempText, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return common::Result<CompactResult>::Failure(
+                common::Error::FromWin32(
+                    static_cast<std::uint32_t>(::GetLastError()),
+                    "create audit temp file"));
+        }
+        for (const auto& kept : retained) {
+            out << kept << '\n';
+        }
+        out.flush();
+        if (!out) {
+            const auto code = static_cast<std::uint32_t>(::GetLastError());
+            out.close();
+            ::DeleteFileW(tempText.c_str());
+            return common::Result<CompactResult>::Failure(
+                common::Error::FromWin32(code, "write audit temp file"));
+        }
+    }
+    std::error_code summaryEc;
+    std::uintmax_t summaryBeforeBytes = 0;
+    if (std::filesystem::exists(summaryPath, summaryEc)) {
+        summaryBeforeBytes = std::filesystem::file_size(summaryPath, summaryEc);
+        if (summaryEc) {
+            summaryBeforeBytes = 0; // 无法判定原大小：不做回滚，仅如实失败
+        }
+    }
+    {
+        if (!path.parent_path().empty()) {
+            std::filesystem::create_directories(summaryPath.parent_path(), ec);
+            if (ec) {
+                ::DeleteFileW(tempText.c_str());
+                return common::Result<CompactResult>::Failure(
+                    common::Error::FromWin32(static_cast<std::uint32_t>(ec.value()),
+                                             "create_directories(audit summary)"));
+            }
+        }
+        std::ofstream out(summaryPath, std::ios::binary | std::ios::app);
+        if (!out) {
+            ::DeleteFileW(tempText.c_str());
+            return common::Result<CompactResult>::Failure(
+                common::Error::FromWin32(
+                    static_cast<std::uint32_t>(::GetLastError()),
+                    "open audit summary for append"));
+        }
+        out << FormatAuditSummaryLine(summary) << '\n';
+        out.flush();
+        if (!out) {
+            const auto code = static_cast<std::uint32_t>(::GetLastError());
+            ::DeleteFileW(tempText.c_str());
+            return common::Result<CompactResult>::Failure(
+                common::Error::FromWin32(code, "append audit summary"));
+        }
+    }
+    if (!::MoveFileExW(tempText.c_str(), pathText.c_str(),
+                       MOVEFILE_REPLACE_EXISTING)) {
+        const auto code = static_cast<std::uint32_t>(::GetLastError());
+        ::DeleteFileW(tempText.c_str());
+        std::error_code rollbackEc;
+        std::filesystem::resize_file(summaryPath, summaryBeforeBytes, rollbackEc);
+        return common::Result<CompactResult>::Failure(
+            common::Error::FromWin32(code, "MoveFileExW(audit compact)"));
+    }
+    result.compacted = true;
+    result.afterLines = retained.size();
+    result.summarizedLines = summary.total;
+    result.unparsedKept = summary.unparsed;
+    result.summaryPath = summaryPath;
+    return common::Result<CompactResult>::Success(std::move(result));
 }
 
 } // namespace optimizer::audit
