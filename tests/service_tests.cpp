@@ -3,6 +3,7 @@
 #include "service/tray_host.hpp"
 #include "service/presence.hpp"
 #include "service/startup_entry.hpp"
+#include "service/scheduled_task.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -1085,6 +1086,156 @@ bool TestStartupBackendFailureIsReported() {
            remove.ErrorValue().domain == optimizer::common::ErrorDomain::Win32;
 }
 
+// ---------- AGENT-A4：计划任务（fake 后端；不触碰真实任务计划库、不需要提权） ----------
+
+class FakeScheduledTaskBackend final : public optimizer::service::ScheduledTaskBackend {
+public:
+    optimizer::service::ScheduledTaskStatus stored; // installed=false 表示未注册
+    optimizer::service::ScheduledTaskSpec lastSpec;
+    bool failCreate = false;
+    bool failRemove = false;
+    bool failRead = false;
+    int createCalls = 0;
+    int removeCalls = 0;
+    int readCalls = 0;
+
+    [[nodiscard]] optimizer::common::Result<optimizer::service::ScheduledTaskStatus>
+    Read(const std::wstring& taskName) override {
+        ++readCalls;
+        if (failRead) {
+            return optimizer::common::Result<optimizer::service::ScheduledTaskStatus>::Failure(
+                optimizer::common::Error::FromHResult(
+                    static_cast<std::int32_t>(0x80070005L),
+                    "FakeScheduledTaskBackend::Read"));
+        }
+        if (stored.installed && taskName != lastSpec.taskName) {
+            return optimizer::common::Result<optimizer::service::ScheduledTaskStatus>::Success(
+                optimizer::service::ScheduledTaskStatus{});
+        }
+        return optimizer::common::Result<optimizer::service::ScheduledTaskStatus>::Success(
+            stored); // 未注册 = installed=false（Success，不是错误）
+    }
+    [[nodiscard]] optimizer::common::Result<void> Create(
+        const optimizer::service::ScheduledTaskSpec& spec) override {
+        ++createCalls;
+        if (failCreate) {
+            // 以“非提升进程注册被拒”的真实 HRESULT 形态上报（E_ACCESSDENIED）。
+            return optimizer::common::Result<void>::Failure(
+                optimizer::common::Error::FromHResult(
+                    static_cast<std::int32_t>(0x80070005L),
+                    "FakeScheduledTaskBackend::Create"));
+        }
+        lastSpec = spec;
+        stored.installed = true;
+        stored.commandLine = spec.commandLine;
+        stored.trigger = L"logon";
+        return optimizer::common::Result<void>::Success();
+    }
+    [[nodiscard]] optimizer::common::Result<void> Remove(
+        const std::wstring& taskName) override {
+        ++removeCalls;
+        if (failRemove) {
+            return optimizer::common::Result<void>::Failure(
+                optimizer::common::Error::FromHResult(
+                    static_cast<std::int32_t>(0x80070005L),
+                    "FakeScheduledTaskBackend::Remove"));
+        }
+        (void)taskName;
+        stored = optimizer::service::ScheduledTaskStatus{}; // 不存在也视为成功（幂等）
+        return optimizer::common::Result<void>::Success();
+    }
+};
+
+optimizer::service::ScheduledTaskSpec MakeTaskSpec() {
+    optimizer::service::ScheduledTaskSpec spec;
+    spec.taskName = optimizer::service::kScheduledTaskName;
+    spec.commandLine = L"\"C:\\App Files\\CppOptimizer.exe\" --service console run --tray";
+    spec.trigger = optimizer::service::TaskTrigger::OnLogon;
+    return spec;
+}
+
+bool TestScheduledTaskRejectsBeforeBackend() {
+    // 校验必须在调用后端之前完成：后端调用计数 = 0（不产生任何副作用）。
+    FakeScheduledTaskBackend backend;
+    auto spec = MakeTaskSpec();
+    spec.taskName.clear();
+    const auto emptyName = optimizer::service::InstallScheduledTask(backend, spec);
+    spec = MakeTaskSpec();
+    spec.commandLine.clear();
+    const auto emptyCommand = optimizer::service::InstallScheduledTask(backend, spec);
+    spec = MakeTaskSpec();
+    spec.taskName = L"sub\\task";
+    const auto pathName = optimizer::service::InstallScheduledTask(backend, spec);
+    const bool rejected = !emptyName && !emptyCommand && !pathName;
+    const bool validationDomains =
+        emptyName.ErrorValue().domain == optimizer::common::ErrorDomain::Validation &&
+        emptyCommand.ErrorValue().domain == optimizer::common::ErrorDomain::Validation &&
+        pathName.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
+    return rejected && validationDomains && backend.createCalls == 0;
+}
+
+bool TestScheduledTaskBootTriggerIsRefused() {
+    // 开机触发需以 SYSTEM 运行，与“托盘与 Agent 进程永不提权”冲突：显式拒绝，不静默提权。
+    FakeScheduledTaskBackend backend;
+    auto spec = MakeTaskSpec();
+    spec.trigger = optimizer::service::TaskTrigger::OnBoot;
+    const auto result = optimizer::service::InstallScheduledTask(backend, spec);
+    return !result && backend.createCalls == 0 &&
+           result.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
+}
+
+bool TestScheduledTaskInstallAndQuery() {
+    using optimizer::service::InstallScheduledTask;
+    using optimizer::service::QueryScheduledTask;
+    FakeScheduledTaskBackend backend;
+    const auto spec = MakeTaskSpec();
+    const auto installed = InstallScheduledTask(backend, spec);
+    if (!installed || backend.createCalls != 1) {
+        return false;
+    }
+    // 后端收到的就是完整命令行与触发方式（不被改写、不丢失参数）。
+    const bool specPassedThrough = backend.lastSpec.commandLine == spec.commandLine &&
+                                   backend.lastSpec.taskName == spec.taskName &&
+                                   backend.lastSpec.trigger == spec.trigger;
+    const auto queried = QueryScheduledTask(backend, spec.taskName);
+    return specPassedThrough && queried && queried.Value().installed &&
+           queried.Value().commandLine == spec.commandLine &&
+           queried.Value().trigger == L"logon";
+}
+
+bool TestScheduledTaskQueryUnregisteredIsNotError() {
+    FakeScheduledTaskBackend backend;
+    const auto queried =
+        optimizer::service::QueryScheduledTask(backend, L"CppOptimizer");
+    return queried && !queried.Value().installed && backend.readCalls == 1;
+}
+
+bool TestScheduledTaskRemoveIsIdempotent() {
+    FakeScheduledTaskBackend backend;
+    (void)optimizer::service::InstallScheduledTask(backend, MakeTaskSpec());
+    const auto first = optimizer::service::RemoveScheduledTask(backend, L"CppOptimizer");
+    const auto second = optimizer::service::RemoveScheduledTask(backend, L"CppOptimizer");
+    return first && second && backend.removeCalls == 2 && !backend.stored.installed;
+}
+
+bool TestScheduledTaskFailuresAreReported() {
+    // 失败如实上报（不伪成功）：非提升进程注册被拒的真实形态（HRESULT E_ACCESSDENIED）。
+    FakeScheduledTaskBackend backend;
+    backend.failCreate = true;
+    const auto created =
+        optimizer::service::InstallScheduledTask(backend, MakeTaskSpec());
+    backend.failRemove = true;
+    const auto removed =
+        optimizer::service::RemoveScheduledTask(backend, L"CppOptimizer");
+    backend.failRead = true;
+    const auto read = optimizer::service::QueryScheduledTask(backend, L"CppOptimizer");
+    return !created &&
+           created.ErrorValue().domain == optimizer::common::ErrorDomain::HResult &&
+           created.ErrorValue().code == 0x80070005ull && !removed &&
+           removed.ErrorValue().domain == optimizer::common::ErrorDomain::HResult &&
+           !read && read.ErrorValue().domain == optimizer::common::ErrorDomain::HResult;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -1166,5 +1317,17 @@ int wmain() {
     run(L"startup remove is idempotent", &TestStartupRemoveIsIdempotent);
     run(L"startup backend failure is reported",
         &TestStartupBackendFailureIsReported);
+    run(L"scheduled task rejects before backend",
+        &TestScheduledTaskRejectsBeforeBackend);
+    run(L"scheduled task boot trigger is refused",
+        &TestScheduledTaskBootTriggerIsRefused);
+    run(L"scheduled task install and query",
+        &TestScheduledTaskInstallAndQuery);
+    run(L"scheduled task query unregistered is not error",
+        &TestScheduledTaskQueryUnregisteredIsNotError);
+    run(L"scheduled task remove is idempotent",
+        &TestScheduledTaskRemoveIsIdempotent);
+    run(L"scheduled task failures are reported",
+        &TestScheduledTaskFailuresAreReported);
     return failed == 0 ? 0 : 1;
 }

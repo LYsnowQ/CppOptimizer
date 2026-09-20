@@ -61,6 +61,8 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="include\service\startup_entry.hpp">
+    </ClInclude>
+    <ClInclude Include="include\service\scheduled_task.hpp">
       <Filter>include\service</Filter>
     </ClInclude>
     <ClInclude Include="include\service\service_host.hpp">
@@ -141,6 +143,8 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\service\startup_entry.cpp">
+    </ClCompile>
+    <ClCompile Include="source\service\scheduled_task.cpp">
       <Filter>source\service</Filter>
     </ClCompile>
     <ClCompile Include="source\service\service_host.cpp">

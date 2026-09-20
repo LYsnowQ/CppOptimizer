@@ -47,6 +47,7 @@ add_executable(CppOptimizer
     source/activity/raw_input.cpp
     source/audit/audit_log.cpp
     source/service/startup_entry.cpp
+    source/service/scheduled_task.cpp
     source/service/service_host.cpp
     source/service/recovery_marker.cpp
     source/service/tray_host.cpp
@@ -66,6 +67,9 @@ target_link_libraries(CppOptimizer PRIVATE
     advapi32
     wtsapi32
     shell32
+    ole32
+    oleaut32
+    taskschd
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
 )
@@ -324,13 +328,14 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         tests/service_tests.cpp
         source/common/error.cpp
         source/service/startup_entry.cpp
+        source/service/scheduled_task.cpp
         source/service/service_host.cpp
         source/service/recovery_marker.cpp
         source/service/tray_host.cpp
         source/service/presence.cpp
     )
     target_include_directories(CppOptimizerServiceTests PRIVATE include)
-    target_link_libraries(CppOptimizerServiceTests PRIVATE advapi32 shell32)
+    target_link_libraries(CppOptimizerServiceTests PRIVATE advapi32 shell32 ole32 oleaut32 taskschd)
     target_compile_features(CppOptimizerServiceTests PRIVATE cxx_std_20)
     target_compile_definitions(CppOptimizerServiceTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX

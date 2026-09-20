@@ -21,6 +21,7 @@
 #include "process/process_watcher.hpp"
 #include "service/service_host.hpp"
 #include "service/startup_entry.hpp"
+#include "service/scheduled_task.hpp"
 #include "service/recovery_marker.hpp"
 #include "service/tray_host.hpp"
 #include "service/presence.hpp"
@@ -1343,11 +1344,121 @@ int RunPolicyCommand(int argc, wchar_t* argv[]) {
     return 0;
 }
 
+// 登录后拉起的宿主命令行：自启动项与计划任务共用（仅一处真相，避免两处漂移）。
+std::wstring HostAutostartCommandLine(const std::wstring& exePath) {
+    return L"\"" + exePath + L"\" --service console run --tray --ipc-facts";
+}
+
+// 解析当前可执行文件路径；失败返回 false。
+bool ResolveExecutablePath(std::wstring& exePath) {
+    exePath.assign(MAX_PATH, L' ');
+    const DWORD written = ::GetModuleFileNameW(
+        nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
+    if (written == 0 || written >= exePath.size()) {
+        return false;
+    }
+    exePath.resize(written);
+    return true;
+}
+
+int RunScheduledTaskCommand(int argc, wchar_t* argv[]) {
+    // --scheduled-task <status|install|remove> [taskname]：每用户计划任务（登录触发、当前用户交互令牌）。
+    // 安全契约：注册需要管理员（非提升进程得到拒绝访问并如实报错）；不请求提升、不设置最高运行级别；
+    // 默认不自动安装（须显式命令）；remove 幂等；"开机触发" 被显式拒绝（需 SYSTEM，与权限分界冲突）。
+    if (argc < 3) {
+        ErrorLine{} << L"  --scheduled-task requires status|install|remove\n";
+        return 2;
+    }
+    const std::wstring_view action(argv[2]);
+    const std::wstring taskName =
+        argc >= 4 ? argv[3] : optimizer::service::kScheduledTaskName;
+    if (action == L"status") {
+        const auto queried = optimizer::service::QueryScheduledTask(taskName);
+        if (!queried) {
+            const auto& error = queried.ErrorValue();
+            ErrorLine{} << L"  scheduled task query failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        optimizer::common::WriteConsoleLine(
+            L"Scheduled task (logon trigger, current user token)");
+        {
+            std::wostringstream line;
+            line << L"  task     : " << taskName;
+            optimizer::common::WriteConsoleLine(line.str());
+        }
+        if (!queried.Value().installed) {
+            optimizer::common::WriteConsoleLine(
+                L"  state    : not installed");
+            return 0;
+        }
+        {
+            std::wostringstream line;
+            line << L"  state    : installed";
+            if (!queried.Value().trigger.empty()) {
+                line << L" (trigger " << queried.Value().trigger << L")";
+            }
+            optimizer::common::WriteConsoleLine(line.str());
+        }
+        if (!queried.Value().commandLine.empty()) {
+            optimizer::common::WriteConsoleLine(
+                L"  command  : " + queried.Value().commandLine);
+        } else {
+            optimizer::common::WriteConsoleLine(
+                L"  command  : unavailable (task exists but its action could not be read)");
+        }
+        return 0;
+    }
+    if (action == L"install") {
+        std::wstring exePath;
+        if (!ResolveExecutablePath(exePath)) {
+            ErrorLine{} << L"  cannot resolve current executable path\n";
+            return 2;
+        }
+        const std::wstring command = HostAutostartCommandLine(exePath);
+        optimizer::service::ScheduledTaskSpec spec;
+        spec.taskName = taskName;
+        spec.commandLine = command;
+        spec.trigger = optimizer::service::TaskTrigger::OnLogon;
+        const auto installed = optimizer::service::InstallScheduledTask(spec);
+        if (!installed) {
+            const auto& error = installed.ErrorValue();
+            ErrorLine{} << L"  scheduled task install failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            ErrorLine{} << L"  hint     : registering a per-machine task needs elevated rights "
+                           L"(one-time UAC); the task itself never runs elevated\n";
+            return 2;
+        }
+        optimizer::common::WriteConsoleLine(
+            L"  scheduled: installed (per-user, logon trigger) -> " + command);
+        optimizer::common::WriteConsoleLine(
+            L"  revert   : CppOptimizer.exe --scheduled-task remove");
+        return 0;
+    }
+    if (action == L"remove") {
+        const auto removed = optimizer::service::RemoveScheduledTask(taskName);
+        if (!removed) {
+            const auto& error = removed.ErrorValue();
+            ErrorLine{} << L"  scheduled task remove failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        optimizer::common::WriteConsoleLine(
+            L"  scheduled: removed (idempotent)");
+        return 0;
+    }
+    ErrorLine{} << L"  --scheduled-task requires status|install|remove\n";
+    return 2;
+}
+
 int RunStartupCommand(int argc, wchar_t* argv[]) {
     // --startup <status|install|remove>：每用户自启动项（HKCU Run 键）。
     // R1 局部可逆：仅当前用户、标准用户即可、remove 即恢复；默认不自动安装（须显式命令）。
     if (argc < 3) {
-        ErrorLine{} << L"  --startup requires status|install|remove";
+        ErrorLine{} << L"  --startup requires status|install|remove\n";
         return 2;
     }
     const std::wstring_view action(argv[2]);
@@ -1357,7 +1468,7 @@ int RunStartupCommand(int argc, wchar_t* argv[]) {
             const auto& error = queried.ErrorValue();
             ErrorLine{} << L"  startup query failed ["
                         << optimizer::common::ToString(error.domain) << L":"
-                        << error.code << L"] " << error.message;
+                        << error.code << L"] " << error.message << L"\n";
             return 2;
         }
         optimizer::common::WriteConsoleLine(L"Startup entry (per-user, HKCU Run)");
@@ -1368,29 +1479,25 @@ int RunStartupCommand(int argc, wchar_t* argv[]) {
         return 0;
     }
     if (action == L"install") {
-        std::wstring exePath(MAX_PATH, L' ');
-        const DWORD written = ::GetModuleFileNameW(
-            nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
-        if (written == 0 || written >= exePath.size()) {
-            ErrorLine{} << L"  cannot resolve current executable path";
+        std::wstring exePath;
+        if (!ResolveExecutablePath(exePath)) {
+            ErrorLine{} << L"  cannot resolve current executable path\n";
             return 2;
         }
-        exePath.resize(written);
         // AGENT-A2：启动项必须写入**能拉起常驻托盘宿主的命令行**（仅写 exe 路径的话，
         // 登录后启动的进程无参数 -> 只打印 usage，起不到 Agent 形态的作用）。
         auto backend = optimizer::service::CreateWin32StartupEntryBackend();
         if (!backend) {
-            ErrorLine{} << L"  startup install failed: 无法创建注册表后端";
+            ErrorLine{} << L"  startup install failed: 无法创建注册表后端\n";
             return 2;
         }
-        const std::wstring command =
-            L"\"" + exePath + L"\" --service console run --tray --ipc-facts";
+        const std::wstring command = HostAutostartCommandLine(exePath);
         const auto installed = backend->Write(command);
         if (!installed) {
             const auto& error = installed.ErrorValue();
             ErrorLine{} << L"  startup install failed ["
                         << optimizer::common::ToString(error.domain) << L":"
-                        << error.code << L"] " << error.message;
+                        << error.code << L"] " << error.message << L"\n";
             return 2;
         }
         optimizer::common::WriteConsoleLine(
@@ -1405,13 +1512,13 @@ int RunStartupCommand(int argc, wchar_t* argv[]) {
             const auto& error = removed.ErrorValue();
             ErrorLine{} << L"  startup remove failed ["
                         << optimizer::common::ToString(error.domain) << L":"
-                        << error.code << L"] " << error.message;
+                        << error.code << L"] " << error.message << L"\n";
             return 2;
         }
         optimizer::common::WriteConsoleLine(L"  startup  : removed (idempotent)");
         return 0;
     }
-    ErrorLine{} << L"  --startup requires status|install|remove";
+    ErrorLine{} << L"  --startup requires status|install|remove\n";
     return 2;
 }
 
@@ -3825,6 +3932,9 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --log <module> <message...> Write one Info log line to stderr\n"
         << L"                             (read-only, foreground, bounded)\n"
 "\n"
+        << L"  CppOptimizer.exe --scheduled-task <status|install|remove> [name]  Maintain the\n"
+        << L"                             per-user logon-triggered scheduled task (registration needs\n"
+        << L"                             admin; the task itself never runs elevated)\n"
         << L"  CppOptimizer.exe --audit-log [path] [lines]  Read back the tail of the\n"
         << L"                             persisted audit trail (read-only; default: per-user\n"
         << L"                             audit.log, last 20 lines, max 200)\n"
@@ -4030,6 +4140,10 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 2 && std::wstring_view(argv[1]) == L"--startup") {
             return RunStartupCommand(argc, argv);
+        }
+        if (argc >= 2 && argc <= 4 &&
+            std::wstring_view(argv[1]) == L"--scheduled-task") {
+            return RunScheduledTaskCommand(argc, argv);
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--ipc-credential") {
             return RunIpcCredentialCommand(argc, argv);
