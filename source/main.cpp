@@ -3951,7 +3951,7 @@ int wmain(int argc, wchar_t* argv[]) {
             return RunIpcCredentialCommand(argc, argv);
         }
         PrintUsage();
-        return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;;
+        return argc == 1 || (argc == 2 && std::wstring_view(argv[1]) == L"--help") ? 0 : 1;
     } catch (const std::exception& exception) {
         std::cerr << "Fatal C++ exception: " << exception.what() << '\n';
         return 100;
