@@ -1230,7 +1230,7 @@ int RunStartupCommand(int argc, wchar_t* argv[]) {
             return 2;
         }
         const std::wstring command =
-            L"\"" + exePath + L"\" --service console run --tray";
+            L"\"" + exePath + L"\" --service console run --tray --ipc-facts";
         const auto installed = backend->Write(command);
         if (!installed) {
             const auto& error = installed.ErrorValue();
