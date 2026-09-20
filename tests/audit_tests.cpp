@@ -345,6 +345,140 @@ bool TestReadAuditTailDirectoryIsFailure() {
 
 } // namespace
 
+// ---------- AUD-004：审计汇总（纯函数，语义压缩的计数基础） ----------
+
+bool TestSummarizeRecordsEmptyIsZero() {
+    const auto summary = optimizer::audit::SummarizeRecords({});
+    return summary.total == 0 && summary.ok == 0 && summary.fail == 0 &&
+           summary.byOperation.empty();
+}
+
+bool TestSummarizeRecordsAggregatesByOperation() {
+    using optimizer::audit::AuditRecord;
+    using optimizer::audit::SummarizeRecords;
+    AuditRecord first = MakeRecord("priority.boost", true);
+    AuditRecord second = MakeRecord("power.hold", true);
+    AuditRecord third = MakeRecord("priority.boost", false);
+    const auto base = std::chrono::steady_clock::now();
+    first.at = base;
+    second.at = base + std::chrono::seconds(2);
+    third.at = base + std::chrono::seconds(5);
+    const std::vector<AuditRecord> records{first, second, third};
+
+    const auto summary = SummarizeRecords(records);
+    if (summary.total != 3 || summary.ok != 2 || summary.fail != 1) {
+        return false;
+    }
+    // 按 operationId 首次出现顺序聚合。
+    if (summary.byOperation.size() != 2 ||
+        summary.byOperation[0].operationId != "priority.boost" ||
+        summary.byOperation[0].ok != 1 || summary.byOperation[0].fail != 1 ||
+        summary.byOperation[1].operationId != "power.hold" ||
+        summary.byOperation[1].ok != 1 || summary.byOperation[1].fail != 0) {
+        return false;
+    }
+    // 时间范围保留（语义压缩不得丢失可追溯信息）。
+    return summary.firstAt == base &&
+           summary.lastAt == base + std::chrono::seconds(5);
+}
+
+// ---------- AUD-004：审计行前缀解析与行聚合（纯函数） ----------
+
+bool TestParseAuditLinePrefixParsesAndRejects() {
+    using optimizer::audit::ParseAuditLinePrefix;
+    const std::string okLine =
+        "2026-09-17 00:33:17 [audit] R1 power.hold ok caller=policy target=policy detail=x";
+    const std::string failLine =
+        "2026-09-17 00:33:22 [audit] R1 priority.unboost fail caller=policy";
+    const auto ok = ParseAuditLinePrefix(okLine);
+    const auto fail = ParseAuditLinePrefix(failLine);
+    const bool parsed = ok && fail && ok->timestamp == "2026-09-17 00:33:17" &&
+                        ok->operationId == "power.hold" && ok->ok &&
+                        fail->operationId == "priority.unboost" && !fail->ok;
+    // 畸形/缺字段/结果非 ok|fail：必须返回 nullopt（不静默当作可解析）。
+    const bool rejected =
+        !ParseAuditLinePrefix("") &&
+        !ParseAuditLinePrefix("no marker here") &&
+        !ParseAuditLinePrefix("2026-09-17 00:33:17 [audit] R1 onlyRisk") &&
+        !ParseAuditLinePrefix("2026-09-17 00:33:17 [audit] R1 op maybe") &&
+        !ParseAuditLinePrefix("2026-09-17 00:33:17 [audit] ");
+    return parsed && rejected;
+}
+
+bool TestSummarizeAuditLinesCountsAndKeepsRange() {
+    using optimizer::audit::SummarizeAuditLines;
+    const std::vector<std::string> lines{
+        "2026-09-17 00:00:01 [audit] R1 power.hold ok caller=policy",
+        "2026-09-17 00:00:02 [audit] R1 priority.boost ok caller=policy",
+        "2026-09-17 00:00:03 [audit] R1 power.hold fail caller=policy",
+        "",                                       // 不可解析（空行）
+        "garbage without marker",                 // 不可解析
+        "2026-09-17 00:00:04 [audit] R1 power.hold ok caller=policy"};
+    const auto summary = SummarizeAuditLines(lines);
+    if (summary.total != 4 || summary.ok != 3 || summary.fail != 1 ||
+        summary.unparsed != 2) {
+        return false;
+    }
+    // 首次出现顺序：power.hold 先于 priority.boost。
+    if (summary.byOperation.size() != 2 ||
+        summary.byOperation[0].operationId != "power.hold" ||
+        summary.byOperation[0].ok != 2 || summary.byOperation[0].fail != 1 ||
+        summary.byOperation[1].operationId != "priority.boost" ||
+        summary.byOperation[1].ok != 1) {
+        return false;
+    }
+    return summary.firstTimestamp == "2026-09-17 00:00:01" &&
+           summary.lastTimestamp == "2026-09-17 00:00:04";
+}
+
+bool TestFormatAuditSummaryLine() {
+    using optimizer::audit::AuditLineSummary;
+    using optimizer::audit::AuditOperationCount;
+    using optimizer::audit::FormatAuditSummaryLine;
+    AuditLineSummary summary;
+    summary.total = 4;
+    summary.ok = 3;
+    summary.fail = 1;
+    summary.unparsed = 2;
+    summary.firstTimestamp = "2026-09-17 00:00:01";
+    summary.lastTimestamp = "2026-09-17 00:00:04";
+    summary.byOperation = {AuditOperationCount{"power.hold", 2, 1},
+                           AuditOperationCount{"priority.boost", 1, 0}};
+    const std::string expected =
+        "2026-09-17 00:00:01..2026-09-17 00:00:04 [audit-summary] total=4 ok=3 "
+        "fail=1 unparsed=2 power.hold=2/1 priority.boost=1/0";
+    if (FormatAuditSummaryLine(summary) != expected) {
+        return false;
+    }
+    // 空聚合：无时间戳时省略区间，但仍输出计数（不得输出空串）。
+    const AuditLineSummary empty;
+    return FormatAuditSummaryLine(empty) ==
+           " [audit-summary] total=0 ok=0 fail=0 unparsed=0";
+}
+
+bool TestShouldCompactAuditFile() {
+    using optimizer::audit::CompactOptions;
+    using optimizer::audit::ShouldCompactAuditFile;
+    CompactOptions options; // 默认 4 MiB / 20000 行
+    // 低于阈值：不触发；达到或超过：触发。
+    const bool normal = !ShouldCompactAuditFile(options.maxBytes - 1, 10, options) &&
+                        ShouldCompactAuditFile(options.maxBytes, 10, options) &&
+                        ShouldCompactAuditFile(0, options.maxLines, options) &&
+                        !ShouldCompactAuditFile(0, options.maxLines - 1, options);
+    // 维度为 0 = 该维度不参与判定。
+    CompactOptions onlyLines;
+    onlyLines.maxBytes = 0;
+    const bool disabled = !ShouldCompactAuditFile(1u << 30, 1, onlyLines) &&
+                          ShouldCompactAuditFile(1, onlyLines.maxLines, onlyLines);
+    // 两者都为 0：永不触发（防止误配置导致“每次调用都压缩”）。
+    CompactOptions never;
+    never.maxBytes = 0;
+    never.maxLines = 0;
+    const bool neverTriggers =
+        !ShouldCompactAuditFile(1ull << 40, 1u << 20, never);
+    return normal && disabled && neverTriggers;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -382,5 +516,14 @@ int wmain() {
         &TestReadAuditTailTruncatesLongLine);
     run(L"audit tail directory is failure",
         &TestReadAuditTailDirectoryIsFailure);
+    run(L"summarize records empty is zero", &TestSummarizeRecordsEmptyIsZero);
+    run(L"summarize records aggregates by operation",
+        &TestSummarizeRecordsAggregatesByOperation);
+    run(L"parse audit line prefix parses and rejects",
+        &TestParseAuditLinePrefixParsesAndRejects);
+    run(L"summarize audit lines counts and keeps range",
+        &TestSummarizeAuditLinesCountsAndKeepsRange);
+    run(L"format audit summary line", &TestFormatAuditSummaryLine);
+    run(L"should compact audit file thresholds", &TestShouldCompactAuditFile);
     return failed == 0 ? 0 : 1;
 }

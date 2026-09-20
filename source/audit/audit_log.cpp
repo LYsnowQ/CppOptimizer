@@ -108,6 +108,161 @@ std::wstring FormatAuditRecord(const AuditRecord& record) {
 AuditLog::AuditLog(Options options)
     : options_(options) {}
 
+AuditSummary SummarizeRecords(std::span<const AuditRecord> records) {
+    AuditSummary summary;
+    bool hasTime = false;
+    for (const auto& record : records) {
+        ++summary.total;
+        if (record.ok) {
+            ++summary.ok;
+        } else {
+            ++summary.fail;
+        }
+        // 按 operationId 首次出现顺序聚合（记录量小：线性查找足够且稳定）。
+        AuditOperationCount* entry = nullptr;
+        for (auto& candidate : summary.byOperation) {
+            if (candidate.operationId == record.operationId) {
+                entry = &candidate;
+                break;
+            }
+        }
+        if (entry == nullptr) {
+            summary.byOperation.push_back(AuditOperationCount{record.operationId, 0, 0});
+            entry = &summary.byOperation.back();
+        }
+        if (record.ok) {
+            ++entry->ok;
+        } else {
+            ++entry->fail;
+        }
+        // 首/末时刻：跳过未设置的时刻（默认构造的 time_point）。
+        if (record.at != std::chrono::steady_clock::time_point{}) {
+            if (!hasTime || record.at < summary.firstAt) {
+                summary.firstAt = record.at;
+            }
+            if (!hasTime || record.at > summary.lastAt) {
+                summary.lastAt = record.at;
+            }
+            hasTime = true;
+        }
+    }
+    return summary;
+}
+
+std::optional<AuditLinePrefix> ParseAuditLinePrefix(
+    std::string_view line) noexcept {
+    constexpr std::string_view kMarker = " [audit] ";
+    const auto marker = line.find(kMarker);
+    if (marker == std::string_view::npos || marker == 0) {
+        return std::nullopt;
+    }
+    std::string_view rest = line.substr(marker + kMarker.size());
+    // rest: "<risk> <operationId> <ok|fail> caller=…"
+    const auto afterRisk = rest.find(' ');
+    if (afterRisk == std::string_view::npos) {
+        return std::nullopt;
+    }
+    rest.remove_prefix(afterRisk + 1);
+    const auto afterOperation = rest.find(' ');
+    if (afterOperation == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const std::string_view operationId = rest.substr(0, afterOperation);
+    rest.remove_prefix(afterOperation + 1);
+    const auto afterResult = rest.find(' ');
+    const std::string_view result =
+        afterResult == std::string_view::npos ? rest : rest.substr(0, afterResult);
+    if (operationId.empty()) {
+        return std::nullopt;
+    }
+    AuditLinePrefix prefix;
+    prefix.timestamp = std::string(line.substr(0, marker));
+    prefix.operationId = std::string(operationId);
+    if (result == "ok") {
+        prefix.ok = true;
+    } else if (result == "fail") {
+        prefix.ok = false;
+    } else {
+        return std::nullopt; // 结果字段不是 ok/fail：视为不可解析
+    }
+    return prefix;
+}
+
+AuditLineSummary SummarizeAuditLines(const std::vector<std::string>& lines) {
+    AuditLineSummary summary;
+    for (const auto& line : lines) {
+        const auto prefix = ParseAuditLinePrefix(line);
+        if (!prefix) {
+            ++summary.unparsed; // 不可解析行计数，原文由调用方保留
+            continue;
+        }
+        ++summary.total;
+        if (prefix->ok) {
+            ++summary.ok;
+        } else {
+            ++summary.fail;
+        }
+        AuditOperationCount* entry = nullptr;
+        for (auto& candidate : summary.byOperation) {
+            if (candidate.operationId == prefix->operationId) {
+                entry = &candidate;
+                break;
+            }
+        }
+        if (entry == nullptr) {
+            summary.byOperation.push_back(
+                AuditOperationCount{prefix->operationId, 0, 0});
+            entry = &summary.byOperation.back();
+        }
+        if (prefix->ok) {
+            ++entry->ok;
+        } else {
+            ++entry->fail;
+        }
+        // 文件为追加式：首行/末行的可读取时间戳即时间范围。
+        if (summary.firstTimestamp.empty()) {
+            summary.firstTimestamp = prefix->timestamp;
+        }
+        summary.lastTimestamp = prefix->timestamp;
+    }
+    return summary;
+}
+
+bool ShouldCompactAuditFile(std::uintmax_t currentBytes,
+                            std::size_t currentLines,
+                            const CompactOptions& options) noexcept {
+    const bool bytesReached =
+        options.maxBytes > 0 && currentBytes >= options.maxBytes;
+    const bool linesReached =
+        options.maxLines > 0 && currentLines >= options.maxLines;
+    return bytesReached || linesReached; // 维度为 0 = 不参与；两者都 0 = 永不触发
+}
+
+std::string FormatAuditSummaryLine(const AuditLineSummary& summary) {
+    std::string line = summary.firstTimestamp;
+    if (!summary.firstTimestamp.empty()) {
+        line += "..";
+        line += summary.lastTimestamp;
+    }
+    line += " [audit-summary] total=";
+    line += std::to_string(summary.total);
+    line += " ok=";
+    line += std::to_string(summary.ok);
+    line += " fail=";
+    line += std::to_string(summary.fail);
+    line += " unparsed=";
+    line += std::to_string(summary.unparsed);
+    for (const auto& entry : summary.byOperation) {
+        line += " ";
+        line += entry.operationId;
+        line += "=";
+        line += std::to_string(entry.ok);
+        line += "/";
+        line += std::to_string(entry.fail);
+    }
+    return line;
+}
+
 common::Result<void> AppendAuditLine(const std::filesystem::path& path,
                                      const AuditRecord& record) noexcept {
     if (path.empty()) {

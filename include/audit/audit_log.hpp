@@ -8,7 +8,10 @@
 #include <deque>
 #include <filesystem>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace optimizer::audit {
@@ -36,6 +39,72 @@ struct AuditRecord {
 
 // 可读格式化（控制台/日志展示用；字段顺序固定便于 grep）。
 [[nodiscard]] std::wstring FormatAuditRecord(const AuditRecord& record);
+
+// 审计汇总（AUD-004 第一步，**纯函数**）：按 operationId 聚合成功/失败计数，并给出总数与首/末时刻。
+// 用途：语义压缩（压缩而非删除）——把旧记录汇总为一行，保留计数与时间范围，丢弃逐条细节。
+// 契约：不分配文件资源、不抛异常；`byOperation` 按 operationId **首次出现顺序**稳定排列；
+// 空输入返回全零（firstAt/lastAt 为默认时刻）。
+struct AuditOperationCount {
+    std::string operationId;
+    std::size_t ok = 0;
+    std::size_t fail = 0;
+};
+
+struct AuditSummary {
+    std::size_t total = 0;
+    std::size_t ok = 0;
+    std::size_t fail = 0;
+    std::vector<AuditOperationCount> byOperation;
+    std::chrono::steady_clock::time_point firstAt{};
+    std::chrono::steady_clock::time_point lastAt{};
+};
+
+[[nodiscard]] AuditSummary SummarizeRecords(
+    std::span<const AuditRecord> records);
+
+// 审计行前缀解析（AUD-004，纯函数）：从 `AppendAuditLine` 写入的一行中取出时间戳文本、
+// operationId 与 ok/fail（只取前 5 个字段，其余视为可丢弃的细节）。
+// **畸形/缺字段行返回 nullopt**——调用方不得因此静默丢弃原文。
+struct AuditLinePrefix {
+    std::string timestamp; // "YYYY-MM-DD HH:MM:SS"（行首文本）
+    std::string operationId;
+    bool ok = true;
+};
+[[nodiscard]] std::optional<AuditLinePrefix> ParseAuditLinePrefix(
+    std::string_view line) noexcept;
+
+// 审计行聚合（AUD-004，纯函数）：语义压缩的计数基础——按 operationId **首次出现顺序**聚合，
+// 保留总数与首/末时间戳；**不可解析行计入 `unparsed`（不得丢弃）**。
+struct AuditLineSummary {
+    std::size_t total = 0; // 参与聚合的可解析行数
+    std::size_t ok = 0;
+    std::size_t fail = 0;
+    std::size_t unparsed = 0;
+    std::vector<AuditOperationCount> byOperation;
+    std::string firstTimestamp;
+    std::string lastTimestamp;
+};
+[[nodiscard]] AuditLineSummary SummarizeAuditLines(
+    const std::vector<std::string>& lines);
+
+// 汇总行格式化（AUD-004，纯函数）：把行聚合结果渲染为**一行**（写入 audit-summary.log 的形式）：
+// `<firstTs>..<lastTs> [audit-summary] total=N ok=N fail=N unparsed=N <op>=<ok>/<fail> …`
+// 计数与时间范围为**必须保留**的可追溯信息；逐条细节不进入汇总行。
+// 空时间戳时省略 `..` 区间（仍输出计数）。
+[[nodiscard]] std::string FormatAuditSummaryLine(const AuditLineSummary& summary);
+
+// 压缩选项（AUD-004）：任一阈值**达到或超过**即应压缩；某项为 0 表示该维度不参与判定，
+// 两者都为 0 时永不触发。`keepTailLines` 指定重写后至少保留的尾部行数（未被压缩的部分，
+// 含不可解析行——它们必须原样保留）。
+struct CompactOptions {
+    std::uintmax_t maxBytes = 4u * 1024u * 1024u; // 4 MiB
+    std::size_t maxLines = 20000;
+    std::size_t keepTailLines = 2000;
+};
+
+[[nodiscard]] bool ShouldCompactAuditFile(std::uintmax_t currentBytes,
+                                          std::size_t currentLines,
+                                          const CompactOptions& options) noexcept;
 
 // 单条审计记录落盘（AUD-002）：以 UTF-8 追加一行到 path——本地时间戳（ASCII
 // `YYYY-MM-DD HH:MM:SS`）+ 与 FormatAuditRecord 一致的字段顺序（risk/operationId/ok|fail/
