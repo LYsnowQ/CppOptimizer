@@ -22,6 +22,7 @@
 #include "service/service_host.hpp"
 #include "service/startup_entry.hpp"
 #include "service/agent_form.hpp"
+#include "service/host_instance.hpp"
 #include "service/scheduled_task.hpp"
 #include "service/recovery_marker.hpp"
 #include "service/tray_host.hpp"
@@ -2454,6 +2455,25 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             kHostPresenceAwaySeconds);
     }
 
+    // 宿主单实例：只有 Agent 受理宿主需要——避免两个形态同时注册后登录拉起多个宿主，
+    // 造成同一管道名与同一批每用户文件（配置/恢复标记/在场时间线/审计）被两个进程争抢
+    // （包括恢复标记互相清除 -> 假的“上次异常退出未确认”）。
+    // 在写恢复标记之前获取：本路径提前返回时不会留下误导性的恢复标记。
+    std::shared_ptr<optimizer::service::HostInstanceLock> hostInstance;
+    if (ipcFacts) {
+        hostInstance = optimizer::service::TryAcquireHostInstance(
+            optimizer::service::DefaultHostInstanceName());
+        if (!hostInstance) {
+            const std::wstring lockName =
+                optimizer::service::DefaultHostInstanceName();
+            ErrorLine{} << L"  another agent-intake host is already running (lock: "
+                        << lockName << L")\n";
+            ErrorLine{} << L"  hint     : only one host may serve the intake pipe and the\n"
+                           L"             per-user state files; stop the other host first\n";
+            return 2;
+        }
+    }
+
     ServiceHostDemoState state;
     // LOG-004：宿主日志消费 [logging]——目录（空 = 每用户默认目录）、级别、单文件上限、
     // 历史文件数、控制台副本开关。未消费配置时按 [logging] 默认口径（info / 10 MiB x 5 / 控制台开）。
@@ -3257,6 +3277,18 @@ int RunAgentFormCommand(int argc, wchar_t* argv[]) {
                     << L" needs a form: startup_tray|task|service\n";
         return 2;
     }
+    // 可选 --replace：显式接受“替换现有形态”（默认拒绝，不静默卸载任何东西）。
+    bool replace = false;
+    for (int i = 4; i < argc; ++i) {
+        const std::wstring_view extra(argv[i]);
+        if (extra == L"--replace") {
+            replace = true;
+        } else {
+            ErrorLine{} << L"  unknown --agent-form option: " << argv[i]
+                        << L" (expected --replace)\n";
+            return 2;
+        }
+    }
     const auto form = optimizer::service::ParseAgentForm(argv[3]);
     if (!form) {
         ErrorLine{} << L"  unknown agent form: " << argv[3]
@@ -3264,21 +3296,65 @@ int RunAgentFormCommand(int argc, wchar_t* argv[]) {
         return 2;
     }
     const bool installing = action == L"install";
-    switch (*form) {
-        case optimizer::service::AgentForm::StartupTray:
-            return InvokeFormAction(&RunStartupCommand,
-                                    installing ? L"install" : L"remove");
-        case optimizer::service::AgentForm::ScheduledTask:
-            return InvokeFormAction(&RunScheduledTaskCommand,
-                                    installing ? L"install" : L"remove");
-        case optimizer::service::AgentForm::Service:
-            if (installing) {
-                return RunServiceInstallCommand(1, nullptr);
-            }
-            return RunServiceUninstallCommand();
+    // 形态动作执行器：启动项/计划任务复用既有命令实现，服务用其专用命令。
+    const auto runAction = [](optimizer::service::AgentForm target,
+                              bool install) -> int {
+        if (target == optimizer::service::AgentForm::Service) {
+            return install ? RunServiceInstallCommand(1, nullptr)
+                           : RunServiceUninstallCommand();
+        }
+        return InvokeFormAction(
+            target == optimizer::service::AgentForm::StartupTray
+                ? &RunStartupCommand
+                : &RunScheduledTaskCommand,
+            install ? L"install" : L"remove");
+    };
+    if (!installing) {
+        return runAction(*form, false); // 卸载不需要互斥检查
     }
-    ErrorLine{} << L"  unknown agent form\n";
-    return 2;
+    // 形态互斥（单一形态生效）：安装前查其它形态；已注册则**默认拒绝**，
+    // 要求用户显式选择（先卸载，或加 --replace 在新安装成功后卸载它们）。
+    const auto startupQuery = optimizer::service::QueryStartupEntry();
+    if (startupQuery) {
+        startupInstalled = !startupQuery.Value().empty();
+    }
+    const auto taskQuery = optimizer::service::QueryScheduledTask(
+        optimizer::service::kScheduledTaskName);
+    if (taskQuery) {
+        taskInstalled = taskQuery.Value().installed;
+    }
+    const auto serviceQuery = optimizer::service::QueryService(kServiceName);
+    if (serviceQuery) {
+        serviceInstalled = serviceQuery.Value().installed;
+    }
+    const auto conflicts = optimizer::service::ConflictingAgentForms(
+        *form, startupInstalled, taskInstalled, serviceInstalled);
+    if (!conflicts.empty() && !replace) {
+        std::wostringstream line;
+        line << L"  another agent form is already installed:";
+        for (const auto conflict : conflicts) {
+            line << L' ' << optimizer::service::AgentFormToString(conflict);
+        }
+        ErrorLine{} << line.str() << L"\n";
+        ErrorLine{} << L"  hint     : only one form may be active at a time - remove it first\n"
+                       L"             (--agent-form remove <form>) or pass --replace to\n"
+                       L"             switch after the new form is installed\n";
+        return 2;
+    }
+    const int installed = runAction(*form, true);
+    if (installed != 0) {
+        return installed; // 新形态未装成功：不动旧形态（不制造“两边都没有”的窗口）
+    }
+    for (const auto conflict : conflicts) {
+        // 先装后卸：任一时刻都至少有一个可用形态。
+        const int removed = runAction(conflict, false);
+        if (removed != 0) {
+            ErrorLine{} << L"  note     : the previous form could not be removed; both may be\n"
+                           L"             registered until it is removed manually\n";
+            return removed;
+        }
+    }
+    return 0;
 }
 
 // 命名管道基名：服务端与客户端必须使用同一名称（可选后缀区分实例）。
@@ -4154,9 +4230,10 @@ void PrintUsage() {
         << L"                             (GetForegroundWindow/GetWindowThreadProcessId) on\n"
         << L"                             active/idle samples only\n"
 
-        << L"  CppOptimizer.exe --agent-form <status|install|remove> [form] [config.toml]  Report or apply\n"
-        << L"                             one agent form (startup_tray|task|service); a declared form\n"
-        << L"                             never installs itself; task/service registration needs admin\n"
+        << L"  CppOptimizer.exe --agent-form <status|install|remove> [form] [config.toml] [--replace]\n"
+        << L"                             Report or apply one agent form (startup_tray|task|service);\n"
+        << L"                             only one form may be active (--replace switches); a declared\n"
+        << L"                             form never installs itself; task/service registration needs admin\n"
         << L"  CppOptimizer.exe --service status  Report the SCM service install state (read-only)\n"
         << L"  CppOptimizer.exe --startup <status|install|remove>  Per-user startup entry\n"
         << L"                             (HKCU Run; R1, reversible, standard user;\n"
@@ -4378,7 +4455,7 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--scheduled-task") {
             return RunScheduledTaskCommand(argc, argv);
         }
-        if (argc >= 2 && argc <= 5 &&
+        if (argc >= 2 && argc <= 6 &&
             std::wstring_view(argv[1]) == L"--agent-form") {
             return RunAgentFormCommand(argc, argv);
         }

@@ -63,4 +63,22 @@ bool IsDefaultAgentForm(AgentForm form) noexcept {
     return form == DefaultAgentForm();
 }
 
+std::vector<AgentForm> ConflictingAgentForms(AgentForm target,
+                                             bool startupInstalled,
+                                             bool taskInstalled,
+                                             bool serviceInstalled) {
+    // 形态固定顺序（启动项 -> 计划任务 -> 服务）：输出稳定，便于展示与测试。
+    std::vector<AgentForm> conflicts;
+    if (target != AgentForm::StartupTray && startupInstalled) {
+        conflicts.push_back(AgentForm::StartupTray);
+    }
+    if (target != AgentForm::ScheduledTask && taskInstalled) {
+        conflicts.push_back(AgentForm::ScheduledTask);
+    }
+    if (target != AgentForm::Service && serviceInstalled) {
+        conflicts.push_back(AgentForm::Service);
+    }
+    return conflicts;
+}
+
 } // namespace optimizer::service

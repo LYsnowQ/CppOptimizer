@@ -49,6 +49,7 @@ add_executable(CppOptimizer
     source/service/startup_entry.cpp
     source/service/scheduled_task.cpp
     source/service/agent_form.cpp
+    source/service/host_instance.cpp
     source/service/service_host.cpp
     source/service/recovery_marker.cpp
     source/service/tray_host.cpp
@@ -331,6 +332,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         source/service/startup_entry.cpp
         source/service/scheduled_task.cpp
         source/service/agent_form.cpp
+        source/service/host_instance.cpp
         source/service/service_host.cpp
         source/service/recovery_marker.cpp
         source/service/tray_host.cpp

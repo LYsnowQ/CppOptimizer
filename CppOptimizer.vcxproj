@@ -119,6 +119,7 @@
     <ClInclude Include="include\service\startup_entry.hpp" />
     <ClInclude Include="include\service\scheduled_task.hpp" />
     <ClInclude Include="include\service\agent_form.hpp" />
+    <ClInclude Include="include\service\host_instance.hpp" />
     <ClInclude Include="include\service\tray_host.hpp" />
     <ClInclude Include="include\service\presence.hpp" />
     <ClInclude Include="include\ipc\ipc_protocol.hpp" />
@@ -149,6 +150,7 @@
     <ClCompile Include="source\service\startup_entry.cpp" />
     <ClCompile Include="source\service\scheduled_task.cpp" />
     <ClCompile Include="source\service\agent_form.cpp" />
+    <ClCompile Include="source\service\host_instance.cpp" />
     <ClCompile Include="source\service\recovery_marker.cpp" />
     <ClCompile Include="source\service\tray_host.cpp" />
     <ClCompile Include="source\service\presence.cpp" />

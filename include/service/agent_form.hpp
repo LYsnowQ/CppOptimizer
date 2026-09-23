@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string_view>
+#include <vector>
 
 namespace optimizer::service {
 
@@ -33,5 +34,12 @@ enum class AgentForm {
 
 // 是否为唯一默认形态（用于“默认不可更改”的显式校验）。
 [[nodiscard]] bool IsDefaultAgentForm(AgentForm form) noexcept;
+
+// 形态互斥（单一形态生效）：安装 `target` 时，已注册的**其它**形态即为冲突。
+// 存在冲突时不自动卸载任何形态——由调用方要求用户显式选择（替换或先卸载）。
+[[nodiscard]] std::vector<AgentForm> ConflictingAgentForms(AgentForm target,
+                                                           bool startupInstalled,
+                                                           bool taskInstalled,
+                                                           bool serviceInstalled);
 
 } // namespace optimizer::service

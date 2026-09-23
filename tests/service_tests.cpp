@@ -4,6 +4,7 @@
 #include "service/presence.hpp"
 #include "service/startup_entry.hpp"
 #include "service/agent_form.hpp"
+#include "service/host_instance.hpp"
 #include "service/scheduled_task.hpp"
 
 #include <atomic>
@@ -1407,6 +1408,58 @@ bool TestServiceInstallFailuresAreReported() {
            queried.ErrorValue().domain == optimizer::common::ErrorDomain::Win32;
 }
 
+// ---------- AGENT-A7：形态互斥与宿主单实例（纯函数 / 进程内锁） ----------
+
+bool TestConflictingAgentForms() {
+    using optimizer::service::AgentForm;
+    using optimizer::service::ConflictingAgentForms;
+    // 目标形态自身不算冲突；其它已注册形态均算冲突，按固定顺序输出。
+    const auto none = ConflictingAgentForms(AgentForm::StartupTray, false, false, false);
+    const auto onlySelf =
+        ConflictingAgentForms(AgentForm::StartupTray, true, false, false);
+    const auto taskConflict =
+        ConflictingAgentForms(AgentForm::StartupTray, false, true, false);
+    const auto both =
+        ConflictingAgentForms(AgentForm::Service, true, true, false);
+    const auto selfAndOther =
+        ConflictingAgentForms(AgentForm::ScheduledTask, true, true, true);
+    const bool ordered =
+        both.size() == 2 && both[0] == AgentForm::StartupTray &&
+        both[1] == AgentForm::ScheduledTask && selfAndOther.size() == 2 &&
+        selfAndOther[0] == AgentForm::StartupTray &&
+        selfAndOther[1] == AgentForm::Service;
+    return none.empty() && onlySelf.empty() && taskConflict.size() == 1 &&
+           taskConflict[0] == AgentForm::ScheduledTask && ordered;
+}
+
+bool TestHostInstanceLockIsExclusive() {
+    using optimizer::service::DefaultHostInstanceName;
+    using optimizer::service::TryAcquireHostInstance;
+    // 空名称拒绝（不生成无名互斥量）。
+    if (TryAcquireHostInstance(std::wstring()) != nullptr) {
+        return false;
+    }
+    // 默认名非空（含 Local\ 前缀与用户名）。
+    const std::wstring name = DefaultHostInstanceName();
+    if (name.empty() || name.rfind(L"Local" + std::wstring(1, L'\\'), 0) != 0) {
+        return false;
+    }
+    // 同一名称二次获取必须失败（进程内即可验证独占语义）。
+    const std::wstring probe = L"Local\\CppOptimizerHostProbe_" +
+                               std::to_wstring(::GetCurrentProcessId());
+    auto first = TryAcquireHostInstance(probe);
+    if (!first || !first->IsHeld()) {
+        return false;
+    }
+    const auto second = TryAcquireHostInstance(probe);
+    const bool exclusive = second == nullptr;
+    first.reset(); // 释放后应可再次获取
+    auto third = TryAcquireHostInstance(probe);
+    const bool reacquired = third != nullptr;
+    third.reset();
+    return exclusive && reacquired;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -1503,6 +1556,8 @@ int wmain() {
     run(L"parse agent form", &TestParseAgentForm);
     run(L"agent form round trip and elevation",
         &TestAgentFormRoundTripAndElevation);
+    run(L"conflicting agent forms", &TestConflictingAgentForms);
+    run(L"host instance lock is exclusive", &TestHostInstanceLockIsExclusive);
     run(L"service install rejects before backend",
         &TestServiceInstallRejectsBeforeBackend);
     run(L"service install query delete round trip",
