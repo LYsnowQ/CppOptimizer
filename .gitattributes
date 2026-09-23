@@ -1,0 +1,14 @@
+# 行尾统一为 LF（仓库以 LF 存储，与 .editorconfig 的 end_of_line = lf 一致）。
+# text=auto 让 git 自行识别文本/二进制，并对文本按 LF 归一化存储与检出。
+* text=auto eol=lf
+
+# 二进制文件按原样存储（不做行尾或编码转换）。
+*.lib binary
+*.dll binary
+*.exe binary
+*.pdb binary
+*.ilk binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.zip binary
