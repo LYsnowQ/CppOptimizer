@@ -361,16 +361,18 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
         }
         configuredMax = loaded.Value().memory.maxCleanLevel;
     }
-    // 门禁输入：compile/cmdline/audit/cooldown 四门尚未实现（如实按未通过处理）；
-    // 权限与环境门用**真实只读探测**结果。
+    // 门禁输入：compile/cmdline/cooldown 三门尚未实现（如实按未通过处理）；
+    // 权限与环境门用真实只读探测结果；审计门用真实“可写探测”（只打开不写入）。
     const auto environment = GatherEnvironmentFacts();
+    const auto auditProbe =
+        optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath());
     optimizer::policy::GateInputs inputs;
     inputs.compileTime = false;
     inputs.config = configuredMax != optimizer::config::CleanLevel::None;
     inputs.commandLine = false;
     inputs.permissionAndEnvironment =
         optimizer::policy::EvaluateEnvironmentGate(environment);
-    inputs.audit = false;
+    inputs.audit = static_cast<bool>(auditProbe);
     inputs.cooldown = false;
     const auto gates = optimizer::policy::EvaluateGates(inputs);
     const auto plan = optimizer::memory::PlanMemoryClean(configuredMax, configuredMax,
@@ -456,6 +458,9 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     const auto environment = GatherEnvironmentFacts();
     const bool environmentGateOpen =
         optimizer::policy::EvaluateEnvironmentGate(environment);
+    // 审计门：只打开不写入的可写探测（不改变审计记录内容）。
+    const bool auditGateOpen =
+        static_cast<bool>(optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath()));
     const Capability capabilities[] = {
         {L"power.switch_power_scheme",
          hasConfig && snapshot->power.switchPowerScheme},
@@ -471,24 +476,25 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
         inputs.compileTime = false;          // 未定义该能力的编译期开关
         inputs.config = capability.configured;
         inputs.commandLine = false;          // 未实现该能力的命令行显式确认
-        inputs.permissionAndEnvironment = environmentGateOpen; // 真实只读探测结果
-        inputs.audit = false;                // 未实现“审计可用”门
-        inputs.cooldown = false;             // 未实现冷却门
+        inputs.permissionAndEnvironment = environmentGateOpen; // 真实只读探测（电池/远程/锁屏…）
+        inputs.audit = auditGateOpen;                        // 真实可写探测（只打开不写入）
+        inputs.cooldown = false;                             // 未实现冷却门
         const auto evaluation = optimizer::policy::EvaluateGates(inputs);
         std::wostringstream line;
         line << L"  " << capability.name;
-        const auto mark = [](bool value) -> const wchar_t* {
-            return value ? L"yes" : L"no";
-        };
         const std::size_t nameWidth = wcslen(capability.name);
         for (std::size_t i = nameWidth; i < 31; ++i) { // 列宽 31（保证与后列至少一个空格）
             line << L' ';
         }
+        // 列顺序：compile config cmdline perm_env audit cooldown（与表头一致）。
+        const auto mark = [](bool value) -> const wchar_t* {
+            return value ? L"yes" : L"no";
+        };
         line << mark(evaluation.gates.compileTime) << L"     "
              << mark(evaluation.gates.config) << L"      "
              << mark(evaluation.gates.commandLine) << L"      "
-             << mark(evaluation.gates.permissionAndEnvironment) << L"      "
-             << mark(evaluation.gates.audit) << L"     "
+             << mark(environmentGateOpen) << L"      "
+             << mark(auditGateOpen) << L"     "
              << mark(evaluation.gates.cooldown) << L"        "
              << (evaluation.allowed ? L"allowed" : L"blocked");
         if (!evaluation.allowed && evaluation.firstBlocking.has_value()) {
@@ -516,7 +522,8 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
                      ? (environment.remoteSession
                             ? L"remote"
                             : (environment.sessionLocked ? L"locked" : L"interactive"))
-                     : L"unknown");
+                     : L"unknown")
+             << L" audit=" << (auditGateOpen ? L"writable" : L"unavailable");
         optimizer::common::WriteConsoleLine(line.str());
     }
     return 0;

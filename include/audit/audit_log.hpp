@@ -231,6 +231,12 @@ enum class JournalPhase {
     std::string_view operationId, bool ok, std::string_view target,
     std::string_view detail) noexcept;
 
+// 审计可用性探测（门禁用，不属于 AUD-004 语义）：尝试以**追加**方式打开审计文件（仅打开、
+// **不写入任何记录**）——能打开即表示审计链路可写（目录/父目录会在需要时创建，可能产生一个空文件）。
+// 成功 = 审计可用；失败如实返回原因（不得把“写不进去”当作“可用”）。
+[[nodiscard]] common::Result<void> ProbeAuditWritable(
+    const std::filesystem::path& path) noexcept;
+
 // 有界审计日志（AUD-001）：进程内顺序保存最近 capacity 条受审计动作记录，供窗口汇总/诊断与
 // 后续“审计不可用”Safe Mode 触发源使用（真实持久化/服务形态属后续切片）。
 // 线程安全（内部互斥）。Append 在 enabled=false 时返回 Failure（审计不可用语义，不伪装成功）。

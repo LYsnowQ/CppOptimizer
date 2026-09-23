@@ -1003,6 +1003,35 @@ bool TestJournalFailureIsHonest() {
     return !failed;
 }
 
+// ---------- 审计可写探测（门禁用：只打开不写入） ----------
+
+bool TestProbeAuditWritable() {
+    using optimizer::audit::ProbeAuditWritable;
+    using optimizer::audit::ReadAuditTail;
+    // 空路径：Validation 拒绝。
+    const auto empty = ProbeAuditWritable({});
+    // 正常路径：成功且**不写入任何记录**（文件不存在则被创建/为空）。
+    const auto path = TempAuditPath(L"probe");
+    if (path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    const auto ok = ProbeAuditWritable(path);
+    const auto tail = ReadAuditTail(path, 10);
+    const bool noRecords = tail && tail.Value().totalLines == 0;
+    // 目录当文件：如实失败（不得把“写不进去”当作可用）。
+    std::filesystem::remove(path, ec);
+    if (!std::filesystem::create_directory(path, ec) || ec) {
+        return false;
+    }
+    const auto directory = ProbeAuditWritable(path);
+    std::filesystem::remove(path, ec);
+    return !empty &&
+           empty.ErrorValue().domain == optimizer::common::ErrorDomain::Validation &&
+           ok && noRecords && !directory;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -1061,6 +1090,7 @@ int wmain() {
         &TestFoldAuditSummaryFailuresAreReported);
     run(L"journal phases and fields", &TestJournalPhasesAndFields);
     run(L"journal failure is honest", &TestJournalFailureIsHonest);
+    run(L"probe audit writable", &TestProbeAuditWritable);
     run(L"analyze audit summary lines", &TestAnalyzeAuditSummaryLines);
     run(L"compact audit file noop below threshold",
         &TestCompactAuditFileNoopBelowThreshold);

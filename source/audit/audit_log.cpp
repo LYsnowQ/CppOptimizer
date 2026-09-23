@@ -354,6 +354,32 @@ common::Result<void> AppendJournalLine(const std::filesystem::path& path,
     return common::Result<void>::Success();
 }
 
+common::Result<void> ProbeAuditWritable(
+    const std::filesystem::path& path) noexcept {
+    if (path.empty()) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "ProbeAuditWritable", L"路径不能为空"));
+    }
+    std::error_code ec;
+    const auto parent = path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            return common::Result<void>::Failure(common::Error::FromWin32(
+                static_cast<std::uint32_t>(ec.value()),
+                "create_directories(audit probe)"));
+        }
+    }
+    // 只打开不写入：能打开即表示后续 AppendAuditLine 可用（写不写内容由调用方决定）。
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    if (!out) {
+        return common::Result<void>::Failure(common::Error::FromWin32(
+            static_cast<std::uint32_t>(::GetLastError()),
+            "open audit log for probe"));
+    }
+    return common::Result<void>::Success();
+}
+
 common::Result<void> AppendAuditLine(const std::filesystem::path& path,
                                      const AuditRecord& record) noexcept {
     if (path.empty()) {
