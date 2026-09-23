@@ -72,12 +72,17 @@ struct CooldownLedger {
     std::map<std::string, std::int64_t, std::less<>> lastRunUnixSeconds;
 };
 
+// 内存清理能力的 ID（`--gates` 与 `--memory-clean` 的真实执行路径共用同一常量，
+// 避免两处硬编码漂移导致“门禁显示放行、执行却按另一个 key 判定”）。
+inline constexpr std::string_view kMemoryCleanCapabilityId = "memory.clean";
+
 // 读取台账：文件不存在 = 无可记录（Success + 空台账，不是错误）；内容信封不符亦按空台账处理；
 // 读取 IO 失败如实返回 Failure。
 [[nodiscard]] common::Result<CooldownLedger> ReadCooldownLedger(
     const std::filesystem::path& path) noexcept;
 
-// 写入台账（重写；父目录自建；空路径拒绝；失败如实返回，不伪装已持久化）。
+// 写入台账（重写）：**临时文件 + 原子替换**（`MoveFileExW`），失败不破坏原文件
+// （父目录自建；空路径拒绝；失败如实返回，不伪装已持久化）。
 [[nodiscard]] common::Result<void> WriteCooldownLedger(
     const std::filesystem::path& path, const CooldownLedger& ledger) noexcept;
 
@@ -86,6 +91,20 @@ struct CooldownLedger {
                                         std::string_view capabilityId,
                                         std::int64_t nowUnixSeconds,
                                         std::chrono::seconds cooldown) noexcept;
+
+// 把一次执行并入台账（**纯函数**）：写入该能力的最新执行时刻；`capabilityId` 为空 -> 台账**不变**。
+// **时钟回拨保护**：若台账已有**更晚**的时刻，则保留更晚者（不得因回拨把冷却窗口缩短或挪到过去）。
+[[nodiscard]] CooldownLedger WithCooldownRun(const CooldownLedger& ledger,
+                                             std::string_view capabilityId,
+                                             std::int64_t nowUnixSeconds) noexcept;
+
+// 记录一次**成功**执行（读 -> 改 -> 原子重写）。契约：
+// - **只在动作成功后调用**（失败不得写：把“没做成”写成冷却会把后续重试错误地拦住）；
+// - `capabilityId` 为空或路径为空 -> Validation 且**不触碰任何文件**；
+// - 读取失败如实返回 Failure（**不得**用空台账覆盖已有记录）；写入失败如实返回。
+[[nodiscard]] common::Result<void> RecordCooldownRun(
+    const std::filesystem::path& path, std::string_view capabilityId,
+    std::int64_t nowUnixSeconds) noexcept;
 
 // 权限与环境门的事实输入（全部来自**只读探测**）。`factsKnown == false` 表示探测失败——
 // 未知一律不得视为安全。

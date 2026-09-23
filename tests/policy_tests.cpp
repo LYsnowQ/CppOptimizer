@@ -582,6 +582,64 @@ bool TestCooldownGateAndLedger() {
            !emptyPath && compiledOff;
 }
 
+bool TestWithCooldownRunAndRecord() {
+    using optimizer::policy::CooldownLedger;
+    using optimizer::policy::EvaluateCooldownGate;
+    using optimizer::policy::ReadCooldownLedger;
+    using optimizer::policy::RecordCooldownRun;
+    using optimizer::policy::WithCooldownRun;
+    const std::chrono::seconds cooldown{15 * 60};
+    const std::int64_t now = 1'700'000'000;
+    // 纯函数：写入最新时刻。
+    CooldownLedger empty;
+    const auto recorded = WithCooldownRun(empty, optimizer::policy::kMemoryCleanCapabilityId, now);
+    const bool wrote =
+        recorded.lastRunUnixSeconds.size() == 1 &&
+        recorded.lastRunUnixSeconds.at("memory.clean") == now;
+    // 纯函数：时钟回拨时保留更晚者（不得缩短冷却窗口）。
+    const auto rolledBack =
+        WithCooldownRun(recorded, optimizer::policy::kMemoryCleanCapabilityId, now - 500);
+    const bool keptLater = rolledBack.lastRunUnixSeconds.at("memory.clean") == now;
+    // 纯函数：空能力 ID / 非正时刻 -> 台账不变。
+    const auto emptyId = WithCooldownRun(recorded, "", now);
+    const auto zeroTime = WithCooldownRun(recorded, "power.scheme", 0);
+    const bool unchanged = emptyId.lastRunUnixSeconds.size() == 1 &&
+                           zeroTime.lastRunUnixSeconds.size() == 1;
+    // 文件级：读 -> 改 -> 写往返；写入后冷却门对该能力关闭、对其它能力仍开。
+    std::error_code ec;
+    const auto path = std::filesystem::temp_directory_path(ec) /
+                      (std::wstring(L"cpo_cooldown_run_") +
+                       std::to_wstring(::GetCurrentProcessId()) + L".txt");
+    if (ec) {
+        return false;
+    }
+    std::filesystem::remove(path, ec);
+    const auto first = RecordCooldownRun(path, "memory.clean", now);
+    const auto second = RecordCooldownRun(path, "power.scheme", now - 10);
+    const auto read = ReadCooldownLedger(path);
+    const bool roundTrip = first && second && read &&
+                           read.Value().lastRunUnixSeconds.size() == 2 &&
+                           read.Value().lastRunUnixSeconds.at("memory.clean") == now;
+    const bool gateClosed =
+        read && !EvaluateCooldownGate(read.Value(), "memory.clean", now + 60, cooldown);
+    const bool gateOpen =
+        read && EvaluateCooldownGate(read.Value(), "memory.clean", now + 900, cooldown);
+    // 原子替换：不留下 .tmp 残留；空路径/空能力 ID -> Validation 且不创建文件。
+    std::filesystem::path tempPath = path;
+    tempPath += L".tmp";
+    const bool noTempLeft = !std::filesystem::exists(tempPath, ec);
+    const auto emptyPath = RecordCooldownRun({}, "memory.clean", now);
+    const auto emptyCapability = RecordCooldownRun(path, "", now);
+    const bool refused = !emptyPath && !emptyCapability &&
+                         emptyPath.ErrorValue().domain ==
+                             optimizer::common::ErrorDomain::Validation &&
+                         emptyCapability.ErrorValue().domain ==
+                             optimizer::common::ErrorDomain::Validation;
+    std::filesystem::remove(path, ec);
+    return wrote && keptLater && unchanged && roundTrip && gateClosed && gateOpen &&
+           noTempLeft && refused;
+}
+
 bool TestFormatGatesJson() {
     using optimizer::policy::FormatGatesJson;
     using optimizer::policy::GatesReport;
@@ -680,6 +738,7 @@ int wmain() {
         &TestEvaluateGatesFirstBlockingOrder);
     run(L"evaluate environment gate", &TestEvaluateEnvironmentGate);
     run(L"cooldown gate and ledger", &TestCooldownGateAndLedger);
+    run(L"cooldown run recording", &TestWithCooldownRunAndRecord);
     run(L"format gates json", &TestFormatGatesJson);
     return failed == 0 ? 0 : 1;
 }

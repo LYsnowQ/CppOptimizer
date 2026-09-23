@@ -151,23 +151,77 @@ common::Result<void> WriteCooldownLedger(
                 "create_directories(cooldown ledger)"));
         }
     }
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        return common::Result<void>::Failure(common::Error::FromWin32(
-            static_cast<std::uint32_t>(::GetLastError()),
-            "open cooldown ledger for write"));
+    // ”临时文件 + 原子替换“：任何一步失败都不破坏已有台账（一个写坏的台账会让冷却门
+    // 对全部能力放行或永久拦住，不能拿它冒险）。
+    std::filesystem::path tempPath = path;
+    tempPath += L".tmp";
+    {
+        std::ofstream out(tempPath, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return common::Result<void>::Failure(common::Error::FromWin32(
+                static_cast<std::uint32_t>(::GetLastError()),
+                "open cooldown ledger temp file for write"));
+        }
+        out << kCooldownEnvelope << '\n';
+        for (const auto& entry : ledger.lastRunUnixSeconds) {
+            out << entry.first << ' ' << entry.second << '\n';
+        }
+        out.flush();
+        if (!out) {
+            out.close();
+            std::error_code removeEc;
+            std::filesystem::remove(tempPath, removeEc);
+            return common::Result<void>::Failure(common::Error::FromWin32(
+                static_cast<std::uint32_t>(::GetLastError()),
+                "flush cooldown ledger temp file"));
+        }
+        out.close();
     }
-    out << kCooldownEnvelope << '\n';
-    for (const auto& entry : ledger.lastRunUnixSeconds) {
-        out << entry.first << ' ' << entry.second << '\n';
-    }
-    out.flush();
-    if (!out) {
-        return common::Result<void>::Failure(common::Error::FromWin32(
-            static_cast<std::uint32_t>(::GetLastError()),
-            "flush cooldown ledger"));
+    if (!::MoveFileExW(tempPath.c_str(), path.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const auto code = static_cast<std::uint32_t>(::GetLastError());
+        std::error_code removeEc;
+        std::filesystem::remove(tempPath, removeEc); // 失败不留下半成品临时文件
+        return common::Result<void>::Failure(
+            common::Error::FromWin32(code, "MoveFileExW(cooldown ledger)"));
     }
     return common::Result<void>::Success();
+}
+
+CooldownLedger WithCooldownRun(const CooldownLedger& ledger,
+                               std::string_view capabilityId,
+                               std::int64_t nowUnixSeconds) noexcept {
+    CooldownLedger updated = ledger;
+    if (capabilityId.empty() || nowUnixSeconds <= 0) {
+        return updated; // 无效输入：台账不变（不写入误导性时刻）
+    }
+    const auto found = updated.lastRunUnixSeconds.find(capabilityId);
+    if (found != updated.lastRunUnixSeconds.end() &&
+        found->second > nowUnixSeconds) {
+        return updated; // 时钟回拨：保留更晚的记录（不得缩短冷却窗口）
+    }
+    updated.lastRunUnixSeconds[std::string(capabilityId)] = nowUnixSeconds;
+    return updated;
+}
+
+common::Result<void> RecordCooldownRun(const std::filesystem::path& path,
+                                       std::string_view capabilityId,
+                                       std::int64_t nowUnixSeconds) noexcept {
+    if (path.empty()) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "RecordCooldownRun", L"路径不能为空"));
+    }
+    if (capabilityId.empty()) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "RecordCooldownRun", L"能力 ID 不能为空"));
+    }
+    const auto ledger = ReadCooldownLedger(path);
+    if (!ledger) {
+        // 读失败不得当作“空台账”覆盖：否则一次读故障会清掉全部冷却记录。
+        return common::Result<void>::Failure(ledger.ErrorValue());
+    }
+    return WriteCooldownLedger(
+        path, WithCooldownRun(ledger.Value(), capabilityId, nowUnixSeconds));
 }
 
 std::string FormatGatesJson(const GatesReport& report) {
