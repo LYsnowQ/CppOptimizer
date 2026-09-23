@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <vector>
 
 namespace {
 
@@ -168,6 +169,63 @@ bool TestRefusingCleanBackendIsHonest() {
                optimizer::common::ErrorDomain::Unsupported;
 }
 
+bool TestCleanPlanOrchestration() {
+    using optimizer::config::CleanLevel;
+    using optimizer::memory::CleanBackend;
+    using optimizer::memory::CleanKind;
+    using optimizer::memory::ExecuteMemoryCleanPlan;
+    using optimizer::memory::PlanMemoryClean;
+    class FakeCleanBackend final : public CleanBackend {
+    public:
+        std::vector<CleanKind> calls;
+        bool failFirst = false;
+        [[nodiscard]] optimizer::common::Result<void> Execute(
+            CleanKind kind) override {
+            calls.push_back(kind);
+            if (failFirst) {
+                return optimizer::common::Result<void>::Failure(
+                    optimizer::common::Error::FromWin32(5u, "FakeCleanBackend"));
+            }
+            return optimizer::common::Result<void>::Success();
+        }
+    };
+    // ① 计划未获许可：不调用后端（“没做”与“做了但失败”必须可区分）。
+    FakeCleanBackend untouched;
+    const auto blocked = ExecuteMemoryCleanPlan(
+        PlanMemoryClean(CleanLevel::Light, CleanLevel::Light, false), untouched);
+    const bool noCalls = !blocked && untouched.calls.empty();
+    // ② 许可 + 后端成功：全部步骤执行且成功。
+    FakeCleanBackend okBackend;
+    const auto executed = ExecuteMemoryCleanPlan(
+        PlanMemoryClean(CleanLevel::Light, CleanLevel::Light, true), okBackend);
+    const bool okReport = executed && executed.Value().ok &&
+                          executed.Value().executed == 1 &&
+                          executed.Value().succeeded == 1 &&
+                          !executed.Value().hasFailedStep &&
+                          okBackend.calls.size() == 1 &&
+                          okBackend.calls[0] == CleanKind::WorkingSetTrim;
+    // ③ 许可 + 第一步失败：失败即停，报告如实携带失败步骤与部分结果。
+    FakeCleanBackend failing;
+    failing.failFirst = true;
+    const auto partial = ExecuteMemoryCleanPlan(
+        PlanMemoryClean(CleanLevel::Light, CleanLevel::Light, true), failing);
+    const bool partialReport =
+        partial && !partial.Value().ok && partial.Value().hasFailedStep &&
+        partial.Value().failedStep == CleanKind::WorkingSetTrim &&
+        partial.Value().executed == 1 && partial.Value().succeeded == 0 &&
+        failing.calls.size() == 1;
+    // ④ 许可但零步骤（防御）：Validation 拒绍且不调用后端。
+    optimizer::memory::MemoryCleanPlan emptyPlan;
+    emptyPlan.allowed = true;
+    FakeCleanBackend noSteps;
+    const auto empty = ExecuteMemoryCleanPlan(emptyPlan, noSteps);
+    const bool emptyRejected =
+        !empty &&
+        empty.ErrorValue().domain == optimizer::common::ErrorDomain::Validation &&
+        noSteps.calls.empty();
+    return noCalls && okReport && partialReport && emptyRejected;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -195,5 +253,6 @@ int wmain() {
     run(L"plan memory clean gates blocked", &TestPlanMemoryCleanGatesBlocked);
     run(L"plan memory clean above limit", &TestPlanMemoryCleanAboveLimit);
     run(L"refusing clean backend is honest", &TestRefusingCleanBackendIsHonest);
+    run(L"clean plan orchestration", &TestCleanPlanOrchestration);
     return failed == 0 ? 0 : 1;
 }

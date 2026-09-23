@@ -44,4 +44,20 @@ public:
 // 真实后端占位：**永远如实拒绝**（未实现真正的系统调用；不伪装成功）。
 [[nodiscard]] CleanBackend& RefusingCleanBackend() noexcept;
 
+// 执行报告：只有在“确实尝试过至少一步”时才会返回（参 ExecuteMemoryCleanPlan 契约）。
+struct CleanExecutionReport {
+    std::size_t executed = 0;      // 已实际调用后端的步数
+    std::size_t succeeded = 0;     // 其中成功的步数
+    bool ok = false;               // 全部步骤均成功
+    bool hasFailedStep = false;    // 是否在某一步失败（失败即停止）
+    CleanKind failedStep{};        // 失败的步骤（hasFailedStep 为真时有效）
+    std::wstring failureDetail;    // 后端失败信息（原样转写）
+};
+
+// 执行计划（编排，可注入后端）：
+// - **计划未获许可或无可执行步骤 -> Failure 且不调用后端**（区分“没做”与“做了但失败”）；
+// - 否则逐步调用后端，**失败即停**（不继续后续步骤），并返回带部分结果的报告。
+[[nodiscard]] common::Result<CleanExecutionReport> ExecuteMemoryCleanPlan(
+    const MemoryCleanPlan& plan, CleanBackend& backend) noexcept;
+
 } // namespace optimizer::memory

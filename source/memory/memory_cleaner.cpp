@@ -53,4 +53,35 @@ CleanBackend& RefusingCleanBackend() noexcept {
     return backend;
 }
 
+common::Result<CleanExecutionReport> ExecuteMemoryCleanPlan(
+    const MemoryCleanPlan& plan, CleanBackend& backend) noexcept {
+    if (!plan.allowed) {
+        // 未获许可：一步也不做（不是“执行失败”，而是“压根没开始”）。
+        return common::Result<CleanExecutionReport>::Failure(
+            common::Error::Unsupported(
+                "ExecuteMemoryCleanPlan",
+                L"计划未获门禁许可：不执行任何步骤"));
+    }
+    if (plan.steps.empty()) {
+        return common::Result<CleanExecutionReport>::Failure(
+            common::Error::Validation("ExecuteMemoryCleanPlan",
+                                      L"计划没有可执行步骤"));
+    }
+    CleanExecutionReport report;
+    for (const auto step : plan.steps) {
+        ++report.executed;
+        const auto result = backend.Execute(step);
+        if (!result) {
+            report.hasFailedStep = true;
+            report.failedStep = step;
+            report.failureDetail = result.ErrorValue().message;
+            return common::Result<CleanExecutionReport>::Success(
+                std::move(report)); // 失败即停，但如实携带部分结果
+        }
+        ++report.succeeded;
+    }
+    report.ok = true;
+    return common::Result<CleanExecutionReport>::Success(std::move(report));
+}
+
 } // namespace optimizer::memory
