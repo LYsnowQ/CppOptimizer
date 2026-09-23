@@ -384,6 +384,18 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
     inputs.audit = static_cast<bool>(auditProbe);
     // 冷却：本切片从不执行清理（无“上次执行”记录），故该门恒开；真实执行接入后由台账驱动。
     inputs.cooldown = false;
+    {
+        // 冷却门：读真实台账（每用户文件）；无执行记录 -> 放行。
+        const auto ledger =
+            optimizer::policy::ReadCooldownLedger(DefaultCooldownLedgerPath());
+        inputs.cooldown =
+            ledger &&
+            optimizer::policy::EvaluateCooldownGate(
+                ledger.Value(), "memory.clean",
+                static_cast<std::int64_t>(std::time(nullptr)),
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    optimizer::policy::kDefaultCooldown));
+    }
     const auto gates = optimizer::policy::EvaluateGates(inputs);
     const auto plan = optimizer::memory::PlanMemoryClean(configuredMax, configuredMax,
                                                          gates.allowed);
