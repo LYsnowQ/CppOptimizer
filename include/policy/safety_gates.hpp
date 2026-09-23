@@ -1,6 +1,14 @@
 ﻿#pragma once
 
+#include "common/error.hpp"
+
+#include <filesystem>
+#include <chrono>
+#include <cstdint>
+#include <map>
 #include <optional>
+#include <string>
+#include <string_view>
 
 namespace optimizer::policy {
 
@@ -38,6 +46,45 @@ struct GateEvaluation {
 };
 
 [[nodiscard]] GateEvaluation EvaluateGates(const GateInputs& inputs) noexcept;
+
+// ---------- 编译期开关（compile 门） ----------
+// 原则（2026-09-20 定）：**危险能力默认关**；只有构建时显式定义
+// `OPTIMIZER_ENABLE_<能力>=1` 才视为“编译期已开启”。核心功能所需的能力不以配置形式出现，
+// 而作为软件的**运行需求**（不在本表内）。
+#ifndef OPTIMIZER_ENABLE_MEMORY_CLEAN
+#define OPTIMIZER_ENABLE_MEMORY_CLEAN 0
+#endif
+
+// 各能力的编译期开关状态（默认恒为 false，与宏默认 0 一致）。
+[[nodiscard]] constexpr bool MemoryCleanCompiledIn() noexcept {
+    return OPTIMIZER_ENABLE_MEMORY_CLEAN != 0;
+}
+
+// ---------- 冷却门（cooldown） ----------
+// 状态存**每用户文件**（默认 `%LOCALAPPDATA%\CppOptimizer\gate-cooldowns.txt`），
+// 默认冷却 **15 分钟**（2026-09-20 定）；行格式：信封行 + `<capabilityId> <unix 秒>`。
+inline constexpr std::string_view kCooldownEnvelope = "CppOptimizerCooldowns/1";
+inline constexpr std::chrono::minutes kDefaultCooldown{15};
+
+// 冷却台账：能力 ID -> 上次执行时刻（Unix 秒；0 = 无记录）。
+struct CooldownLedger {
+    std::map<std::string, std::int64_t, std::less<>> lastRunUnixSeconds;
+};
+
+// 读取台账：文件不存在 = 无可记录（Success + 空台账，不是错误）；内容信封不符亦按空台账处理；
+// 读取 IO 失败如实返回 Failure。
+[[nodiscard]] common::Result<CooldownLedger> ReadCooldownLedger(
+    const std::filesystem::path& path) noexcept;
+
+// 写入台账（重写；父目录自建；空路径拒绝；失败如实返回，不伪装已持久化）。
+[[nodiscard]] common::Result<void> WriteCooldownLedger(
+    const std::filesystem::path& path, const CooldownLedger& ledger) noexcept;
+
+// 冷却门判定（**纯函数**）：无记录或已超出冷却窗口 -> true（可通过）；仍在窗口内 -> false。
+[[nodiscard]] bool EvaluateCooldownGate(const CooldownLedger& ledger,
+                                        std::string_view capabilityId,
+                                        std::int64_t nowUnixSeconds,
+                                        std::chrono::seconds cooldown) noexcept;
 
 // 权限与环境门的事实输入（全部来自**只读探测**）。`factsKnown == false` 表示探测失败——
 // 未知一律不得视为安全。

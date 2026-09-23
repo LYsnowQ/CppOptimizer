@@ -1,7 +1,16 @@
 ﻿#include "policy/policy_engine.hpp"
 #include "policy/safety_gates.hpp"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <chrono>
+#include <filesystem>
 #include <cwchar>
 #include <iostream>
 
@@ -523,6 +532,56 @@ bool TestEvaluateEnvironmentGate() {
            !EvaluateEnvironmentGate(unsupported);
 }
 
+bool TestCooldownGateAndLedger() {
+    using optimizer::policy::CooldownLedger;
+    using optimizer::policy::EvaluateCooldownGate;
+    using optimizer::policy::ReadCooldownLedger;
+    using optimizer::policy::WriteCooldownLedger;
+    const std::chrono::seconds cooldown{15 * 60};
+    const std::int64_t now = 1'700'000'000;
+    // 无记录：不拦。
+    CooldownLedger empty;
+    const bool noRecord = EvaluateCooldownGate(empty, "memory.clean", now, cooldown);
+    // 窗口内：拦；恰好到边界：放行；时钟回拨：保守拦。
+    CooldownLedger recent;
+    recent.lastRunUnixSeconds["memory.clean"] = now - 60;
+    CooldownLedger boundary;
+    boundary.lastRunUnixSeconds["memory.clean"] = now - 900;
+    CooldownLedger future;
+    future.lastRunUnixSeconds["memory.clean"] = now + 10;
+    const bool blocked = !EvaluateCooldownGate(recent, "memory.clean", now, cooldown);
+    const bool boundaryOpen = EvaluateCooldownGate(boundary, "memory.clean", now, cooldown);
+    const bool rollbackBlocked = !EvaluateCooldownGate(future, "memory.clean", now, cooldown);
+    // 其它能力互不影响。
+    const bool otherOpen = EvaluateCooldownGate(recent, "power.scheme", now, cooldown);
+    // 台账往返（每用户文件）。
+    std::error_code ec;
+    const auto path = std::filesystem::temp_directory_path(ec) /
+                      (std::wstring(L"cpo_cooldown_") +
+                       std::to_wstring(::GetCurrentProcessId()) + L".txt");
+    if (ec) {
+        return false;
+    }
+    std::filesystem::remove(path, ec);
+    CooldownLedger toWrite;
+    toWrite.lastRunUnixSeconds["memory.clean"] = now - 30;
+    const auto written = WriteCooldownLedger(path, toWrite);
+    const bool writeOk = static_cast<bool>(written);
+    const auto read = ReadCooldownLedger(path);
+    const bool roundTrip = writeOk && read &&
+                           read.Value().lastRunUnixSeconds.size() == 1 &&
+                           read.Value().lastRunUnixSeconds.at("memory.clean") == now - 30;
+    // 缺失文件 = 空台账（不是错误）；空路径 = Validation。
+    std::filesystem::remove(path, ec);
+    const auto missing = ReadCooldownLedger(path);
+    const auto emptyPath = ReadCooldownLedger({});
+    // 编译期开关：默认关（与宏默认 0 一致）。
+    const bool compiledOff = !optimizer::policy::MemoryCleanCompiledIn();
+    return noRecord && blocked && boundaryOpen && rollbackBlocked && otherOpen &&
+           roundTrip && missing && missing.Value().lastRunUnixSeconds.empty() &&
+           !emptyPath && compiledOff;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -576,5 +635,6 @@ int wmain() {
     run(L"evaluate gates first blocking order",
         &TestEvaluateGatesFirstBlockingOrder);
     run(L"evaluate environment gate", &TestEvaluateEnvironmentGate);
+    run(L"cooldown gate and ledger", &TestCooldownGateAndLedger);
     return failed == 0 ? 0 : 1;
 }

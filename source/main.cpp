@@ -56,6 +56,9 @@ namespace {
 // 每用户数据目录下的审计文件路径（定义见本文件后部）。
 std::filesystem::path DefaultAuditLogPath() noexcept;
 
+// 冷却台账路径（每用户文件；定义见本文件后部）。
+std::filesystem::path DefaultCooldownLedgerPath() noexcept;
+
 // 动作审计（定义见本文件后部）：供本文件前部的各命令实现调用。
 void AuditAction(const char* operationId, optimizer::audit::RiskLevel risk,
                  const std::string& target, bool ok,
@@ -378,6 +381,7 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
     inputs.permissionAndEnvironment =
         optimizer::policy::EvaluateEnvironmentGate(environment);
     inputs.audit = static_cast<bool>(auditProbe);
+    // 冷却：本切片从不执行清理（无“上次执行”记录），故该门恒开；真实执行接入后由台账驱动。
     inputs.cooldown = false;
     const auto gates = optimizer::policy::EvaluateGates(inputs);
     const auto plan = optimizer::memory::PlanMemoryClean(configuredMax, configuredMax,
@@ -491,6 +495,11 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     // 审计门：只打开不写入的可写探测（不改变审计记录内容）。
     const bool auditGateOpen =
         static_cast<bool>(optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath()));
+    // 编译期开关（默认关）与冷却台账（每用户文件；默认 15 分钟）。
+    const bool compiledIn = optimizer::policy::MemoryCleanCompiledIn();
+    const auto cooldownLedger =
+        optimizer::policy::ReadCooldownLedger(DefaultCooldownLedgerPath());
+    const auto nowUnix = static_cast<std::int64_t>(std::time(nullptr));
     const Capability capabilities[] = {
         {L"power.switch_power_scheme",
          hasConfig && snapshot->power.switchPowerScheme},
@@ -503,12 +512,17 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     };
     for (const auto& capability : capabilities) {
         optimizer::policy::GateInputs inputs;
-        inputs.compileTime = false;          // 未定义该能力的编译期开关
+        inputs.compileTime = compiledIn;     // 编译期开关（默认关）
         inputs.config = capability.configured;
         inputs.commandLine = acknowledged;   // 动作特定确认（命令行显式动作）
         inputs.permissionAndEnvironment = environmentGateOpen; // 真实只读探测（电池/远程/锁屏…）
         inputs.audit = auditGateOpen;                        // 真实可写探测（只打开不写入）
-        inputs.cooldown = false;                             // 未实现冷却门
+        inputs.cooldown =
+            cooldownLedger &&
+            optimizer::policy::EvaluateCooldownGate(
+                cooldownLedger.Value(), "memory.clean", nowUnix,
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    optimizer::policy::kDefaultCooldown));                             // 未实现冷却门
         const auto evaluation = optimizer::policy::EvaluateGates(inputs);
         std::wostringstream line;
         line << L"  " << capability.name;
@@ -2701,6 +2715,11 @@ std::filesystem::path DefaultPresenceTimelinePath() noexcept {
 
 // AUD-002：审计记录持久化文件（同一每用户数据目录；仅在门禁开启且真实发生 R1 动作时创建）。
 // 动作日记路径（仅本地存储）：与审计同目录，独立文件。
+// 冷却台账路径（每用户文件，2026-09-20 口径）：与配置/审计同目录。
+std::filesystem::path DefaultCooldownLedgerPath() noexcept {
+    return DefaultHostConfigPath().parent_path() / L"gate-cooldowns.txt";
+}
+
 std::filesystem::path DefaultJournalPath() noexcept {
     return DefaultHostConfigPath().parent_path() / L"action-journal.log";
 }
