@@ -582,6 +582,50 @@ bool TestCooldownGateAndLedger() {
            !emptyPath && compiledOff;
 }
 
+bool TestFormatGatesJson() {
+    using optimizer::policy::FormatGatesJson;
+    using optimizer::policy::GatesReport;
+    using optimizer::policy::GatesReportEntry;
+    GatesReport report;
+    report.acknowledged = true;
+    report.factsKnown = true;
+    report.osSupported = true;
+    report.auditWritable = true;
+    report.capabilities.push_back(GatesReportEntry{"power.switch_power_scheme", false, "config"});
+    report.capabilities.push_back(GatesReportEntry{"memory.max_clean_level", true, ""});
+    const std::string json = FormatGatesJson(report);
+    // 结构不变量（不依赖 JSON 库）：大括号/中括号配平、无尾逗号、字段按序出现。
+    int depth = 0;
+    bool balanced = true;
+    for (const char ch : json) {
+        if (ch == '{' || ch == '[') {
+            ++depth;
+        } else if (ch == '}' || ch == ']') {
+            --depth;
+            if (depth < 0) {
+                balanced = false;
+            }
+        }
+    }
+    balanced = balanced && depth == 0;
+    const bool noTrailingComma =
+        json.find(",}") == std::string::npos && json.find(",]") == std::string::npos;
+    const bool fields = json.rfind("{\"readOnly\":true", 0) == 0 &&
+                        json.find("\"acknowledged\":true") != std::string::npos &&
+                        json.find("\"auditWritable\":true") != std::string::npos &&
+                        json.find("\"name\":\"power.switch_power_scheme\"") !=
+                            std::string::npos &&
+                        json.find("\"firstBlocking\":\"config\"") !=
+                            std::string::npos &&
+                        json.find("\"firstBlocking\":null") != std::string::npos;
+    // 空能力表：仍为合法对象且数组为 []。
+    const std::string emptyJson = FormatGatesJson(GatesReport{});
+    const bool emptyOk = emptyJson.find("\"capabilities\":[]") !=
+                         std::string::npos &&
+                         emptyJson.find("\"readOnly\":true") != std::string::npos;
+    return balanced && noTrailingComma && fields && emptyOk;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -636,5 +680,6 @@ int wmain() {
         &TestEvaluateGatesFirstBlockingOrder);
     run(L"evaluate environment gate", &TestEvaluateEnvironmentGate);
     run(L"cooldown gate and ledger", &TestCooldownGateAndLedger);
+    run(L"format gates json", &TestFormatGatesJson);
     return failed == 0 ? 0 : 1;
 }

@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace optimizer::policy {
 
@@ -100,5 +101,28 @@ struct EnvironmentFacts {
 // 权限与环境门判定（纯函数）：事实未知、OS 不支持、电池供电、远程会话、锁屏、
 // 非交互会话——任一成立即**不得通过**（保守方向）。
 [[nodiscard]] bool EvaluateEnvironmentGate(const EnvironmentFacts& facts) noexcept;
+
+// 门禁报告（供机器可读输出）：字段均为 ASCII 令牌/布尔值，序列化无需转义。
+struct GatesReportEntry {
+    std::string name;          // 能力名（固定 ASCII 令牌）
+    bool allowed = false;      // 六门全通
+    std::string firstBlocking; // 首个阻塞门名；空 = 无（allowed 为真时）
+};
+
+struct GatesReport {
+    bool readOnly = true;
+    bool acknowledged = false;
+    bool factsKnown = false;
+    bool osSupported = false;
+    bool onBattery = false;
+    bool remoteSession = false;
+    bool sessionLocked = false;
+    bool auditWritable = false;
+    std::vector<GatesReportEntry> capabilities;
+};
+
+// JSON 序列化（**纯函数**，单行输出；字段顺序固定，便于脚本与测试）。
+// 契约：输出为合法 JSON 对象（无尾逗号）；`firstBlocking` 为空时输出 `null`。
+[[nodiscard]] std::string FormatGatesJson(const GatesReport& report);
 
 } // namespace optimizer::policy

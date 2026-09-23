@@ -170,4 +170,45 @@ common::Result<void> WriteCooldownLedger(
     return common::Result<void>::Success();
 }
 
+std::string FormatGatesJson(const GatesReport& report) {
+    std::string json = "{\"readOnly\":";
+    json += report.readOnly ? "true" : "false";
+    json += ",\"acknowledged\":";
+    json += report.acknowledged ? "true" : "false";
+    json += ",\"environment\":{\"factsKnown\":";
+    json += report.factsKnown ? "true" : "false";
+    json += ",\"osSupported\":";
+    json += report.osSupported ? "true" : "false";
+    json += ",\"onBattery\":";
+    json += report.onBattery ? "true" : "false";
+    json += ",\"remoteSession\":";
+    json += report.remoteSession ? "true" : "false";
+    json += ",\"sessionLocked\":";
+    json += report.sessionLocked ? "true" : "false";
+    json += ",\"auditWritable\":";
+    json += report.auditWritable ? "true" : "false";
+    json += "},\"capabilities\":[";
+    for (std::size_t i = 0; i < report.capabilities.size(); ++i) {
+        const auto& entry = report.capabilities[i];
+        if (i > 0) {
+            json += ",";
+        }
+        json += "{\"name\":\"";
+        json += entry.name;
+        json += "\",\"allowed\":";
+        json += entry.allowed ? "true" : "false";
+        json += ",\"firstBlocking\":";
+        if (entry.firstBlocking.empty()) {
+            json += "null";
+        } else {
+            json += "\"";
+            json += entry.firstBlocking;
+            json += "\"";
+        }
+        json += "}";
+    }
+    json += "]}";
+    return json;
+}
+
 } // namespace optimizer::policy
