@@ -11,6 +11,7 @@
 #include "ipc/ipc_transport.hpp"
 #include "logger/logger.hpp"
 #include "memory/memory_tuner.hpp"
+#include "memory/memory_cleaner.hpp"
 #include "metrics/memory_metrics.hpp"
 #include "metrics/pdh_metrics.hpp"
 #include "platform/native_api.hpp"
@@ -284,6 +285,105 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText,
 
 // --gates [config.toml]：危险能力的**门禁诊断**（只读）。逐能力列出六道门的状态与首个阻塞门；
 // 不执行任何动作、不改变任何门禁状态。R2/R3 的真实动作还额外要求隔离环境（危险操作策略）。
+// --memory-clean [config.toml] [--dry-run]：内存清理能力的**计划与 dry-run**（本切片不执行任何系统调用）。
+// 门禁未全通过时如实拒绝执行；dry-run 展示“若门禁开放将要执行什么”，并写审计 + 三段日记。
+int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
+    std::optional<std::filesystem::path> configPath;
+    for (int i = 2; i < argc; ++i) {
+        const std::wstring_view arg(argv[i]);
+        if (arg == L"--dry-run") {
+            continue; // 本切片默认且仅有 dry-run（保留参数供后续切片显式化）
+        }
+        if (arg == L"--execute") {
+            ErrorLine{} << L"  --memory-clean --execute is refused: this slice ships planning"
+                           L" only (an R2 real action needs the six gates and an isolated"
+                           L" environment)\n";
+            return 2;
+        }
+        if (configPath.has_value()) {
+            ErrorLine{} << L"  unknown --memory-clean option: " << arg << L"\n";
+            return 2;
+        }
+        configPath = std::filesystem::path(argv[i]);
+    }
+    optimizer::config::CleanLevel configuredMax = optimizer::config::CleanLevel::None;
+    if (configPath.has_value()) {
+        const auto loaded = optimizer::config::LoadConfig(configPath->wstring());
+        if (!loaded) {
+            const auto& error = loaded.ErrorValue();
+            ErrorLine{} << L"  config load failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        configuredMax = loaded.Value().memory.maxCleanLevel;
+    }
+    // 门禁输入：compile/cmdline/perm_env/audit/cooldown 五门尚未实现，如实按未通过处理。
+    optimizer::policy::GateInputs inputs;
+    inputs.compileTime = false;
+    inputs.config = configuredMax != optimizer::config::CleanLevel::None;
+    inputs.commandLine = false;
+    inputs.permissionAndEnvironment = false;
+    inputs.audit = false;
+    inputs.cooldown = false;
+    const auto gates = optimizer::policy::EvaluateGates(inputs);
+    const auto plan = optimizer::memory::PlanMemoryClean(configuredMax, configuredMax,
+                                                         gates.allowed);
+    const std::string target = configPath.has_value() ? "config" : "defaults";
+    const wchar_t* levelName =
+        configuredMax == optimizer::config::CleanLevel::None ? L"none" : L"light";
+    JournalAction("memory.clean_plan", target, true,
+                  optimizer::audit::JournalPhase::Before,
+                  "intent: plan memory clean (dry-run, no system call)");
+    optimizer::common::WriteConsoleLine(
+        L"Memory clean plan (dry-run; this slice never performs a clean)");
+    {
+        std::wostringstream line;
+        line << L"  level    : " << levelName << L" (from "
+             << (configPath.has_value() ? configPath->wstring()
+                                        : std::wstring(L"built-in default"))
+             << L")";
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    {
+        std::wostringstream line;
+        line << L"  plan     : ";
+        if (plan.steps.empty()) {
+            line << L"nothing to do (level is none)";
+        } else {
+            for (std::size_t i = 0; i < plan.steps.size(); ++i) {
+                const std::string step =
+                    optimizer::memory::CleanKindToString(plan.steps[i]);
+                if (i > 0) {
+                    line << L", ";
+                }
+                line << std::wstring(step.begin(), step.end());
+            }
+        }
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    {
+        std::wostringstream line;
+        line << L"  verdict  : "
+             << (plan.allowed ? L"allowed" : L"refused (execution not performed)");
+        if (!gates.allowed && gates.firstBlocking.has_value()) {
+            const std::string gate =
+                optimizer::policy::GateIdToString(*gates.firstBlocking);
+            line << L" [first blocked gate: "
+                 << std::wstring(gate.begin(), gate.end()) << L"]";
+        }
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    optimizer::common::WriteConsoleLine(
+        L"  note     : no system call was made; --execute is refused in this slice");
+    AuditAction("memory.clean_plan", optimizer::audit::RiskLevel::R2, target, true,
+                "plan only (dry-run; no system call)",
+                plan.steps.empty()
+                    ? "no steps planned"
+                    : "working_set_trim planned, execution refused");
+    return 0;
+}
+
 int RunGatesCommand(int argc, wchar_t* argv[]) {
     std::optional<optimizer::config::ConfigSnapshot> snapshot;
     if (argc >= 3) {
@@ -4635,6 +4735,8 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --audit-summary [path] [lines]  Read back compacted summary\n"
         << L"                             totals (read-only; default: per-user summary file,\n"
         << L"                             last 20 lines, max 200)\n"
+        << L"  CppOptimizer.exe --memory-clean [config.toml] [--dry-run]  Plan a memory clean and\n"
+        << L"                             show the gates (no system call is ever made here)\n"
         << L"  CppOptimizer.exe --gates [config.toml]  Report the six safety gates per dangerous\n"
         << L"                             capability (read-only; performs nothing)\n"
         << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
@@ -4765,6 +4867,9 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argc >= 2 && argc <= 4 &&
             std::wstring_view(argv[1]) == L"--audit-summary") {
             return RunAuditSummaryCommand(argc, argv);
+        }
+        if (argc >= 2 && std::wstring_view(argv[1]) == L"--memory-clean") {
+            return RunMemoryCleanCommand(argc, argv);
         }
         if ((argc == 2 || argc == 3) &&
             std::wstring_view(argv[1]) == L"--gates") {

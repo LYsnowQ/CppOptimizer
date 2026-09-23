@@ -104,6 +104,7 @@
     <ClInclude Include="include\config\config_manager.hpp" />
     <ClInclude Include="include\logger\logger.hpp" />
     <ClInclude Include="include\memory\memory_tuner.hpp" />
+    <ClInclude Include="include\memory\memory_cleaner.hpp" />
     <ClInclude Include="include\metrics\memory_metrics.hpp" />
     <ClInclude Include="include\metrics\pdh_metrics.hpp" />
     <ClInclude Include="include\platform\native_api.hpp" />
@@ -136,6 +137,7 @@
     <ClCompile Include="source\logger\logger.cpp" />
     <ClCompile Include="source\main.cpp" />
     <ClCompile Include="source\memory\memory_tuner.cpp" />
+    <ClCompile Include="source\memory\memory_cleaner.cpp" />
     <ClCompile Include="source\metrics\memory_metrics.cpp" />
     <ClCompile Include="source\metrics\pdh_metrics.cpp" />
     <ClCompile Include="source\platform\native_api.cpp" />

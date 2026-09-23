@@ -1,4 +1,5 @@
 ﻿#include "memory/memory_tuner.hpp"
+#include "memory/memory_cleaner.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -132,6 +133,41 @@ bool TestQueryMemoryStatusReturnsValidSnapshot() {
 
 } // namespace
 
+// ---------- 内存清理计划（本切片：只计划，不执行） ----------
+
+bool TestPlanMemoryCleanNoneLevel() {
+    using optimizer::config::CleanLevel;
+    using optimizer::memory::PlanMemoryClean;
+    const auto plan = PlanMemoryClean(CleanLevel::None, CleanLevel::Light, true);
+    return !plan.allowed && plan.levelWithinLimit && plan.steps.empty() &&
+           plan.gatesAllowed;
+}
+
+bool TestPlanMemoryCleanGatesBlocked() {
+    using optimizer::config::CleanLevel;
+    using optimizer::memory::CleanKind;
+    using optimizer::memory::PlanMemoryClean;
+    const auto plan = PlanMemoryClean(CleanLevel::Light, CleanLevel::Light, false);
+    return !plan.allowed && plan.levelWithinLimit && !plan.gatesAllowed &&
+           plan.steps.size() == 1 && plan.steps[0] == CleanKind::WorkingSetTrim;
+}
+
+bool TestPlanMemoryCleanAboveLimit() {
+    using optimizer::config::CleanLevel;
+    using optimizer::memory::PlanMemoryClean;
+    const auto plan = PlanMemoryClean(CleanLevel::Light, CleanLevel::None, true);
+    return !plan.allowed && !plan.levelWithinLimit && plan.steps.empty();
+}
+
+bool TestRefusingCleanBackendIsHonest() {
+    using optimizer::memory::CleanKind;
+    using optimizer::memory::RefusingCleanBackend;
+    const auto result = RefusingCleanBackend().Execute(CleanKind::WorkingSetTrim);
+    return !result &&
+           result.ErrorValue().domain ==
+               optimizer::common::ErrorDomain::Unsupported;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -155,5 +191,9 @@ int wmain() {
     run(L"Snapshot future sample is not stale", &TestIsSnapshotFreshFutureSampleIsNotStale);
     run(L"Snapshot zero maxAge keeps inclusive boundary", &TestIsSnapshotFreshZeroMaxAgeBoundary);
     run(L"GlobalMemoryStatusEx returns a valid snapshot", &TestQueryMemoryStatusReturnsValidSnapshot);
+    run(L"plan memory clean none level", &TestPlanMemoryCleanNoneLevel);
+    run(L"plan memory clean gates blocked", &TestPlanMemoryCleanGatesBlocked);
+    run(L"plan memory clean above limit", &TestPlanMemoryCleanAboveLimit);
+    run(L"refusing clean backend is honest", &TestRefusingCleanBackendIsHonest);
     return failed == 0 ? 0 : 1;
 }
