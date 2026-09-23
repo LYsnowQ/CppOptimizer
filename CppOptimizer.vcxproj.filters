@@ -214,5 +214,29 @@
     <None Include="tests\process_tests.cpp" />
     <None Include="tests\service_tests.cpp" />
     <None Include="tests\ipc_tests.cpp" />
+    <ClInclude Include="include\config\config_manager.hpp">
+      <Filter>include\config</Filter>
+    </ClInclude>
+    <ClInclude Include="include\metrics\pdh_metrics.hpp">
+      <Filter>include\metrics</Filter>
+    </ClInclude>
+    <ClInclude Include="include\service\recovery_marker.hpp">
+      <Filter>include\service</Filter>
+    </ClInclude>
+    <ClCompile Include="source\ipc\ipc_protocol.cpp">
+      <Filter>source\ipc</Filter>
+    </ClCompile>
+    <ClCompile Include="source\ipc\ipc_transport.cpp">
+      <Filter>source\ipc</Filter>
+    </ClCompile>
+    <ClCompile Include="source\ipc\ipc_session.cpp">
+      <Filter>source\ipc</Filter>
+    </ClCompile>
+    <ClCompile Include="source\ipc\ipc_facts.cpp">
+      <Filter>source\ipc</Filter>
+    </ClCompile>
+    <ClCompile Include="source\ipc\ipc_credentials.cpp">
+      <Filter>source\ipc</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

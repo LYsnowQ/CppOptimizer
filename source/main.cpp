@@ -352,6 +352,92 @@ struct MemoryCleanGateContext {
     bool auditWritable = false;
 };
 
+// 内存清理的**配置依赖**（逐项合取：任一未开启即该步骤的 config 门不通过；不得只挑一项看）。
+// 字段含义：`scheduled_clean_enabled` = 清理能力总开关；`max_clean_level` = 允许的最深档；
+// `allow_native_write` = 是否允许 Native 写（R3 的两个步骤都依赖它）。
+struct MemoryCleanConfigGate {
+    bool cleanEnabled = false;
+    bool nativeWrite = false;
+    optimizer::config::CleanLevel maxLevel = optimizer::config::CleanLevel::None;
+    // 叠加门禁（与 PolicyExecutor 同源）：mode 与 layers 都要允许，避免单一开关被当成“已获授权”。
+    optimizer::config::RunMode mode = optimizer::config::RunMode::Observe;
+    optimizer::config::LayerConfig layers{};
+    bool hasConfig = false; // 未给配置 -> 叠加门禁不通过（保守默认）
+};
+
+bool ConfigAllowsCleanStep(const MemoryCleanConfigGate& config,
+                           optimizer::memory::CleanKind kind) noexcept {
+    if (!config.hasConfig) {
+        return false; // 保守默认：没有配置就没有授权
+    }
+    // 风险层叠加：工作集修剪属 R1（本地可逆），另两步属 R3（系统级）——各自的模式/层要求不同。
+    const bool overlay =
+        kind == optimizer::memory::CleanKind::WorkingSetTrim
+            ? optimizer::config::AllowsLocalReversibleActions(config.mode, config.layers)
+            : optimizer::config::AllowsSystemLevelActions(config.mode, config.layers);
+    if (!overlay) {
+        return false;
+    }
+    switch (kind) {
+        case optimizer::memory::CleanKind::WorkingSetTrim:
+            return config.cleanEnabled &&
+                   config.maxLevel >= optimizer::config::CleanLevel::Light;
+        case optimizer::memory::CleanKind::StandbyListPurge:
+            return config.cleanEnabled &&
+                   config.maxLevel >= optimizer::config::CleanLevel::Medium &&
+                   config.nativeWrite;
+        case optimizer::memory::CleanKind::SystemFileCacheTrim:
+            return config.cleanEnabled &&
+                   config.maxLevel == optimizer::config::CleanLevel::Deep &&
+                   config.nativeWrite;
+    }
+    return false;
+}
+
+// 缺失项的可读描述（用于拒绝时的 hint：必须说清**缺哪一项**，否则用户只能猜）。
+std::wstring DescribeCleanConfigGaps(const MemoryCleanConfigGate& config,
+                                     optimizer::memory::CleanKind kind) {
+    std::wstring gaps;
+    const auto add = [&gaps](const wchar_t* text) {
+        if (!gaps.empty()) {
+            gaps += L", ";
+        }
+        gaps += text;
+    };
+    if (!config.cleanEnabled) {
+        add(L"[memory].scheduled_clean_enabled = false");
+    }
+    const bool levelOk =
+        kind == optimizer::memory::CleanKind::WorkingSetTrim
+            ? config.maxLevel >= optimizer::config::CleanLevel::Light
+            : (kind == optimizer::memory::CleanKind::StandbyListPurge
+                   ? config.maxLevel >= optimizer::config::CleanLevel::Medium
+                   : config.maxLevel == optimizer::config::CleanLevel::Deep);
+    if (!levelOk) {
+        add(L"[memory].max_clean_level too low");
+    }
+    if (kind != optimizer::memory::CleanKind::WorkingSetTrim &&
+        !config.nativeWrite) {
+        add(L"[memory].allow_native_write = false");
+    }
+    if (!config.hasConfig) {
+        add(L"no config file given");
+    } else {
+        const bool overlay =
+            kind == optimizer::memory::CleanKind::WorkingSetTrim
+                ? optimizer::config::AllowsLocalReversibleActions(config.mode,
+                                                                  config.layers)
+                : optimizer::config::AllowsSystemLevelActions(config.mode,
+                                                              config.layers);
+        if (!overlay) {
+            add(kind == optimizer::memory::CleanKind::WorkingSetTrim
+                    ? L"[application].mode / [layers].maintenance|emergency"
+                    : L"[application].mode=experimental and [layers].emergency");
+        }
+    }
+    return gaps;
+}
+
 MemoryCleanGateContext GatherMemoryCleanGates(bool acknowledged,
                                               bool configEnabled,
                                               bool compiledIn = true,
@@ -422,11 +508,11 @@ std::wstring WidenAscii(std::string_view text) {
 // - 全部就绪才走既有编排（单步/逐步、失败即停、部分结果如实），成功才写冷却（逐步骤键）。
 int RunMemoryCleanExecuteCommand(
     const std::optional<std::filesystem::path>& configPath,
-    optimizer::config::CleanLevel configuredMax, bool acknowledged,
+    const MemoryCleanConfigGate& config, bool acknowledged,
     bool isolatedAcknowledged) {
     const std::string target = configPath.has_value() ? "config" : "defaults";
-    const auto plan =
-        optimizer::memory::PlanMemoryClean(configuredMax, configuredMax, true);
+    const auto plan = optimizer::memory::PlanMemoryClean(
+        config.maxLevel, config.maxLevel, true);
     if (plan.steps.empty()) {
         ErrorLine{} << L"  --memory-clean --execute refused: nothing to do"
                        L" (level is none; no system call was made)\n";
@@ -440,12 +526,15 @@ int RunMemoryCleanExecuteCommand(
     bool cmdlineMissing = false;
     bool isolatedMissing = false;
     bool cooldownBlocked = false;
+    bool configMissing = false;
+    std::wstring configGaps;
     for (const auto step : plan.steps) {
         const bool needsIsolated = CleanStepNeedsIsolatedEnvironment(step);
+        const bool configAllows = ConfigAllowsCleanStep(config, step);
         const auto context = GatherMemoryCleanGates(
-            acknowledged, true /* 步骤来自计划 => 配置已允许 */,
-            CleanStepCompiledIn(step), optimizer::memory::CleanKindCapabilityId(step),
-            needsIsolated, isolatedAcknowledged);
+            acknowledged, configAllows, CleanStepCompiledIn(step),
+            optimizer::memory::CleanKindCapabilityId(step), needsIsolated,
+            isolatedAcknowledged);
         auditWritable = auditWritable && context.auditWritable;
         if (!context.gates.allowed) {
             blockedCapability = optimizer::memory::CleanKindCapabilityId(step);
@@ -454,6 +543,8 @@ int RunMemoryCleanExecuteCommand(
             cmdlineMissing = !context.inputs.commandLine;
             isolatedMissing = needsIsolated && !isolatedAcknowledged;
             cooldownBlocked = !context.inputs.cooldown;
+            configMissing = !configAllows;
+            configGaps = DescribeCleanConfigGaps(config, step);
             break;
         }
     }
@@ -480,6 +571,10 @@ int RunMemoryCleanExecuteCommand(
         if (cmdlineMissing) {
             ErrorLine{} << L"  hint     : pass --acknowledge-system-wide-side-effects"
                            L" (action-specific confirmation; --force is not accepted)\n";
+        }
+        if (configMissing) {
+            ErrorLine{} << L"  hint     : the config would not allow that step (missing: "
+                        << configGaps << L")\n";
         }
         if (cooldownBlocked) {
             ErrorLine{} << L"  hint     : the cooldown window is still open for that step\n";
@@ -577,10 +672,11 @@ int RunMemoryCleanExecuteCommand(
 
 int RunMemoryCleanSelfTrim(
     const std::optional<std::filesystem::path>& configPath,
-    optimizer::config::CleanLevel configuredMax, bool acknowledged) {
+    const MemoryCleanConfigGate& config, bool acknowledged) {
     const std::string target = configPath.has_value() ? "config" : "defaults";
+    const auto step = optimizer::memory::CleanKind::WorkingSetTrim;
     const auto context = GatherMemoryCleanGates(
-        acknowledged, configuredMax != optimizer::config::CleanLevel::None);
+        acknowledged, ConfigAllowsCleanStep(config, step));
     if (!context.gates.allowed) {
         const std::string gate = context.gates.firstBlocking.has_value()
                                      ? optimizer::policy::GateIdToString(
@@ -597,8 +693,8 @@ int RunMemoryCleanSelfTrim(
                            L" (build option OPTIMIZER_ENABLE_MEMORY_CLEAN)\n";
         }
         if (!context.inputs.config) {
-            ErrorLine{} << L"  hint     : set [memory].scheduled_clean_enabled = true and"
-                           L" max_clean_level = \"light\" (or higher) in the config\n";
+            ErrorLine{} << L"  hint     : the config would not allow this step (missing: "
+                        << DescribeCleanConfigGaps(config, step) << L")\n";
         }
         if (!context.inputs.commandLine) {
             ErrorLine{} << L"  hint     : pass --acknowledge-system-wide-side-effects"
@@ -608,7 +704,7 @@ int RunMemoryCleanSelfTrim(
     }
     // 真实执行路径固定只做**最轻一档**（工作集修剪 = light）；更重的步骤属 S3/S4（R3）。
     const auto plan = optimizer::memory::PlanMemoryClean(
-        optimizer::config::CleanLevel::Light, configuredMax, true);
+        optimizer::config::CleanLevel::Light, config.maxLevel, true);
     if (!plan.allowed || plan.steps.empty()) {
         ErrorLine{} << L"  --memory-clean --execute-self-trim refused: no executable step"
                        L" for this configuration (no system call was made)\n";
@@ -742,7 +838,7 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
         }
         configPath = std::filesystem::path(argv[i]);
     }
-    optimizer::config::CleanLevel configuredMax = optimizer::config::CleanLevel::None;
+    MemoryCleanConfigGate config;
     if (configPath.has_value()) {
         const auto loaded = optimizer::config::LoadConfig(configPath->wstring());
         if (!loaded) {
@@ -752,19 +848,26 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
                         << error.code << L"] " << error.message << L"\n";
             return 2;
         }
-        configuredMax = loaded.Value().memory.maxCleanLevel;
+        config.cleanEnabled = loaded.Value().memory.scheduledCleanEnabled;
+        config.nativeWrite = loaded.Value().memory.allowNativeWrite;
+        config.maxLevel = loaded.Value().memory.maxCleanLevel;
+        config.mode = loaded.Value().application.mode;
+        config.layers = loaded.Value().layers;
+        config.hasConfig = true;
     }
     if (execute) {
-        return RunMemoryCleanExecuteCommand(configPath, configuredMax, acknowledged,
+        return RunMemoryCleanExecuteCommand(configPath, config, acknowledged,
                                            isolatedAcknowledged);
     }
     if (executeSelfTrim) {
-        return RunMemoryCleanSelfTrim(configPath, configuredMax, acknowledged);
+        return RunMemoryCleanSelfTrim(configPath, config, acknowledged);
     }
-    // dry-run：门禁输入与真实执行路径同源（`GatherMemoryCleanGates`）。
+    // dry-run：门禁输入与真实执行路径同源（`GatherMemoryCleanGates` + 合取配置门）。
     const auto context = GatherMemoryCleanGates(
-        acknowledged, configuredMax != optimizer::config::CleanLevel::None);
+        acknowledged,
+        ConfigAllowsCleanStep(config, optimizer::memory::CleanKind::WorkingSetTrim));
     const auto gates = context.gates;
+    const auto configuredMax = config.maxLevel;
     const auto plan = optimizer::memory::PlanMemoryClean(configuredMax, configuredMax,
                                                          gates.allowed);
     const std::string target = configPath.has_value() ? "config" : "defaults";
@@ -826,6 +929,14 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
                  << std::wstring(gate.begin(), gate.end()) << L"]";
         }
         optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (!context.inputs.config) {
+        std::wostringstream gaps;
+        gaps << L"  config   : would not allow the R1 step (missing: "
+             << DescribeCleanConfigGaps(config,
+                                        optimizer::memory::CleanKind::WorkingSetTrim)
+             << L")";
+        optimizer::common::WriteConsoleLine(gaps.str());
     }
     optimizer::common::WriteConsoleLine(
         L"  note     : no system call was made; --execute-self-trim runs the R1 self trim"
@@ -895,6 +1006,13 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
         bool requiresIsolatedEnvironment; // R3：cmdline 门需额外一条隔离环境确认
     };
     const bool hasConfig = snapshot.has_value();
+    // 叠加门禁（与危险路径同源）：R1 能力用本地可逆叠加，R2/R3 能力用系统级叠加。
+    const bool r1Overlay =
+        hasConfig && optimizer::config::AllowsLocalReversibleActions(
+                         snapshot->application.mode, snapshot->layers);
+    const bool r3Overlay =
+        hasConfig && optimizer::config::AllowsSystemLevelActions(
+                         snapshot->application.mode, snapshot->layers);
     const auto environment = GatherEnvironmentFacts();
     const bool environmentGateOpen =
         optimizer::policy::EvaluateEnvironmentGate(environment);
@@ -914,26 +1032,34 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
                        optimizer::policy::kDefaultCooldown));
     };
     const Capability capabilities[] = {
-        {L"power.switch_power_scheme", hasConfig && snapshot->power.switchPowerScheme,
+        {L"power.switch_power_scheme",
+         r3Overlay && snapshot->power.switchPowerScheme,
          optimizer::policy::PowerSchemeSwitchCompiledIn(),
          optimizer::policy::kPowerSchemeCapabilityId, false},
+        // R3 两行按**合取**判定（与执行路径 ConfigAllowsCleanStep 同口径）：
+        // 需要 scheduled_clean_enabled + 足够深的 max_clean_level + allow_native_write。
         {L"memory.purge_standby",
-         hasConfig && snapshot->memory.maxCleanLevel >= optimizer::config::CleanLevel::Medium,
+         r3Overlay && snapshot->memory.scheduledCleanEnabled &&
+             snapshot->memory.maxCleanLevel >= optimizer::config::CleanLevel::Medium &&
+             snapshot->memory.allowNativeWrite,
          optimizer::policy::StandbyPurgeCompiledIn(),
          optimizer::policy::kStandbyPurgeCapabilityId, true},
         {L"memory.file_cache_trim",
-         hasConfig && snapshot->memory.maxCleanLevel == optimizer::config::CleanLevel::Deep,
+         r3Overlay && snapshot->memory.scheduledCleanEnabled &&
+             snapshot->memory.maxCleanLevel == optimizer::config::CleanLevel::Deep &&
+             snapshot->memory.allowNativeWrite,
          optimizer::policy::FileCacheTrimCompiledIn(),
          optimizer::policy::kFileCacheTrimCapabilityId, true},
         {L"memory.scheduled_clean_enabled",
-         hasConfig && snapshot->memory.scheduledCleanEnabled,
+         r1Overlay && snapshot->memory.scheduledCleanEnabled &&
+             snapshot->memory.maxCleanLevel >= optimizer::config::CleanLevel::Light,
          optimizer::policy::MemoryCleanCompiledIn(),
          optimizer::policy::kMemoryCleanCapabilityId, false},
         {L"memory.allow_native_write", hasConfig && snapshot->memory.allowNativeWrite,
          optimizer::policy::MemoryCleanCompiledIn(),
          optimizer::policy::kMemoryCleanCapabilityId, false},
         {L"memory.max_clean_level",
-         hasConfig &&
+         r1Overlay &&
              snapshot->memory.maxCleanLevel != optimizer::config::CleanLevel::None,
          optimizer::policy::MemoryCleanCompiledIn(),
          optimizer::policy::kMemoryCleanCapabilityId, false},
@@ -1026,6 +1152,10 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     optimizer::common::WriteConsoleLine(
         L"  note     : R2/R3 real actions additionally require an isolated environment;"
         L" this command performs nothing");
+    optimizer::common::WriteConsoleLine(
+        L"  config   : capability rows need the conjunction of the field switches and the"
+        L" mode/layer overlay (R1: mode!=observe + maintenance|emergency; R3:"
+        L" experimental + emergency); the R3 rows also need allow_native_write");
     {
         // 环境事实如实展示（只读）：未知也如实说“未知”。
         std::wostringstream line;
@@ -1079,6 +1209,7 @@ int RunConfigCommand(std::wstring_view path) {
     std::wcout << L"  memory     : query " << (c.memory.queryEnabled ? L"on" : L"off")
                << L", clean " << (c.memory.scheduledCleanEnabled ? L"on" : L"off")
                << L", native-write " << (c.memory.allowNativeWrite ? L"on" : L"off")
+               << L" (gate only: the native write path is not implemented yet)"
                << L"\n";
     std::wcout << L"  layers     : monitor " << (c.layers.monitoring ? L"on" : L"off")
                << L", maintenance " << (c.layers.maintenance ? L"on" : L"off")
@@ -2624,7 +2755,10 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
             return 2;
         }
         snapshot = loaded.Value();
-        configEnabled = snapshot.power.switchPowerScheme;
+        // 配置门 = [power] 开关 **且** R2/R3 叠加门禁（mode=experimental + layers.emergency）。
+        configEnabled = snapshot.power.switchPowerScheme &&
+                        optimizer::config::AllowsSystemLevelActions(
+                            snapshot.application.mode, snapshot.layers);
     }
     const bool isForward = action == "apply";
     // 回滚/恢复只要求 compile + audit（见函数头注释）。
@@ -2654,7 +2788,10 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
                            L" (build option OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH)\n";
         }
         if (isForward && !context.inputs.config) {
-            ErrorLine{} << L"  hint     : set [power].switch_power_scheme = true in the config\n";
+            ErrorLine{} << L"  hint     : the config must allow this (needs"
+                           L" [power].switch_power_scheme = true and"
+                           L" [application].mode = \"experimental\" with"
+                           L" [layers].emergency = true)\n";
         }
         if (isForward && !context.inputs.commandLine) {
             ErrorLine{} << L"  hint     : pass --acknowledge-system-wide-side-effects\n";
@@ -5859,7 +5996,10 @@ void PrintUsage() {
         << L"                             [--acknowledge-system-wide-side-effects]  Trim the working\n"
         << L"                             set of this process (R1, reversible; all six safety gates\n"
         << L"                             must pass; audit must be writable; one call, own process)\n"
-        << L"  CppOptimizer.exe --gates [config.toml]  Report the six safety gates per dangerous\n"
+        << L"  CppOptimizer.exe --gates [config.toml] [--json]\n"
+        << L"                             [--acknowledge-system-wide-side-effects]\n"
+        << L"                             [--acknowledge-isolated-environment]  Report the six\n"
+        << L"                             safety gates per dangerous\n"
         << L"                             capability (read-only; performs nothing)\n"
         << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
         << L"  CppOptimizer.exe --cpu          Sample CPU usage (read-only, PDH)\n"
@@ -5878,14 +6018,17 @@ void PrintUsage() {
         << L"                             [reason...]  Hold a power request for 1..60 s\n"
         << L"                             (R1, reversible; released on exit)\n"
         << L"  CppOptimizer.exe --power-scheme status|saved  Read the active/saved power\n"
+        << L"                             scheme record (read-only; state=pending means a\n"
+        << L"                             previous switch was not confirmed)\n"
         << L"                             scheme GUID (R0, read-only)\n"
         << L"  CppOptimizer.exe --power-scheme <balanced|high-performance|power-saver|GUID>\n"
         << L"                             [config.toml] [--acknowledge-system-wide-side-effects]\n"
         << L"                             Switch the active power scheme (R2, reversible: the\n"
         << L"                             original GUID is saved first; all six gates must pass)\n"
-        << L"  CppOptimizer.exe --power-scheme restore [config.toml]\n"
-        << L"                             [--acknowledge-system-wide-side-effects]  Roll back to\n"
-        << L"                             the saved GUID (never blocked by cooldown)\n"
+        << L"  CppOptimizer.exe --power-scheme restore|recover [config.toml]  Roll back to\n"
+        << L"                             the saved GUID (rollback needs only the compile and\n"
+        << L"                             audit gates: never blocked by configuration,\n"
+        << L"                             confirmation, environment or cooldown)\n"
         << L"  CppOptimizer.exe --priority-boost <s> <pid> [config.toml]\n"
         << L"                             Temporarily raise a process priority class\n"
         << L"                             for 1..60 s (R1, reversible; level from\n"

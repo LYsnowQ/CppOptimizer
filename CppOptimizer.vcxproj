@@ -122,6 +122,7 @@
     <ClInclude Include="include\service\service_host.hpp" />
     <ClInclude Include="include\service\startup_entry.hpp" />
     <ClInclude Include="include\service\scheduled_task.hpp" />
+    <ClInclude Include="include\service\recovery_marker.hpp" />
     <ClInclude Include="include\service\agent_form.hpp" />
     <ClInclude Include="include\service\host_instance.hpp" />
     <ClInclude Include="include\service\tray_host.hpp" />
