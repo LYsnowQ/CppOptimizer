@@ -97,14 +97,14 @@ struct AuditLineSummary {
 // 两者都为 0 时永不触发。`keepTailLines` 指定重写后至少保留的尾部行数（未被压缩的部分，
 // 含不可解析行——它们必须原样保留）。
 // 规模策略（压缩优先、永不删除）：
-// - `maxBytes`：正常审计文件的压缩触发阈值（默认 5 MiB）；
-// - `summaryMaxBytes`：汇总文件的上限（默认 20 MiB）；达到上限时对**汇总文件本身**再折叠
+// - `maxBytes`：正常审计文件的压缩触发阈值（默认 10 MiB）；
+// - `summaryMaxBytes`：汇总文件的上限（默认 50 MiB）；达到上限时对**汇总文件本身**再折叠
 //   （多行汇总 -> 一行合并汇总），计数与时间范围继续保留，而不是删除任何计数。
 struct CompactOptions {
-    std::uintmax_t maxBytes = 5u * 1024u * 1024u;        // 5 MiB（触发审计文件压缩）
+    std::uintmax_t maxBytes = 10u * 1024u * 1024u;       // 10 MiB（触发审计文件压缩）
     std::size_t maxLines = 20000;
     std::size_t keepTailLines = 2000;
-    std::uintmax_t summaryMaxBytes = 20u * 1024u * 1024u; // 20 MiB（汇总文件上限）
+    std::uintmax_t summaryMaxBytes = 50u * 1024u * 1024u; // 50 MiB（汇总文件上限）
 };
 
 // 汇总文件折叠结果（AUD-005）：`folded=false` = 未达上限或无内容可折叠（文件未被触碰）。
@@ -211,6 +211,25 @@ struct AuditTail {
 // 文件超 8 MiB 以 Validation 拒绝（避免无界读取）。
 [[nodiscard]] common::Result<AuditTail> ReadAuditTail(
     const std::filesystem::path& path, std::size_t maxLines) noexcept;
+
+// 动作日记（AUD-007）：把每个危险/注册类动作按**操作前 -> 操作后 -> 操作后状态**三段**实时**落盘到
+// **独立的本地文件**（默认 `%LOCALAPPDATA%\CppOptimizer\action-journal.log`，仅本地存储）。
+// 与审计（audit.log）分工：审计按 operationId 聚合计数、可压缩（AUD-004/005）；日记**逐次留痕、不聚合、
+// 不参与压缩**，回答的是“改之前是什么、改了什么、改之后是什么”。
+// 行格式：`<本地时间戳> [journal] <phase> <operationId> <ok|fail> caller=<..> target=<..> detail=<..>`；
+// 一次性 flush（实时可见）；父目录自建；空路径拒绝；失败如实返回（不伪装已记录）。
+enum class JournalPhase {
+    Before, // 操作前：即将执行什么（含前置状态描述）
+    After,  // 操作后：执行结果（成功/失败与失败阶段）
+    State,  // 操作后状态：动作完成后的实态快照描述
+};
+
+[[nodiscard]] const char* JournalPhaseToString(JournalPhase phase) noexcept;
+
+[[nodiscard]] common::Result<void> AppendJournalLine(
+    const std::filesystem::path& path, JournalPhase phase,
+    std::string_view operationId, bool ok, std::string_view target,
+    std::string_view detail) noexcept;
 
 // 有界审计日志（AUD-001）：进程内顺序保存最近 capacity 条受审计动作记录，供窗口汇总/诊断与
 // 后续“审计不可用”Safe Mode 触发源使用（真实持久化/服务形态属后续切片）。

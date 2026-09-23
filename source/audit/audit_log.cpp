@@ -294,6 +294,66 @@ std::string FormatAuditSummaryLine(const AuditLineSummary& summary) {
     return line;
 }
 
+const char* JournalPhaseToString(JournalPhase phase) noexcept {
+    switch (phase) {
+        case JournalPhase::Before:
+            return "before";
+        case JournalPhase::After:
+            return "after";
+        case JournalPhase::State:
+            return "state";
+    }
+    return "unknown";
+}
+
+common::Result<void> AppendJournalLine(const std::filesystem::path& path,
+                                       JournalPhase phase,
+                                       std::string_view operationId, bool ok,
+                                       std::string_view target,
+                                       std::string_view detail) noexcept {
+    if (path.empty()) {
+        return common::Result<void>::Failure(common::Error::Validation(
+            "AppendJournalLine", L"路径不能为空"));
+    }
+    std::error_code ec;
+    const auto parent = path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            return common::Result<void>::Failure(common::Error::FromWin32(
+                static_cast<std::uint32_t>(ec.value()),
+                "create_directories(action journal)"));
+        }
+    }
+    std::string line;
+    line += LocalTimestampAscii();
+    line += " [journal] ";
+    line += JournalPhaseToString(phase);
+    line += ' ';
+    AppendSanitized(line, std::string(operationId));
+    line += ok ? " ok" : " fail";
+    line += " caller=";
+    AppendSanitized(line, "cli");
+    line += " target=";
+    AppendSanitized(line, std::string(target));
+    line += " detail=";
+    AppendSanitized(line, std::string(detail));
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    if (!out) {
+        return common::Result<void>::Failure(common::Error::FromWin32(
+            static_cast<std::uint32_t>(::GetLastError()),
+            "open action journal for append"));
+    }
+    out << line << '\n';
+    out.flush();
+    if (!out) {
+        return common::Result<void>::Failure(common::Error::FromWin32(
+            static_cast<std::uint32_t>(::GetLastError()),
+            "flush action journal"));
+    }
+    return common::Result<void>::Success();
+}
+
 common::Result<void> AppendAuditLine(const std::filesystem::path& path,
                                      const AuditRecord& record) noexcept {
     if (path.empty()) {

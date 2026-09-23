@@ -931,6 +931,78 @@ bool TestFoldAuditSummaryFailuresAreReported() {
     return rejected && foldedButReported;
 }
 
+// ---------- AUD-007：动作日记（操作前/操作后/操作后状态，独立本地文件） ----------
+
+bool TestJournalPhasesAndFields() {
+    using optimizer::audit::AppendJournalLine;
+    using optimizer::audit::JournalPhase;
+    using optimizer::audit::JournalPhaseToString;
+    using optimizer::audit::ReadAuditTail;
+    const auto path = TempAuditPath(L"journal");
+    if (path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    // 空路径拒绝（不生成无名文件）。
+    const auto empty = AppendJournalLine({}, JournalPhase::Before, "op", true,
+                                         "t", "d");
+    const bool rejected =
+        !empty && empty.ErrorValue().domain ==
+                      optimizer::common::ErrorDomain::Validation;
+    // 三段各写一条：阶段名与字段可回读。
+    const bool appended =
+        AppendJournalLine(path, JournalPhase::Before, "agent.form_install", true,
+                          "task", "intent: install") &&
+        AppendJournalLine(path, JournalPhase::After, "agent.form_install", false,
+                          "task", "denied") &&
+        AppendJournalLine(path, JournalPhase::State, "agent.form_install", true,
+                          "task", "startup_tray=no task=no service=no");
+    const auto tail = ReadAuditTail(path, 10);
+    if (!appended || !tail || tail.Value().lines.size() != 3) {
+        std::filesystem::remove(path, ec);
+        return rejected;
+    }
+    const std::string& first = tail.Value().lines[0];
+    const std::string& second = tail.Value().lines[1];
+    const std::string& third = tail.Value().lines[2];
+    const bool phases = first.find("[journal] before ") != std::string::npos &&
+                        second.find("[journal] after ") != std::string::npos &&
+                        third.find("[journal] state ") != std::string::npos;
+    const bool results = first.find(" ok ") != std::string::npos &&
+                         second.find(" fail ") != std::string::npos;
+    const bool fields = first.find("target=task") != std::string::npos &&
+                        third.find("startup_tray=no task=no service=no") !=
+                            std::string::npos;
+    const bool names = std::string(JournalPhaseToString(JournalPhase::Before)) ==
+                           "before" &&
+                       std::string(JournalPhaseToString(JournalPhase::After)) ==
+                           "after" &&
+                       std::string(JournalPhaseToString(JournalPhase::State)) ==
+                           "state";
+    std::filesystem::remove(path, ec);
+    return rejected && phases && results && fields && names;
+}
+
+bool TestJournalFailureIsHonest() {
+    using optimizer::audit::AppendJournalLine;
+    using optimizer::audit::JournalPhase;
+    // 目录当文件：追加失败如实返回（不伪装已记录）。
+    const auto path = TempAuditPath(L"journaldir");
+    if (path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    if (!std::filesystem::create_directory(path, ec) || ec) {
+        return false;
+    }
+    const auto failed =
+        AppendJournalLine(path, JournalPhase::Before, "op", true, "t", "d");
+    std::filesystem::remove(path, ec);
+    return !failed;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -987,6 +1059,8 @@ int wmain() {
         &TestFoldAuditSummaryKeepsUnparsableLines);
     run(L"fold audit summary failures are reported",
         &TestFoldAuditSummaryFailuresAreReported);
+    run(L"journal phases and fields", &TestJournalPhasesAndFields);
+    run(L"journal failure is honest", &TestJournalFailureIsHonest);
     run(L"analyze audit summary lines", &TestAnalyzeAuditSummaryLines);
     run(L"compact audit file noop below threshold",
         &TestCompactAuditFileNoopBelowThreshold);
