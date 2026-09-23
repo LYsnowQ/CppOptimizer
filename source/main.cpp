@@ -12,6 +12,7 @@
 #include "logger/logger.hpp"
 #include "memory/memory_tuner.hpp"
 #include "memory/memory_cleaner.hpp"
+#include "memory/working_set.hpp"
 #include "metrics/memory_metrics.hpp"
 #include "metrics/pdh_metrics.hpp"
 #include "platform/native_api.hpp"
@@ -334,24 +335,207 @@ optimizer::policy::EnvironmentFacts GatherEnvironmentFacts() {
     return facts;
 }
 
-// --memory-clean [config.toml] [--dry-run]：内存清理能力的**计划与 dry-run**（本切片不执行任何系统调用）。
+// 内存清理能力的门禁事实（`--memory-clean` 的 dry-run 与真实执行路径**共用同一口径**：
+// 两处各写一份会让“诊断说放行、执行却拒绝”成为可能）。
+struct MemoryCleanGateContext {
+    optimizer::policy::EnvironmentFacts environment{};
+    optimizer::policy::GateInputs inputs{};
+    optimizer::policy::GateEvaluation gates{};
+    bool auditWritable = false;
+};
+
+MemoryCleanGateContext GatherMemoryCleanGates(bool acknowledged,
+                                              bool configEnabled) {
+    MemoryCleanGateContext context;
+    context.environment = GatherEnvironmentFacts();
+    context.auditWritable = static_cast<bool>(
+        optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath()));
+    context.inputs.compileTime = optimizer::policy::MemoryCleanCompiledIn();
+    context.inputs.config = configEnabled;
+    context.inputs.commandLine = acknowledged; // 动作特定确认参数（显式动作）
+    context.inputs.permissionAndEnvironment =
+        optimizer::policy::EvaluateEnvironmentGate(context.environment);
+    context.inputs.audit = context.auditWritable;
+    // 冷却门：读真实台账（每用户文件）；无执行记录 -> 放行。
+    const auto ledger =
+        optimizer::policy::ReadCooldownLedger(DefaultCooldownLedgerPath());
+    context.inputs.cooldown =
+        ledger && optimizer::policy::EvaluateCooldownGate(
+                      ledger.Value(), optimizer::policy::kMemoryCleanCapabilityId,
+                      static_cast<std::int64_t>(std::time(nullptr)),
+                      std::chrono::duration_cast<std::chrono::seconds>(
+                          optimizer::policy::kDefaultCooldown));
+    context.gates = optimizer::policy::EvaluateGates(context.inputs);
+    return context;
+}
+
+std::wstring WidenAscii(std::string_view text) {
+    return std::wstring(text.begin(), text.end());
+}
+
+// `--memory-clean <config> --execute-self-trim`：**本进程**工作集修剪的真实执行路径（R1）。
+// 契约（与 guides/31 §3/§5 一致）：
+// - **六道门全通才执行**，否则只打印**首个阻塞门**并拒绝（exit 2、零系统调用）；
+// - **审计不可用即拒绝**（真实动作前审计链必须可用，不只看状态）；
+// - 每次最多一次、单步、无循环、不提权；作用目标固定为本进程；
+// - 成功才写冷却台账（失败不得写，否则会把“没做成”算成冷却）；
+// - 三段日记照写，`state` 段记录可量化读数（修剪前/后工作集字节）。
+int RunMemoryCleanSelfTrim(
+    const std::optional<std::filesystem::path>& configPath,
+    optimizer::config::CleanLevel configuredMax, bool acknowledged) {
+    const std::string target = configPath.has_value() ? "config" : "defaults";
+    const auto context = GatherMemoryCleanGates(
+        acknowledged, configuredMax != optimizer::config::CleanLevel::None);
+    if (!context.gates.allowed) {
+        const std::string gate = context.gates.firstBlocking.has_value()
+                                     ? optimizer::policy::GateIdToString(
+                                           *context.gates.firstBlocking)
+                                     : "unknown";
+        ErrorLine{} << L"  --memory-clean --execute-self-trim refused [first blocked gate: "
+                    << WidenAscii(gate) << L"] (no system call was made)\n";
+        if (!context.auditWritable) {
+            ErrorLine{} << L"  audit    : unavailable - a real action is refused before any"
+                           L" system call (audit must be writable first)\n";
+        }
+        if (!context.inputs.compileTime) {
+            ErrorLine{} << L"  hint     : this capability is compiled out by default"
+                           L" (build option OPTIMIZER_ENABLE_MEMORY_CLEAN)\n";
+        }
+        if (!context.inputs.config) {
+            ErrorLine{} << L"  hint     : set [memory].scheduled_clean_enabled = true and"
+                           L" max_clean_level = \"light\" (or higher) in the config\n";
+        }
+        if (!context.inputs.commandLine) {
+            ErrorLine{} << L"  hint     : pass --acknowledge-system-wide-side-effects"
+                           L" (action-specific confirmation; --force is not accepted)\n";
+        }
+        return 2;
+    }
+    // 真实执行路径固定只做**最轻一档**（工作集修剪 = light）；更重的步骤属 S3/S4（R3）。
+    const auto plan = optimizer::memory::PlanMemoryClean(
+        optimizer::config::CleanLevel::Light, configuredMax, true);
+    if (!plan.allowed || plan.steps.empty()) {
+        ErrorLine{} << L"  --memory-clean --execute-self-trim refused: no executable step"
+                       L" for this configuration (no system call was made)\n";
+        return 2;
+    }
+    JournalAction("memory.clean_execute", target, true,
+                  optimizer::audit::JournalPhase::Before,
+                  "intent: trim own process working set (single call, no privilege)");
+    const auto before = optimizer::memory::QueryOwnWorkingSet();
+    const std::optional<optimizer::memory::WorkingSetReading> beforeReading =
+        before ? std::optional<optimizer::memory::WorkingSetReading>(before.Value())
+               : std::nullopt;
+    optimizer::memory::SelfWorkingSetTrimBackend backend;
+    const auto executed = optimizer::memory::ExecuteMemoryCleanPlan(plan, backend);
+    const auto after = optimizer::memory::QueryOwnWorkingSet();
+    const std::optional<optimizer::memory::WorkingSetReading> afterReading =
+        after ? std::optional<optimizer::memory::WorkingSetReading>(after.Value())
+              : std::nullopt;
+    const auto delta = optimizer::memory::MakeWorkingSetDelta(beforeReading, afterReading);
+    const std::string deltaText = optimizer::memory::DescribeWorkingSetDelta(delta);
+
+    bool ok = false;
+    std::wstring detail;
+    if (executed) {
+        const auto& report = executed.Value();
+        ok = report.ok;
+        if (ok) {
+            detail = L"self working set trim executed (";
+            detail += std::to_wstring(report.succeeded);
+            detail += L" step(s), own process only)";
+        } else {
+            detail = L"failed at step ";
+            detail += WidenAscii(
+                optimizer::memory::CleanKindToString(report.failedStep));
+            detail += L": ";
+            detail += report.failureDetail;
+        }
+    } else {
+        const auto& error = executed.ErrorValue();
+        detail = L"not executed [";
+        detail += optimizer::common::ToString(error.domain);
+        detail += L":";
+        detail += std::to_wstring(error.code);
+        detail += L"] ";
+        detail += error.message;
+    }
+    std::string detailAscii;
+    for (const wchar_t ch : detail) {
+        detailAscii.push_back(ch >= 0 && ch <= 0x7F ? static_cast<char>(ch) : 0x3F);
+    }
+
+    optimizer::common::WriteConsoleLine(
+        L"Memory clean execute (R1; own process only, single call)");
+    optimizer::common::WriteConsoleLine(
+        L"  step     : working_set_trim (level light; no other step is executed)");
+    {
+        std::wostringstream line;
+        line << L"  reading  : " << WidenAscii(deltaText);
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    {
+        std::wostringstream line;
+        line << L"  verdict  : " << (ok ? L"executed" : L"failed");
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (!ok) {
+        ErrorLine{} << L"  detail   : " << detail << L"\n";
+    }
+    optimizer::common::WriteConsoleLine(
+        L"  note     : trimming a working set does not free system cache; the pages are"
+        L" refilled on demand (reversible, R1)");
+    AuditAction("memory.clean_execute", optimizer::audit::RiskLevel::R1, target,
+                ok, detailAscii, deltaText);
+    if (!ok) {
+        return 2;
+    }
+    // 成功才写冷却（每用户台账；原子替换）。写失败如实上报，但不把已完成的动作说成失败。
+    const auto recorded = optimizer::policy::RecordCooldownRun(
+        DefaultCooldownLedgerPath(), optimizer::policy::kMemoryCleanCapabilityId,
+        static_cast<std::int64_t>(std::time(nullptr)));
+    if (!recorded) {
+        const auto& error = recorded.ErrorValue();
+        std::wostringstream line;
+        line << L"  cooldown : not recorded ["
+             << optimizer::common::ToString(error.domain) << L":" << error.code
+             << L"] " << error.message
+             << L" (the action itself did complete)";
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    return 0;
+}
+
+// --memory-clean [config.toml] [--dry-run]：内存清理能力的**计划 / dry-run**；
+// --execute-self-trim 为其**真实执行路径**（R1：只修剪本进程工作集）。
 // 门禁未全通过时如实拒绝执行；dry-run 展示“若门禁开放将要执行什么”，并写审计 + 三段日记。
 int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
     std::optional<std::filesystem::path> configPath;
     bool acknowledged = false;
+    bool executeSelfTrim = false;
     for (int i = 2; i < argc; ++i) {
         const std::wstring_view arg(argv[i]);
         if (arg == L"--dry-run") {
-            continue; // 本切片默认且仅有 dry-run（保留参数供后续切片显式化）
+            continue; // 与“不给执行开关”同义（保留参数供脚本显式化）
         }
         if (arg == L"--acknowledge-system-wide-side-effects") {
             acknowledged = true; // 动作特定确认（不使用通用 --force）
             continue;
         }
+        if (arg == L"--execute-self-trim") {
+            executeSelfTrim = true; // R1：只修剪本进程工作集
+            continue;
+        }
+        if (arg == L"--force") {
+            ErrorLine{} << L"  --force is not accepted; use an action-specific"
+                           L" confirmation such as --acknowledge-system-wide-side-effects\n";
+            return 2;
+        }
         if (arg == L"--execute") {
-            ErrorLine{} << L"  --memory-clean --execute is refused: this slice ships planning"
-                           L" only (an R2 real action needs the six gates and an isolated"
-                           L" environment)\n";
+            ErrorLine{} << L"  --memory-clean --execute is refused: the heavier steps"
+                           L" (standby list purge, system file cache trim) have no real"
+                           L" backend yet and refuse with Unsupported. Use"
+                           L" --execute-self-trim for the R1 self trim.\n";
             return 2;
         }
         if (configPath.has_value()) {
@@ -372,34 +556,13 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
         }
         configuredMax = loaded.Value().memory.maxCleanLevel;
     }
-    // 门禁输入：compile/cmdline/cooldown 三门尚未实现（如实按未通过处理）；
-    // 权限与环境门用真实只读探测结果；审计门用真实“可写探测”（只打开不写入）。
-    const auto environment = GatherEnvironmentFacts();
-    const auto auditProbe =
-        optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath());
-    optimizer::policy::GateInputs inputs;
-    inputs.compileTime =
-        optimizer::policy::MemoryCleanCompiledIn(); // 编译期开关（默认关）
-    inputs.config = configuredMax != optimizer::config::CleanLevel::None;
-    inputs.commandLine = acknowledged; // 动作特定确认参数（显式动作）
-    inputs.permissionAndEnvironment =
-        optimizer::policy::EvaluateEnvironmentGate(environment);
-    inputs.audit = static_cast<bool>(auditProbe);
-    // 冷却：本切片从不执行清理（无“上次执行”记录），故该门恒开；真实执行接入后由台账驱动。
-    inputs.cooldown = false;
-    {
-        // 冷却门：读真实台账（每用户文件）；无执行记录 -> 放行。
-        const auto ledger =
-            optimizer::policy::ReadCooldownLedger(DefaultCooldownLedgerPath());
-        inputs.cooldown =
-            ledger &&
-            optimizer::policy::EvaluateCooldownGate(
-                ledger.Value(), "memory.clean",
-                static_cast<std::int64_t>(std::time(nullptr)),
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    optimizer::policy::kDefaultCooldown));
+    if (executeSelfTrim) {
+        return RunMemoryCleanSelfTrim(configPath, configuredMax, acknowledged);
     }
-    const auto gates = optimizer::policy::EvaluateGates(inputs);
+    // dry-run：门禁输入与真实执行路径同源（`GatherMemoryCleanGates`）。
+    const auto context = GatherMemoryCleanGates(
+        acknowledged, configuredMax != optimizer::config::CleanLevel::None);
+    const auto gates = context.gates;
     const auto plan = optimizer::memory::PlanMemoryClean(configuredMax, configuredMax,
                                                          gates.allowed);
     const std::string target = configPath.has_value() ? "config" : "defaults";
@@ -422,7 +585,7 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
                   optimizer::audit::JournalPhase::Before,
                   "intent: plan memory clean (dry-run, no system call)");
     optimizer::common::WriteConsoleLine(
-        L"Memory clean plan (dry-run; this slice never performs a clean)");
+        L"Memory clean plan (dry-run; this mode performs no clean)");
     {
         std::wostringstream line;
         line << L"  level    : " << levelName << L" (from "
@@ -452,7 +615,7 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
         std::wostringstream line;
         line << L"  verdict  : "
              << (plan.allowed
-                     ? L"gates passed (but this slice never executes: 0 system calls)"
+                     ? L"gates passed (dry-run only: --execute-self-trim runs the R1 step)"
                      : L"refused (execution not performed)");
         if (!gates.allowed && gates.firstBlocking.has_value()) {
             const std::string gate =
@@ -463,7 +626,8 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
         optimizer::common::WriteConsoleLine(line.str());
     }
     optimizer::common::WriteConsoleLine(
-        L"  note     : no system call was made; --execute is refused in this slice");
+        L"  note     : no system call was made; --execute-self-trim runs the R1 self trim"
+        L" (own process); the R3 steps have no real backend");
     {
         std::wostringstream line;
         line << L"  confirm  : acknowledge-system-wide-side-effects="
@@ -475,7 +639,7 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
                 "plan only (dry-run; no system call)",
                 plan.steps.empty()
                     ? "no steps planned"
-                    : "working_set_trim planned, execution refused");
+                    : "working_set_trim planned, dry-run (no execution)");
     return 0;
 }
 
@@ -535,7 +699,8 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     const bool cooldownGateOpen =
         cooldownLedger &&
         optimizer::policy::EvaluateCooldownGate(
-            cooldownLedger.Value(), "memory.clean", nowUnix,
+            cooldownLedger.Value(), optimizer::policy::kMemoryCleanCapabilityId,
+            nowUnix,
             std::chrono::duration_cast<std::chrono::seconds>(
                 optimizer::policy::kDefaultCooldown));
     const Capability capabilities[] = {
@@ -5033,7 +5198,11 @@ void PrintUsage() {
         << L"                             totals (read-only; default: per-user summary file,\n"
         << L"                             last 20 lines, max 200)\n"
         << L"  CppOptimizer.exe --memory-clean [config.toml] [--dry-run]  Plan a memory clean and\n"
-        << L"                             show the gates (no system call is ever made here)\n"
+        << L"                             show the gates (no system call is made)\n"
+        << L"  CppOptimizer.exe --memory-clean <config.toml> --execute-self-trim\n"
+        << L"                             [--acknowledge-system-wide-side-effects]  Trim the working\n"
+        << L"                             set of this process (R1, reversible; all six safety gates\n"
+        << L"                             must pass; audit must be writable; one call, own process)\n"
         << L"  CppOptimizer.exe --gates [config.toml]  Report the six safety gates per dangerous\n"
         << L"                             capability (read-only; performs nothing)\n"
         << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"

@@ -40,6 +40,7 @@ add_executable(CppOptimizer
     source/logger/logger.cpp
     source/memory/memory_tuner.cpp
     source/memory/memory_cleaner.cpp
+    source/memory/working_set.cpp
     source/metrics/memory_metrics.cpp
     source/metrics/pdh_metrics.cpp
     source/platform/native_api.cpp
@@ -151,6 +152,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         source/common/error.cpp
         source/memory/memory_tuner.cpp
         source/memory/memory_cleaner.cpp
+        source/memory/working_set.cpp
     )
     target_include_directories(CppOptimizerMemoryTests PRIVATE include)
     target_compile_features(CppOptimizerMemoryTests PRIVATE cxx_std_20)

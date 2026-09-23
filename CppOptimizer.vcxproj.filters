@@ -33,6 +33,9 @@
     <ClInclude Include="include\memory\memory_cleaner.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\memory\working_set.hpp">
+      <Filter>include\memory</Filter>
+    </ClInclude>
     <ClInclude Include="include\metrics\memory_metrics.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -122,6 +125,9 @@
     </ClCompile>
     <ClCompile Include="source\memory\memory_cleaner.cpp">
       <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\memory\working_set.cpp">
+      <Filter>source\memory</Filter>
     </ClCompile>
     <ClCompile Include="source\metrics\memory_metrics.cpp">
       <Filter>源文件</Filter>

@@ -1,8 +1,10 @@
 ﻿#include "memory/memory_tuner.hpp"
 #include "memory/memory_cleaner.hpp"
+#include "memory/working_set.hpp"
 
 #include <chrono>
 #include <iostream>
+#include <optional>
 #include <vector>
 
 namespace {
@@ -261,6 +263,51 @@ bool TestPlanMemoryCleanLevels() {
     return lightSteps && mediumSteps && deepSteps && rejected && blockedOk;
 }
 
+bool TestWorkingSetDeltaAndBackend() {
+    using optimizer::memory::CleanKind;
+    using optimizer::memory::DeltaBytes;
+    using optimizer::memory::DescribeWorkingSetDelta;
+    using optimizer::memory::MakeWorkingSetDelta;
+    using optimizer::memory::SelfWorkingSetTrimBackend;
+    using optimizer::memory::WorkingSetReading;
+    using optimizer::memory::WorkingSetReduced;
+
+    // 纯函数：两侧都有读数 -> 差值/下降判定/描述文案；缺失一侧 -> 不给差值，描述为 unknown。
+    const std::optional<WorkingSetReading> before = WorkingSetReading{4096, 8192};
+    const std::optional<WorkingSetReading> after = WorkingSetReading{1024, 8192};
+    const auto both = MakeWorkingSetDelta(before, after);
+    const bool bothOk = DeltaBytes(both).has_value() && *DeltaBytes(both) == -3072 &&
+                        WorkingSetReduced(both) &&
+                        DescribeWorkingSetDelta(both) ==
+                            "working_set_before=4096 working_set_after=1024 delta=-3072";
+    const auto grew = MakeWorkingSetDelta(after, before);
+    const bool grewOk = !WorkingSetReduced(grew) && *DeltaBytes(grew) == 3072;
+    const auto missing = MakeWorkingSetDelta(std::nullopt, after);
+    const bool missingOk = !DeltaBytes(missing).has_value() &&
+                           !WorkingSetReduced(missing) &&
+                           DescribeWorkingSetDelta(missing) ==
+                               "working_set_before=unknown working_set_after=1024 delta=unknown";
+
+    // 后端：R3 步骤**如实拒绝**（Unsupported，不伪装成功）。
+    SelfWorkingSetTrimBackend backend;
+    const auto standby = backend.Execute(CleanKind::StandbyListPurge);
+    const auto fileCache = backend.Execute(CleanKind::SystemFileCacheTrim);
+    const bool refusesHeavierSteps =
+        !standby && !fileCache &&
+        standby.ErrorValue().domain == optimizer::common::ErrorDomain::Unsupported &&
+        fileCache.ErrorValue().domain == optimizer::common::ErrorDomain::Unsupported;
+
+    // 真实路径（R1，仅本测试进程自身）：读数可读 + 修剪成功 + 修剪后读数仍可读。
+    const auto readBefore = optimizer::memory::QueryOwnWorkingSet();
+    const auto trimmed = backend.Execute(CleanKind::WorkingSetTrim);
+    const auto readAfter = optimizer::memory::QueryOwnWorkingSet();
+    const bool ownTrim = static_cast<bool>(readBefore) && static_cast<bool>(trimmed) &&
+                         static_cast<bool>(readAfter) &&
+                         readBefore.Value().workingSetBytes > 0 &&
+                         readAfter.Value().workingSetBytes > 0;
+    return bothOk && grewOk && missingOk && refusesHeavierSteps && ownTrim;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -290,5 +337,6 @@ int wmain() {
     run(L"plan memory clean levels", &TestPlanMemoryCleanLevels);
     run(L"refusing clean backend is honest", &TestRefusingCleanBackendIsHonest);
     run(L"clean plan orchestration", &TestCleanPlanOrchestration);
+    run(L"working set delta and backend", &TestWorkingSetDeltaAndBackend);
     return failed == 0 ? 0 : 1;
 }
