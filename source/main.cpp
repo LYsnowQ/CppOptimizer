@@ -16,6 +16,7 @@
 #include "platform/native_api.hpp"
 #include "policy/policy_engine.hpp"
 #include "policy/policy_executor.hpp"
+#include "policy/safety_gates.hpp"
 #include "power/power_locker.hpp"
 #include "priority/priority_booster.hpp"
 #include "process/process_watcher.hpp"
@@ -278,6 +279,79 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText,
                << optimizer::memory::FormatBytes(r.maxAvailableBytes) << L"\n";
     std::wcout << L"  load < " << threshold << L"%   : " << share.Value()
                << L"% of samples\n";
+    return 0;
+}
+
+// --gates [config.toml]：危险能力的**门禁诊断**（只读）。逐能力列出六道门的状态与首个阻塞门；
+// 不执行任何动作、不改变任何门禁状态。R2/R3 的真实动作还额外要求隔离环境（危险操作策略）。
+int RunGatesCommand(int argc, wchar_t* argv[]) {
+    std::optional<optimizer::config::ConfigSnapshot> snapshot;
+    if (argc >= 3) {
+        const auto loaded = optimizer::config::LoadConfig(argv[2]);
+        if (!loaded) {
+            const auto& error = loaded.ErrorValue();
+            ErrorLine{} << L"  config load failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        snapshot = loaded.Value();
+    }
+    optimizer::common::WriteConsoleLine(
+        L"Safety gates (read-only; no action is performed)");
+    optimizer::common::WriteConsoleLine(
+        L"  capability                   compile config cmdline perm_env audit cooldown  verdict");
+    // 每个能力：只填**已知**的门；未实现的门一律显示 n/a 并计入裁决（不得假装已通过）。
+    struct Capability {
+        const wchar_t* name;
+        bool configured;
+    };
+    const bool hasConfig = snapshot.has_value();
+    const Capability capabilities[] = {
+        {L"power.switch_power_scheme",
+         hasConfig && snapshot->power.switchPowerScheme},
+        {L"memory.scheduled_clean_enabled",
+         hasConfig && snapshot->memory.scheduledCleanEnabled},
+        {L"memory.allow_native_write", hasConfig && snapshot->memory.allowNativeWrite},
+        {L"memory.max_clean_level",
+         hasConfig &&
+             snapshot->memory.maxCleanLevel != optimizer::config::CleanLevel::None},
+    };
+    for (const auto& capability : capabilities) {
+        optimizer::policy::GateInputs inputs;
+        inputs.compileTime = false;          // 未定义该能力的编译期开关
+        inputs.config = capability.configured;
+        inputs.commandLine = false;          // 未实现该能力的命令行显式确认
+        inputs.permissionAndEnvironment = false; // 未实现权限/环境探测
+        inputs.audit = false;                // 未实现“审计可用”门
+        inputs.cooldown = false;             // 未实现冷却门
+        const auto evaluation = optimizer::policy::EvaluateGates(inputs);
+        std::wostringstream line;
+        line << L"  " << capability.name;
+        const auto mark = [](bool value) -> const wchar_t* {
+            return value ? L"yes" : L"no";
+        };
+        const std::size_t nameWidth = wcslen(capability.name);
+        for (std::size_t i = nameWidth; i < 31; ++i) { // 列宽 31（保证与后列至少一个空格）
+            line << L' ';
+        }
+        line << mark(evaluation.gates.compileTime) << L"     "
+             << mark(evaluation.gates.config) << L"      "
+             << mark(evaluation.gates.commandLine) << L"      "
+             << mark(evaluation.gates.permissionAndEnvironment) << L"      "
+             << mark(evaluation.gates.audit) << L"     "
+             << mark(evaluation.gates.cooldown) << L"        "
+             << (evaluation.allowed ? L"allowed" : L"blocked");
+        if (!evaluation.allowed && evaluation.firstBlocking.has_value()) {
+            const std::string gate =
+                optimizer::policy::GateIdToString(*evaluation.firstBlocking);
+            line << L" (first: " << std::wstring(gate.begin(), gate.end()) << L")";
+        }
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    optimizer::common::WriteConsoleLine(
+        L"  note     : R2/R3 real actions additionally require an isolated environment;"
+        L" this command performs nothing");
     return 0;
 }
 
@@ -4561,6 +4635,8 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --audit-summary [path] [lines]  Read back compacted summary\n"
         << L"                             totals (read-only; default: per-user summary file,\n"
         << L"                             last 20 lines, max 200)\n"
+        << L"  CppOptimizer.exe --gates [config.toml]  Report the six safety gates per dangerous\n"
+        << L"                             capability (read-only; performs nothing)\n"
         << L"  CppOptimizer.exe --config <path>  Parse and validate a TOML config file\n"
         << L"  CppOptimizer.exe --cpu          Sample CPU usage (read-only, PDH)\n"
         << L"  CppOptimizer.exe --watch <s> [config.toml]  Watch game process lifecycle\n"
@@ -4689,6 +4765,10 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argc >= 2 && argc <= 4 &&
             std::wstring_view(argv[1]) == L"--audit-summary") {
             return RunAuditSummaryCommand(argc, argv);
+        }
+        if ((argc == 2 || argc == 3) &&
+            std::wstring_view(argv[1]) == L"--gates") {
+            return RunGatesCommand(argc, argv);
         }
         if (argc == 3 && std::wstring_view(argv[1]) == L"--config") {
             return RunConfigCommand(argv[2]);

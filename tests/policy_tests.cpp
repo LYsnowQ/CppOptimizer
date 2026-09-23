@@ -1,4 +1,5 @@
 ﻿#include "policy/policy_engine.hpp"
+#include "policy/safety_gates.hpp"
 
 #include <chrono>
 #include <cwchar>
@@ -444,6 +445,56 @@ bool TestEvaluatorReset() {
 
 } // namespace
 
+// ---------- 门禁判定（六道门，只读判定） ----------
+
+bool TestEvaluateGatesAllPass() {
+    using optimizer::policy::EvaluateGates;
+    using optimizer::policy::GateInputs;
+    GateInputs inputs;
+    inputs.compileTime = true;
+    inputs.config = true;
+    inputs.commandLine = true;
+    inputs.permissionAndEnvironment = true;
+    inputs.audit = true;
+    inputs.cooldown = true;
+    const auto evaluation = EvaluateGates(inputs);
+    return evaluation.allowed && !evaluation.firstBlocking.has_value() &&
+           evaluation.gates.audit;
+}
+
+bool TestEvaluateGatesFirstBlockingOrder() {
+    using optimizer::policy::EvaluateGates;
+    using optimizer::policy::GateId;
+    using optimizer::policy::GateInputs;
+    using optimizer::policy::GateIdToString;
+    // 全 false：首个阻塞门是顺序上的第一道（编译期开关）。
+    const auto none = EvaluateGates(GateInputs{});
+    if (none.allowed || !none.firstBlocking.has_value() ||
+        *none.firstBlocking != GateId::CompileTime ||
+        std::string(GateIdToString(*none.firstBlocking)) != "compile") {
+        return false;
+    }
+    // 只开前 2 道：首个阻塞门应是第 3 道（命令行确认）。
+    GateInputs partial;
+    partial.compileTime = true;
+    partial.config = true;
+    const auto third = EvaluateGates(partial);
+    if (third.allowed || !third.firstBlocking.has_value() ||
+        *third.firstBlocking != GateId::CommandLine) {
+        return false;
+    }
+    // 只缺最后一道（冷却）：其余全通过仍不得放行。
+    GateInputs withoutCooldown;
+    withoutCooldown.compileTime = true;
+    withoutCooldown.config = true;
+    withoutCooldown.commandLine = true;
+    withoutCooldown.permissionAndEnvironment = true;
+    withoutCooldown.audit = true;
+    const auto cooldownBlocked = EvaluateGates(withoutCooldown);
+    return !cooldownBlocked.allowed && cooldownBlocked.firstBlocking.has_value() &&
+           *cooldownBlocked.firstBlocking == GateId::Cooldown;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -493,5 +544,8 @@ int wmain() {
     run(L"PolicyEvaluator action switch while acting",
         &TestEvaluatorActionSwitchWhileActing);
     run(L"PolicyEvaluator reset", &TestEvaluatorReset);
+    run(L"evaluate gates all pass", &TestEvaluateGatesAllPass);
+    run(L"evaluate gates first blocking order",
+        &TestEvaluateGatesFirstBlockingOrder);
     return failed == 0 ? 0 : 1;
 }

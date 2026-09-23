@@ -42,6 +42,7 @@ add_executable(CppOptimizer
     source/policy/policy_executor.cpp
     source/power/power_locker.cpp
     source/priority/priority_booster.cpp
+    source/policy/safety_gates.cpp
     source/process/process_watcher.cpp
     source/activity/user_activity.cpp
     source/activity/raw_input.cpp
@@ -255,6 +256,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         tests/policy_tests.cpp
         source/common/error.cpp
         source/policy/policy_engine.cpp
+        source/policy/safety_gates.cpp
     )
     target_include_directories(CppOptimizerPolicyTests PRIVATE include)
     target_compile_features(CppOptimizerPolicyTests PRIVATE cxx_std_20)

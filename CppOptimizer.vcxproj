@@ -108,6 +108,7 @@
     <ClInclude Include="include\metrics\pdh_metrics.hpp" />
     <ClInclude Include="include\platform\native_api.hpp" />
     <ClInclude Include="include\policy\policy_engine.hpp" />
+    <ClInclude Include="include\policy\safety_gates.hpp" />
     <ClInclude Include="include\policy\policy_executor.hpp" />
     <ClInclude Include="include\power\power_locker.hpp" />
     <ClInclude Include="include\priority\priority_booster.hpp" />
@@ -139,6 +140,7 @@
     <ClCompile Include="source\metrics\pdh_metrics.cpp" />
     <ClCompile Include="source\platform\native_api.cpp" />
     <ClCompile Include="source\policy\policy_engine.cpp" />
+    <ClCompile Include="source\policy\safety_gates.cpp" />
     <ClCompile Include="source\policy\policy_executor.cpp" />
     <ClCompile Include="source\power\power_locker.cpp" />
     <ClCompile Include="source\priority\priority_booster.cpp" />

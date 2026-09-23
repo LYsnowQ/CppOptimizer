@@ -37,6 +37,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="include\policy\policy_engine.hpp">
+      <Filter>include\policy</Filter>
+    </ClInclude>
+    <ClInclude Include="include\policy\safety_gates.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="include\policy\policy_executor.hpp">
@@ -124,6 +127,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\policy\policy_engine.cpp">
+      <Filter>source\policy</Filter>
+    </ClCompile>
+    <ClCompile Include="source\policy\safety_gates.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\policy\policy_executor.cpp">
