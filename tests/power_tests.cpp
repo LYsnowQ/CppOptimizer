@@ -1,6 +1,15 @@
 ﻿#include "power/power_locker.hpp"
 #include "power/power_scheme.hpp"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <string>
@@ -504,6 +513,12 @@ public:
 
     Result<void> SetActive(std::string_view guid) override {
         writes.push_back(std::string(guid));
+        if (observePath != nullptr) {
+            std::ifstream in(*observePath, std::ios::binary);
+            std::string content((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+            sawPendingRecordAtSet = content.find("state=pending") != std::string::npos;
+        }
         if (failSet) {
             return Result<void>::Failure(Error::FromWin32(5, "PowerSetActiveScheme"));
         }
@@ -517,6 +532,9 @@ public:
     bool failSet = false;
     bool ignoreSet = false; // 模拟“调用成功但状态未变”
     std::vector<std::string> writes;
+    // 若设置：在 SetActive 调用瞬间读该文件，判断记录是否已是 pending（验证“先落盘后切换”）。
+    const std::filesystem::path* observePath = nullptr;
+    bool sawPendingRecordAtSet = false;
 
 private:
     std::string active_;
@@ -572,6 +590,220 @@ bool TestApplyAndRestoreScheme() {
            changedReportedHonest && invalidRefused && restoreHonest;
 }
 
+// 每用户记录文件路径（临时目录，测试后用后即删）。
+std::filesystem::path TempSchemeSavePath(const wchar_t* tag) {
+    std::error_code ec;
+    const auto dir = std::filesystem::temp_directory_path(ec);
+    return dir / (std::wstring(L"cpo_scheme_") + tag + L"_" +
+                  std::to_wstring(::GetCurrentProcessId()) + L".txt");
+}
+
+bool TestSchemeSaveRecordParsingAndIo() {
+    using optimizer::power::ParseSavedSchemeRecord;
+    using optimizer::power::ReadSavedSchemeRecord;
+    using optimizer::power::SaveSchemeRecord;
+    using optimizer::power::SavedSchemeRecord;
+    using optimizer::power::SchemeSaveState;
+    const std::string applied = std::string(optimizer::power::kSchemeSaveEnvelope) +
+                                "\nstate=applied\nsaved=" +
+                                std::string(optimizer::power::kSchemePowerSaver) +
+                                "\ntarget=" +
+                                std::string(optimizer::power::kSchemeHighPerformance) +
+                                "\n";
+    const auto parsed = ParseSavedSchemeRecord(applied);
+    const bool parseOk =
+        parsed.has_value() && parsed->state == SchemeSaveState::Applied &&
+        parsed->savedGuid == optimizer::power::kSchemePowerSaver &&
+        parsed->targetGuid.has_value() &&
+        *parsed->targetGuid == optimizer::power::kSchemeHighPerformance;
+    // 缺状态 / 未知状态 / 缺 saved / 非法 GUID / 信封不符 -> 一律不接受。
+    const bool rejected =
+        !ParseSavedSchemeRecord(std::string(optimizer::power::kSchemeSaveEnvelope) +
+                                "\nsaved=" +
+                                std::string(optimizer::power::kSchemePowerSaver) + "\n")
+             .has_value() &&
+        !ParseSavedSchemeRecord(std::string(optimizer::power::kSchemeSaveEnvelope) +
+                                "\nstate=maybe\nsaved=" +
+                                std::string(optimizer::power::kSchemePowerSaver) + "\n")
+             .has_value() &&
+        !ParseSavedSchemeRecord(std::string(optimizer::power::kSchemeSaveEnvelope) +
+                                "\nstate=applied\n")
+             .has_value() &&
+        !ParseSavedSchemeRecord(std::string(optimizer::power::kSchemeSaveEnvelope) +
+                                "\nstate=applied\nsaved=not-a-guid\n")
+             .has_value() &&
+        !ParseSavedSchemeRecord("OtherEnvelope/1\nstate=applied\nsaved=" +
+                                std::string(optimizer::power::kSchemePowerSaver) + "\n")
+             .has_value();
+    // 文件往返（含 pending + target）+ 原子替换不留 .tmp；不可信内容读回为“无记录”。
+    const auto path = TempSchemeSavePath(L"io");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    SavedSchemeRecord record;
+    record.savedGuid = std::string(optimizer::power::kSchemePowerSaver);
+    record.targetGuid = std::string(optimizer::power::kSchemeHighPerformance);
+    record.state = SchemeSaveState::Pending;
+    const auto written = SaveSchemeRecord(path, record);
+    const auto read = ReadSavedSchemeRecord(path);
+    const bool roundTrip =
+        written && read && read.Value().has_value() &&
+        read.Value()->state == SchemeSaveState::Pending &&
+        read.Value()->savedGuid == record.savedGuid;
+    std::filesystem::path tempPath = path;
+    tempPath += L".tmp";
+    const bool noTempLeft = !std::filesystem::exists(tempPath, ec);
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << "garbage\n";
+    }
+    const auto garbage = ReadSavedSchemeRecord(path);
+    const bool garbageRejected = garbage && !garbage.Value().has_value();
+    const auto emptyPath = SaveSchemeRecord({}, record);
+    const auto badGuid = SaveSchemeRecord(path, SavedSchemeRecord{"nope", std::nullopt,
+                                                                 SchemeSaveState::Pending});
+    const bool refusedBadInput =
+        !emptyPath && !badGuid &&
+        emptyPath.ErrorValue().domain == optimizer::common::ErrorDomain::Validation &&
+        badGuid.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
+    std::filesystem::remove(path, ec);
+    return parseOk && rejected && roundTrip && noTempLeft && garbageRejected &&
+           refusedBadInput;
+}
+
+bool TestSchemeRecoveryDecision() {
+    using optimizer::power::DecideSchemeRecovery;
+    using optimizer::power::SavedSchemeRecord;
+    using optimizer::power::SchemeRecoveryAction;
+    using optimizer::power::SchemeSaveState;
+    const std::string saved(optimizer::power::kSchemePowerSaver);
+    const std::string other(optimizer::power::kSchemeHighPerformance);
+    SavedSchemeRecord pending;
+    pending.savedGuid = saved;
+    pending.targetGuid = other;
+    pending.state = SchemeSaveState::Pending;
+    SavedSchemeRecord applied = pending;
+    applied.state = SchemeSaveState::Applied;
+    SavedSchemeRecord restored = pending;
+    restored.state = SchemeSaveState::Restored;
+    const bool noRecord = DecideSchemeRecovery(std::nullopt, saved) ==
+                          SchemeRecoveryAction::None;
+    const bool appliedNone =
+        DecideSchemeRecovery(applied, other) == SchemeRecoveryAction::None;
+    const bool restoredNone =
+        DecideSchemeRecovery(restored, other) == SchemeRecoveryAction::None;
+    const bool pendingDiffers = DecideSchemeRecovery(pending, other) ==
+                                SchemeRecoveryAction::RestoreToSaved;
+    const bool pendingSame = DecideSchemeRecovery(pending, saved) ==
+                             SchemeRecoveryAction::MarkNeverApplied;
+    // 实际状态未知（空串/非法）-> 不凭猜测动作。
+    const bool unknownActive =
+        DecideSchemeRecovery(pending, "") == SchemeRecoveryAction::None;
+    return noRecord && appliedNone && restoredNone && pendingDiffers && pendingSame &&
+           unknownActive;
+}
+
+bool TestSchemeFlowWithRecords() {
+    using optimizer::power::ApplySchemeWithRecord;
+    using optimizer::power::kSchemeHighPerformance;
+    using optimizer::power::kSchemePowerSaver;
+    using optimizer::power::ReadSavedSchemeRecord;
+    using optimizer::power::RecoverPendingScheme;
+    using optimizer::power::RestoreSchemeWithRecord;
+    using optimizer::power::SchemeRecoveryAction;
+    using optimizer::power::SchemeSaveState;
+    const auto path = TempSchemeSavePath(L"flow");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    // 正常路径：**先落盘 pending（在 SetActive 瞬间核对）** -> 切换 -> 读回 -> 记录变 applied。
+    FakeSchemeBackend backend{std::string(kSchemePowerSaver)};
+    backend.observePath = &path;
+    const auto applied = ApplySchemeWithRecord(backend, path, kSchemeHighPerformance);
+    const auto afterApply = ReadSavedSchemeRecord(path);
+    const bool applyOk = applied && applied.Value().changed &&
+                         applied.Value().recordMarkedApplied &&
+                         backend.sawPendingRecordAtSet && afterApply &&
+                         afterApply.Value().has_value() &&
+                         afterApply.Value()->state == SchemeSaveState::Applied &&
+                         afterApply.Value()->savedGuid == std::string(kSchemePowerSaver);
+    // 回滚（带记录）：切换回保存值并把记录标 restored。
+    const auto rolledBack = RestoreSchemeWithRecord(backend, path);
+    const auto afterRestore = ReadSavedSchemeRecord(path);
+    const bool restoreOk =
+        rolledBack && rolledBack.Value().restored &&
+        rolledBack.Value().recordMarkedRestored && afterRestore &&
+        afterRestore.Value().has_value() &&
+        afterRestore.Value()->state == SchemeSaveState::Restored;
+    // 读回不一致 -> **记录保持 pending**（下次启动保守回滚）。
+    std::filesystem::remove(path, ec);
+    FakeSchemeBackend silent{std::string(kSchemePowerSaver)};
+    silent.ignoreSet = true;
+    const auto notChanged = ApplySchemeWithRecord(silent, path, kSchemeHighPerformance);
+    const auto pendingAfterMismatch = ReadSavedSchemeRecord(path);
+    const bool mismatchKeepsPending =
+        notChanged && !notChanged.Value().changed && pendingAfterMismatch &&
+        pendingAfterMismatch.Value().has_value() &&
+        pendingAfterMismatch.Value()->state == SchemeSaveState::Pending;
+    // 读不到原 GUID -> 拒绝且**不写记录**。
+    std::filesystem::remove(path, ec);
+    FakeSchemeBackend blind{std::string(kSchemePowerSaver)};
+    blind.failGet = true;
+    const auto noInfo = ApplySchemeWithRecord(blind, path, kSchemeHighPerformance);
+    const bool noInfoRefused = !noInfo &&
+                               !std::filesystem::exists(path, ec) &&
+                               blind.writes.empty();
+    // 恢复依据写不进去（路径是目录）-> 拒绝切换（零后端写入）。
+    FakeSchemeBackend dirRefused{std::string(kSchemePowerSaver)};
+    const auto dirPath = std::filesystem::temp_directory_path(ec);
+    const auto cannotPersist = ApplySchemeWithRecord(dirRefused, dirPath,
+                                                    kSchemeHighPerformance);
+    const bool persistRefused = !cannotPersist && dirRefused.writes.empty();
+    // 崩溃恢复：pending + 实际 ≠ 保存值 -> 回滚并标 restored。
+    std::filesystem::remove(path, ec);
+    FakeSchemeBackend crashed{std::string(kSchemeHighPerformance)};
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << optimizer::power::kSchemeSaveEnvelope << "\nstate=pending\nsaved="
+            << kSchemePowerSaver << "\ntarget=" << kSchemeHighPerformance << "\n";
+    }
+    const auto recovered = RecoverPendingScheme(crashed, path);
+    const auto afterRecover = ReadSavedSchemeRecord(path);
+    const bool recoverOk =
+        recovered && recovered.Value().action == SchemeRecoveryAction::RestoreToSaved &&
+        recovered.Value().restored && crashed.writes.size() == 1 &&
+        crashed.writes[0] == std::string(kSchemePowerSaver) && afterRecover &&
+        afterRecover.Value().has_value() &&
+        afterRecover.Value()->state == SchemeSaveState::Restored;
+    // 崩溃恢复：pending + 实际 == 保存值 -> 切换从未生效（不动系统、只改状态）。
+    std::filesystem::remove(path, ec);
+    FakeSchemeBackend neverApplied{std::string(kSchemePowerSaver)};
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << optimizer::power::kSchemeSaveEnvelope << "\nstate=pending\nsaved="
+            << kSchemePowerSaver << "\n";
+    }
+    const auto marked = RecoverPendingScheme(neverApplied, path);
+    const bool neverAppliedOk =
+        marked &&
+        marked.Value().action == SchemeRecoveryAction::MarkNeverApplied &&
+        !marked.Value().restored && neverApplied.writes.empty();
+    // applied 记录 -> 不自动回滚（有意保留）。
+    std::filesystem::remove(path, ec);
+    FakeSchemeBackend kept{std::string(kSchemeHighPerformance)};
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << optimizer::power::kSchemeSaveEnvelope << "\nstate=applied\nsaved="
+            << kSchemePowerSaver << "\n";
+    }
+    const auto keptResult = RecoverPendingScheme(kept, path);
+    const bool keptOk = keptResult &&
+                        keptResult.Value().action == SchemeRecoveryAction::None &&
+                        kept.writes.empty();
+    std::filesystem::remove(path, ec);
+    return applyOk && restoreOk && mismatchKeepsPending && noInfoRefused &&
+           persistRefused && recoverOk && neverAppliedOk && keptOk;
+}
+
 bool TestWin32SchemeBackendReadOnly() {
     // 真实后端**只读**调用（不切换）：读回当前活动电源计划 GUID 必须是合法形式。
     const auto active = optimizer::power::Win32PowerSchemeBackend().GetActive();
@@ -608,6 +840,9 @@ int wmain() {
     run(L"create win32 backend", &TestCreateWin32Backend);
     run(L"scheme guid pure functions", &TestSchemeGuidPureFunctions);
     run(L"apply and restore scheme", &TestApplyAndRestoreScheme);
+    run(L"scheme save record parsing and io", &TestSchemeSaveRecordParsingAndIo);
+    run(L"scheme recovery decision", &TestSchemeRecoveryDecision);
+    run(L"scheme flow with records", &TestSchemeFlowWithRecords);
     run(L"win32 scheme backend read only", &TestWin32SchemeBackendReadOnly);
     return failed == 0 ? 0 : 1;
 }

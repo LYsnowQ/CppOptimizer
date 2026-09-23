@@ -2276,10 +2276,12 @@ std::string ToAsciiToken(const std::wstring& text) {
     return token;
 }
 
-// --power-scheme status | saved | restore | <balanced|high-performance|power-saver|GUID>
+// --power-scheme status | saved | recover | restore | <balanced|high-performance|power-saver|GUID>
 //                      [config.toml] [--acknowledge-system-wide-side-effects]
-// R0：`status` / `saved`（只读）；R2：切换与恢复（系统级但**可逆**：保存原 GUID -> 切换 -> 读回；
-// 恢复 -> 读回）。真实“切换 -> 恢复”属隔离环境验证项（宿主不得执行）。
+// R0：`status` / `saved`（只读）；R2：切换、回滚与恢复。
+// 门禁口径（有意不对称）：**正向切换**要求六道门全通；**回滚/恢复**只要求
+// compile（本构建是否含该能力）+ audit（动作必须可审计）——回滚路径必须比正向路径更易用，
+// 否则系统可能停在错误状态上（电池/锁屏/冷却都不该阻止回滚）。
 int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
     std::optional<std::filesystem::path> configPath;
     bool acknowledged = false;
@@ -2309,7 +2311,8 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
                                      ? static_cast<char>(ch - 'A' + 'a')
                                      : ch);
             }
-            if (folded == "status" || folded == "saved" || folded == "restore") {
+            if (folded == "status" || folded == "saved" || folded == "restore" ||
+                folded == "recover") {
                 action = folded;
                 continue;
             }
@@ -2321,8 +2324,8 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
             }
             ErrorLine{} << L"  unknown --power-scheme target: "
                         << WidenAscii(text)
-                        << L" (use status|saved|restore|balanced|high-performance|"
-                           L"power-saver|<GUID>)\n";
+                        << L" (use status|saved|recover|restore|balanced|"
+                           L"high-performance|power-saver|<GUID>)\n";
             return 2;
         }
         if (configPath.has_value()) {
@@ -2332,54 +2335,63 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
         configPath = std::filesystem::path(argv[i]);
     }
     if (action.empty()) {
-        ErrorLine{} << L"  --power-scheme requires status|saved|restore|balanced|"
-                       L"high-performance|power-saver|<GUID>\n";
+        ErrorLine{} << L"  --power-scheme requires status|saved|recover|restore|"
+                       L"balanced|high-performance|power-saver|<GUID>\n";
         return 2;
     }
     auto& backend = optimizer::power::Win32PowerSchemeBackend();
+    const auto savePath = DefaultPowerSchemeSavePath();
+    const auto record = optimizer::power::ReadSavedSchemeRecord(savePath);
 
-    if (action == "status") {
-        const auto active = backend.GetActive();
-        if (!active) {
-            const auto& error = active.ErrorValue();
-            ErrorLine{} << L"  active scheme query failed ["
-                        << optimizer::common::ToString(error.domain) << L":"
-                        << error.code << L"] " << error.message << L"\n";
-            return 2;
-        }
-        optimizer::common::WriteConsoleLine(
-            L"Power scheme (read-only, PowerGetActiveScheme)");
-        optimizer::common::WriteConsoleLine(L"  active   : " +
-                                            WidenAscii(active.Value()));
-        const auto saved = optimizer::power::ReadSavedSchemeGuid(
-            DefaultPowerSchemeSavePath());
-        optimizer::common::WriteConsoleLine(
-            L"  saved    : " +
-            (saved && saved.Value().has_value() ? WidenAscii(*saved.Value())
-                                                : std::wstring(L"none")));
-        return 0;
-    }
-
-    if (action == "saved") {
-        const auto saved = optimizer::power::ReadSavedSchemeGuid(
-            DefaultPowerSchemeSavePath());
-        if (!saved) {
-            const auto& error = saved.ErrorValue();
+    if (action == "status" || action == "saved") {
+        if (!record) {
+            const auto& error = record.ErrorValue();
             ErrorLine{} << L"  saved scheme read failed ["
                         << optimizer::common::ToString(error.domain) << L":"
                         << error.code << L"] " << error.message << L"\n";
             return 2;
         }
+        if (action == "status") {
+            const auto active = backend.GetActive();
+            if (!active) {
+                const auto& error = active.ErrorValue();
+                ErrorLine{} << L"  active scheme query failed ["
+                            << optimizer::common::ToString(error.domain) << L":"
+                            << error.code << L"] " << error.message << L"\n";
+                return 2;
+            }
+            optimizer::common::WriteConsoleLine(
+                L"Power scheme (read-only, PowerGetActiveScheme)");
+            optimizer::common::WriteConsoleLine(L"  active   : " +
+                                                WidenAscii(active.Value()));
+        } else {
+            optimizer::common::WriteConsoleLine(
+                L"Saved power scheme (read-only; restore basis)");
+        }
+        if (!record.Value().has_value()) {
+            optimizer::common::WriteConsoleLine(L"  record   : none");
+            return 0;
+        }
+        const auto& saved = *record.Value();
+        optimizer::common::WriteConsoleLine(L"  saved    : " +
+                                            WidenAscii(saved.savedGuid));
         optimizer::common::WriteConsoleLine(
-            L"Saved power scheme (read-only; restore basis)");
-        optimizer::common::WriteConsoleLine(
-            L"  saved    : " +
-            (saved.Value().has_value() ? WidenAscii(*saved.Value())
-                                       : std::wstring(L"none")));
+            L"  state    : " + WidenAscii(
+                                  optimizer::power::SchemeSaveStateToString(
+                                      saved.state)));
+        if (saved.targetGuid.has_value()) {
+            optimizer::common::WriteConsoleLine(L"  target   : " +
+                                                WidenAscii(*saved.targetGuid));
+        }
+        if (saved.state == optimizer::power::SchemeSaveState::Pending) {
+            optimizer::common::WriteConsoleLine(
+                L"  warning  : a previous switch was not confirmed (state=pending);"
+                L" run --power-scheme recover to roll back to the saved scheme");
+        }
         return 0;
     }
 
-    // 以下为 R2 真实动作：门禁全通才执行（恢复路径不看冷却）。
+    // 以下为真实动作：先算门禁。
     optimizer::config::ConfigSnapshot snapshot{};
     bool configEnabled = false;
     if (configPath.has_value()) {
@@ -2394,93 +2406,88 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
         snapshot = loaded.Value();
         configEnabled = snapshot.power.switchPowerScheme;
     }
-    const bool isRestore = action == "restore";
-    const auto context =
-        GatherPowerSchemeGates(acknowledged, configEnabled, !isRestore);
+    const bool isForward = action == "apply";
+    // 回滚/恢复只要求 compile + audit（见函数头注释）。
+    const auto context = GatherPowerSchemeGates(
+        isForward ? acknowledged : true, configEnabled, isForward);
+    optimizer::policy::GateInputs effective = context.inputs;
+    if (!isForward) {
+        effective.config = true;
+        effective.commandLine = true;
+        effective.permissionAndEnvironment = true;
+        effective.cooldown = true;
+    }
+    const auto gates = isForward ? context.gates
+                                 : optimizer::policy::EvaluateGates(effective);
     const std::string target = configPath.has_value() ? "config" : "defaults";
-    if (!context.gates.allowed) {
-        const std::string gate = FirstBlockingGateName(context.gates);
+    if (!gates.allowed) {
+        const std::string gate = FirstBlockingGateName(gates);
         ErrorLine{} << L"  --power-scheme " << WidenAscii(action)
                     << L" refused [first blocked gate: " << WidenAscii(gate)
                     << L"] (no system call was made)\n";
         if (!context.auditWritable) {
-            ErrorLine{} << L"  audit    : unavailable - a real action is refused before any"
-                           L" system call (audit must be writable first)\n";
+            ErrorLine{} << L"  audit    : unavailable - a real action is refused before"
+                           L" any system call (audit must be writable first)\n";
         }
         if (!context.inputs.compileTime) {
             ErrorLine{} << L"  hint     : this capability is compiled out by default"
                            L" (build option OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH)\n";
         }
-        if (!context.inputs.config) {
+        if (isForward && !context.inputs.config) {
             ErrorLine{} << L"  hint     : set [power].switch_power_scheme = true in the config\n";
         }
-        if (!context.inputs.commandLine) {
+        if (isForward && !context.inputs.commandLine) {
             ErrorLine{} << L"  hint     : pass --acknowledge-system-wide-side-effects\n";
         }
-        if (!context.inputs.cooldown && !isRestore) {
-            ErrorLine{} << L"  hint     : the cooldown window is still open; restore"
-                           L" is never blocked by cooldown\n";
+        if (isForward && !context.inputs.cooldown) {
+            ErrorLine{} << L"  hint     : the cooldown window is still open; rollback"
+                           L" (restore/recover) is never blocked by cooldown\n";
         }
         return 2;
     }
 
-    std::string restoreBasis = targetGuid; // apply: 目标；restore: 保存值
-    if (isRestore) {
-        const auto saved = optimizer::power::ReadSavedSchemeGuid(
-            DefaultPowerSchemeSavePath());
-        if (!saved) {
-            const auto& error = saved.ErrorValue();
+    if (action == "recover") {
+        if (!record) {
+            const auto& error = record.ErrorValue();
             ErrorLine{} << L"  saved scheme read failed ["
                         << optimizer::common::ToString(error.domain) << L":"
                         << error.code << L"] " << error.message << L"\n";
             return 2;
         }
-        if (!saved.Value().has_value()) {
-            ErrorLine{} << L"  --power-scheme restore refused: no saved scheme on disk"
-                           L" (nothing to roll back to; no system call was made)\n";
-            return 2;
+        if (!record.Value().has_value()) {
+            optimizer::common::WriteConsoleLine(
+                L"Power scheme recover (rollback; no record on disk)");
+            optimizer::common::WriteConsoleLine(L"  verdict  : nothing to recover");
+            return 0;
         }
-        restoreBasis = *saved.Value();
-    }
-
-    if (!isRestore) {
-        JournalAction("power.scheme_apply", target, true,
+        JournalAction("power.scheme_recover", target, true,
                       optimizer::audit::JournalPhase::Before,
-                      "intent: switch active power scheme (save original GUID first)");
-        const auto switched =
-            optimizer::power::ApplyScheme(backend, targetGuid);
+                      "intent: roll back an unconfirmed power scheme switch");
+        const auto recovered =
+            optimizer::power::RecoverPendingScheme(backend, savePath);
         bool ok = false;
-        std::wstring detail;
         std::string state;
-        if (switched) {
-            const auto& outcome = switched.Value();
-            ok = outcome.changed;
-            state = "previous=" + outcome.previousGuid +
-                    " target=" + outcome.targetGuid +
+        std::wstring detail;
+        std::string actionName = "none";
+        if (recovered) {
+            const auto& outcome = recovered.Value();
+            actionName = optimizer::power::SchemeRecoveryActionToString(outcome.action);
+            state = "action=" + actionName + " saved=" + outcome.savedGuid +
                     " active=" + outcome.activeGuid;
-            if (ok) {
-                // 保存恢复依据**在切换之后**写入：先读写回确认已切换，再落盘（失败也如实上报）。
-                const auto savedPath = DefaultPowerSchemeSavePath();
-                const auto saved = optimizer::power::SaveSchemeGuid(
-                    savedPath, outcome.previousGuid);
-                detail = L"switched to target and verified by read-back";
-                if (!saved) {
-                    const auto& error = saved.ErrorValue();
-                    detail += L"; WARNING saved scheme not persisted [";
-                    detail += optimizer::common::ToString(error.domain);
-                    detail += L":";
-                    detail += std::to_wstring(error.code);
-                    detail += L"] ";
-                    detail += error.message;
-                } else {
-                    detail += L"; original GUID saved for restore";
-                }
+            if (outcome.action == optimizer::power::SchemeRecoveryAction::None) {
+                ok = true;
+                detail = L"nothing to roll back (record is applied/restored or absent)";
+            } else if (outcome.action ==
+                       optimizer::power::SchemeRecoveryAction::MarkNeverApplied) {
+                ok = true;
+                detail = L"the switch never took effect; record marked as restored";
             } else {
-                detail = L"switch call returned success but read-back shows "
-                         L"a different active scheme (not reported as switched)";
+                ok = outcome.restored;
+                detail = ok ? L"rolled back to the saved scheme and verified by read-back"
+                            : L"rollback call returned success but read-back differs";
             }
         } else {
-            const auto& error = switched.ErrorValue();
+            const auto& error = recovered.ErrorValue();
             detail = L"failed [";
             detail += optimizer::common::ToString(error.domain);
             detail += L":";
@@ -2489,58 +2496,102 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
             detail += error.message;
         }
         optimizer::common::WriteConsoleLine(
-            L"Power scheme apply (R2, reversible; original GUID saved first)");
-        optimizer::common::WriteConsoleLine(L"  target   : " +
-                                            WidenAscii(targetGuid));
+            L"Power scheme recover (rollback; never blocked by cooldown)");
         if (!state.empty()) {
             optimizer::common::WriteConsoleLine(L"  state    : " + WidenAscii(state));
         }
         optimizer::common::WriteConsoleLine(
-            L"  verdict  : " + std::wstring(ok ? L"switched (verified by read-back)"
-                                              : L"not applied"));
+            L"  verdict  : " + std::wstring(ok ? L"recovered" : L"not recovered"));
         if (!ok) {
             ErrorLine{} << L"  detail   : " << detail << L"\n";
         }
-        optimizer::common::WriteConsoleLine(
-            L"  note     : roll back with --power-scheme restore (automatic restore after"
-            L" a crash is not implemented yet)");
-        AuditAction("power.scheme_apply", optimizer::audit::RiskLevel::R2, target,
+        AuditAction("power.scheme_recover", optimizer::audit::RiskLevel::R2, target,
                     ok, ToAsciiToken(detail), state);
-        if (!ok) {
-            return 2;
-        }
-        const auto recorded = optimizer::policy::RecordCooldownRun(
-            DefaultCooldownLedgerPath(),
-            optimizer::policy::kPowerSchemeCapabilityId,
-            static_cast<std::int64_t>(std::time(nullptr)));
-        if (!recorded) {
-            const auto& error = recorded.ErrorValue();
-            std::wostringstream line;
-            line << L"  cooldown : not recorded ["
-                 << optimizer::common::ToString(error.domain) << L":"
-                 << error.code << L"] " << error.message
-                 << L" (the action itself did complete)";
-            optimizer::common::WriteConsoleLine(line.str());
-        }
-        return 0;
+        return ok ? 0 : 2;
     }
 
-    // restore 路径（回滚）：不受冷却门限制。
-    JournalAction("power.scheme_restore", target, true,
+    if (action == "restore") {
+        JournalAction("power.scheme_restore", target, true,
+                      optimizer::audit::JournalPhase::Before,
+                      "intent: restore saved power scheme (rollback)");
+        const auto restored =
+            optimizer::power::RestoreSchemeWithRecord(backend, savePath);
+        bool ok = false;
+        std::wstring detail;
+        std::string state;
+        if (restored) {
+            const auto& outcome = restored.Value();
+            ok = outcome.restored;
+            state = "saved=" + outcome.savedGuid + " active=" + outcome.activeGuid;
+            detail = ok ? L"restored and verified by read-back; record marked restored"
+                        : L"restore call returned success but read-back differs";
+        } else {
+            const auto& error = restored.ErrorValue();
+            detail = L"failed [";
+            detail += optimizer::common::ToString(error.domain);
+            detail += L":";
+            detail += std::to_wstring(error.code);
+            detail += L"] ";
+            detail += error.message;
+        }
+        optimizer::common::WriteConsoleLine(
+            L"Power scheme restore (rollback; never blocked by cooldown)");
+        if (!state.empty()) {
+            optimizer::common::WriteConsoleLine(L"  state    : " + WidenAscii(state));
+        }
+        optimizer::common::WriteConsoleLine(
+            L"  verdict  : " + std::wstring(ok ? L"restored (verified by read-back)"
+                                              : L"not restored"));
+        if (!ok) {
+            ErrorLine{} << L"  detail   : " << detail << L"\n";
+        }
+        AuditAction("power.scheme_restore", optimizer::audit::RiskLevel::R2, target,
+                    ok, ToAsciiToken(detail), state);
+        return ok ? 0 : 2;
+    }
+
+    // apply：先“恢复再工作”（上一会话若停在 pending，先回到已知安全值），再切换。
+    std::wstring preRecovery;
+    if (record && record.Value().has_value() &&
+        record.Value()->state == optimizer::power::SchemeSaveState::Pending) {
+        const auto recovered =
+            optimizer::power::RecoverPendingScheme(backend, savePath);
+        if (!recovered) {
+            const auto& error = recovered.ErrorValue();
+            ErrorLine{} << L"  --power-scheme apply refused: an unconfirmed previous"
+                           L" switch exists and could not be rolled back ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message
+                        << L" (no new switch was made)\n";
+            return 2;
+        }
+        preRecovery = L"previous unconfirmed switch reconciled ("
+                      L"action=" +
+                      WidenAscii(optimizer::power::SchemeRecoveryActionToString(
+                          recovered.Value().action)) +
+                      L")";
+    }
+    JournalAction("power.scheme_apply", target, true,
                   optimizer::audit::JournalPhase::Before,
-                  "intent: restore saved power scheme (rollback)");
-    const auto restored = optimizer::power::RestoreScheme(backend, restoreBasis);
+                  "intent: switch active power scheme (pending record written first)");
+    const auto switched = optimizer::power::ApplySchemeWithRecord(
+        backend, savePath, targetGuid);
     bool ok = false;
     std::wstring detail;
     std::string state;
-    if (restored) {
-        const auto& outcome = restored.Value();
-        ok = outcome.restored;
-        state = "saved=" + outcome.savedGuid + " active=" + outcome.activeGuid;
-        detail = ok ? L"restored and verified by read-back"
-                    : L"restore call returned success but read-back differs";
+    if (switched) {
+        const auto& outcome = switched.Value();
+        ok = outcome.changed;
+        state = "previous=" + outcome.previousGuid + " target=" + outcome.targetGuid +
+                " active=" + outcome.activeGuid;
+        if (ok) {
+            detail = L"switched and verified by read-back; record marked applied";
+        } else {
+            detail = L"switch call returned success but read-back shows a different"
+                     L" active scheme; the record stays pending (next run rolls back)";
+        }
     } else {
-        const auto& error = restored.ErrorValue();
+        const auto& error = switched.ErrorValue();
         detail = L"failed [";
         detail += optimizer::common::ToString(error.domain);
         detail += L":";
@@ -2549,21 +2600,40 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
         detail += error.message;
     }
     optimizer::common::WriteConsoleLine(
-        L"Power scheme restore (R2, rollback; never blocked by cooldown)");
-    optimizer::common::WriteConsoleLine(L"  saved    : " +
-                                        WidenAscii(restoreBasis));
+        L"Power scheme apply (R2, reversible; pending record written before the switch)");
+    optimizer::common::WriteConsoleLine(L"  target   : " + WidenAscii(targetGuid));
+    if (!preRecovery.empty()) {
+        optimizer::common::WriteConsoleLine(L"  pre-step : " + preRecovery);
+    }
     if (!state.empty()) {
         optimizer::common::WriteConsoleLine(L"  state    : " + WidenAscii(state));
     }
     optimizer::common::WriteConsoleLine(
-        L"  verdict  : " + std::wstring(ok ? L"restored (verified by read-back)"
-                                          : L"not restored"));
+        L"  verdict  : " + std::wstring(ok ? L"switched (verified by read-back)"
+                                          : L"not applied"));
     if (!ok) {
         ErrorLine{} << L"  detail   : " << detail << L"\n";
     }
-    AuditAction("power.scheme_restore", optimizer::audit::RiskLevel::R2, target,
-                ok, ToAsciiToken(detail), state);
-    return ok ? 0 : 2;
+    optimizer::common::WriteConsoleLine(
+        L"  note     : roll back with --power-scheme restore; if this process dies"
+        L" mid-switch, --power-scheme status shows state=pending and recover rolls back");
+    AuditAction("power.scheme_apply", optimizer::audit::RiskLevel::R2, target, ok,
+                ToAsciiToken(detail), state);
+    if (!ok) {
+        return 2;
+    }
+    const auto recorded = optimizer::policy::RecordCooldownRun(
+        DefaultCooldownLedgerPath(), optimizer::policy::kPowerSchemeCapabilityId,
+        static_cast<std::int64_t>(std::time(nullptr)));
+    if (!recorded) {
+        const auto& error = recorded.ErrorValue();
+        std::wostringstream line;
+        line << L"  cooldown : not recorded ["
+             << optimizer::common::ToString(error.domain) << L":" << error.code
+             << L"] " << error.message << L" (the action itself did complete)";
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    return 0;
 }
 
 int RunPowerLockCommand(int argc, wchar_t* argv[]) {
