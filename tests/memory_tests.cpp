@@ -226,6 +226,41 @@ bool TestCleanPlanOrchestration() {
     return noCalls && okReport && partialReport && emptyRejected;
 }
 
+bool TestPlanMemoryCleanLevels() {
+    using optimizer::config::CleanLevel;
+    using optimizer::memory::CleanKind;
+    using optimizer::memory::PlanMemoryClean;
+    // 递进步骤：Light ⊂ Medium ⊂ Deep；顺序由轻到重。
+    const auto light = PlanMemoryClean(CleanLevel::Light, CleanLevel::Deep, true);
+    const auto medium = PlanMemoryClean(CleanLevel::Medium, CleanLevel::Deep, true);
+    const auto deep = PlanMemoryClean(CleanLevel::Deep, CleanLevel::Deep, true);
+    const bool lightSteps =
+        light.allowed && light.levelWithinLimit && light.steps.size() == 1 &&
+        light.steps[0] == CleanKind::WorkingSetTrim;
+    const bool mediumSteps =
+        medium.allowed && medium.steps.size() == 2 &&
+        medium.steps[0] == CleanKind::WorkingSetTrim &&
+        medium.steps[1] == CleanKind::StandbyListPurge;
+    const bool deepSteps =
+        deep.allowed && deep.steps.size() == 3 &&
+        deep.steps[0] == CleanKind::WorkingSetTrim &&
+        deep.steps[1] == CleanKind::StandbyListPurge &&
+        deep.steps[2] == CleanKind::SystemFileCacheTrim;
+    // 上限检查：请求高于配置上限 -> 显式拒绍（不降级）且不给出步骤。
+    const auto overLimit =
+        PlanMemoryClean(CleanLevel::Medium, CleanLevel::Light, true);
+    const auto deepOverLight =
+        PlanMemoryClean(CleanLevel::Deep, CleanLevel::Medium, true);
+    const bool rejected = !overLimit.allowed && !overLimit.levelWithinLimit &&
+                          overLimit.steps.empty() && !deepOverLight.allowed &&
+                          !deepOverLight.levelWithinLimit &&
+                          deepOverLight.steps.empty();
+    // 门禁未过：仍给步骤但不放行。
+    const auto blocked = PlanMemoryClean(CleanLevel::Deep, CleanLevel::Deep, false);
+    const bool blockedOk = !blocked.allowed && blocked.steps.size() == 3;
+    return lightSteps && mediumSteps && deepSteps && rejected && blockedOk;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -252,6 +287,7 @@ int wmain() {
     run(L"plan memory clean none level", &TestPlanMemoryCleanNoneLevel);
     run(L"plan memory clean gates blocked", &TestPlanMemoryCleanGatesBlocked);
     run(L"plan memory clean above limit", &TestPlanMemoryCleanAboveLimit);
+    run(L"plan memory clean levels", &TestPlanMemoryCleanLevels);
     run(L"refusing clean backend is honest", &TestRefusingCleanBackendIsHonest);
     run(L"clean plan orchestration", &TestCleanPlanOrchestration);
     return failed == 0 ? 0 : 1;

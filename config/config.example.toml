@@ -38,7 +38,7 @@ max_level = "above_normal"     # none / above_normal / high；无 realtime
 query_enabled = true
 scheduled_clean_enabled = false
 allow_native_write = false     # R3：默认关闭
-max_clean_level = "light"
+max_clean_level = "light"        # none / light / medium / deep（递进；实际执行仍受六道门禁约束）
 
 [gpu_heartbeat]
 enabled = false                # R3 Experimental

@@ -8,8 +8,9 @@ namespace optimizer::memory {
 
 // 内存清理的“步骤”种类（本切片只有计划，不执行）。
 enum class CleanKind {
-    WorkingSetTrim,  // 工作集修剪（轻量、局部可逆）
-    StandbyListPurge // Standby/Modified List 清理（R2/R3：全局影响，需隔离环境验证）
+    WorkingSetTrim,      // 工作集修剪（轻量、局部可逆）
+    StandbyListPurge,    // Standby/Modified List 清理（R2/R3：全局影响，需隔离环境验证）
+    SystemFileCacheTrim  // 系统文件缓存修剪（Deep 级；强度最高）
 };
 
 // 步骤名（ASCII，恒成功）。

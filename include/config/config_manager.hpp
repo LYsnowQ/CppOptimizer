@@ -17,10 +17,13 @@ enum class RunMode {
     Experimental
 };
 
-// 内存清理级别。无 realtime。
+// 内存清理级别（递进；比较依赖枚举顺序，**不得重排**）。
+// 非核心能力，各级仍受门禁（编译期/配置/命令行/权限与环境/审计/冷却）约束。
 enum class CleanLevel {
-    None,
-    Light
+    None,   // 不清理
+    Light,  // 工作集修剪
+    Medium, // 工作集修剪 + Standby 列表清理
+    Deep    // 再加系统文件缓存修剪（强度最高）
 };
 
 // 进程优先级上限。无 realtime。

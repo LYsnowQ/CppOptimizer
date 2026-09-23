@@ -207,8 +207,15 @@ common::Result<CleanLevel> ParseCleanLevel(std::string_view name) {
     if (lower == "light") {
         return common::Result<CleanLevel>::Success(CleanLevel::Light);
     }
+    if (lower == "medium") {
+        return common::Result<CleanLevel>::Success(CleanLevel::Medium);
+    }
+    if (lower == "deep") {
+        return common::Result<CleanLevel>::Success(CleanLevel::Deep);
+    }
     return common::Result<CleanLevel>::Failure(common::Error::Validation(
-        "ParseCleanLevel", L"Unknown clean level (expected none/light)"));
+        "ParseCleanLevel",
+        L"Unknown clean level (expected none/light/medium/deep)"));
 }
 
 common::Result<PriorityLevel> ParsePriorityLevel(std::string_view name) {

@@ -249,7 +249,10 @@ bool TestModeAndLayerGates() {
 bool TestParseCleanLevel() {
     return optimizer::config::ParseCleanLevel("none").HasValue() &&
            optimizer::config::ParseCleanLevel("LIGHT").HasValue() &&
-           !optimizer::config::ParseCleanLevel("full").HasValue();
+           optimizer::config::ParseCleanLevel("Medium").HasValue() &&
+           optimizer::config::ParseCleanLevel("deep").HasValue() &&
+           !optimizer::config::ParseCleanLevel("full").HasValue() &&
+           !optimizer::config::ParseCleanLevel("").HasValue();
 }
 
 bool TestLoadConfigDefaults() {

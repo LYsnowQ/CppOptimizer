@@ -24,6 +24,8 @@ const char* CleanKindToString(CleanKind kind) noexcept {
             return "working_set_trim";
         case CleanKind::StandbyListPurge:
             return "standby_list_purge";
+        case CleanKind::SystemFileCacheTrim:
+            return "system_file_cache_trim";
     }
     return "unknown";
 }
@@ -42,8 +44,17 @@ MemoryCleanPlan PlanMemoryClean(optimizer::config::CleanLevel requested,
     if (!plan.levelWithinLimit) {
         return plan; // 超上限：显式拒绝，不降级执行
     }
-    // 级别 -> 步骤（Light = 工作集修剪；Standby 清理属更高级别，当前枚举内不可达）。
-    plan.steps.push_back(CleanKind::WorkingSetTrim);
+    // 级别 -> 步骤（**递进**：Light ⊂ Medium ⊂ Deep；顺序 = 由轻到重，执行时失败即停）。
+    const int level = static_cast<int>(requested);
+    if (level >= static_cast<int>(optimizer::config::CleanLevel::Light)) {
+        plan.steps.push_back(CleanKind::WorkingSetTrim);
+    }
+    if (level >= static_cast<int>(optimizer::config::CleanLevel::Medium)) {
+        plan.steps.push_back(CleanKind::StandbyListPurge);
+    }
+    if (level >= static_cast<int>(optimizer::config::CleanLevel::Deep)) {
+        plan.steps.push_back(CleanKind::SystemFileCacheTrim);
+    }
     plan.allowed = gatesAllowed;
     return plan;
 }
