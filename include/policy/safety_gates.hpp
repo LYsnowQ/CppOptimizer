@@ -59,6 +59,13 @@ struct GateEvaluation {
 #ifndef OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH
 #define OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH 0
 #endif
+// R3 的两个能力各有独立开关：它们只有在隔离环境里才允许真正开启（宿主默认全关）。
+#ifndef OPTIMIZER_ENABLE_STANDBY_PURGE
+#define OPTIMIZER_ENABLE_STANDBY_PURGE 0
+#endif
+#ifndef OPTIMIZER_ENABLE_FILE_CACHE_TRIM
+#define OPTIMIZER_ENABLE_FILE_CACHE_TRIM 0
+#endif
 
 // 各能力的编译期开关状态（默认恒为 false，与宏默认 0 一致）。
 [[nodiscard]] constexpr bool MemoryCleanCompiledIn() noexcept {
@@ -67,6 +74,14 @@ struct GateEvaluation {
 
 [[nodiscard]] constexpr bool PowerSchemeSwitchCompiledIn() noexcept {
     return OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH != 0;
+}
+
+[[nodiscard]] constexpr bool StandbyPurgeCompiledIn() noexcept {
+    return OPTIMIZER_ENABLE_STANDBY_PURGE != 0;
+}
+
+[[nodiscard]] constexpr bool FileCacheTrimCompiledIn() noexcept {
+    return OPTIMIZER_ENABLE_FILE_CACHE_TRIM != 0;
 }
 
 // ---------- 冷却门（cooldown） ----------
@@ -84,6 +99,10 @@ struct CooldownLedger {
 inline constexpr std::string_view kMemoryCleanCapabilityId = "memory.clean";
 inline constexpr std::string_view kPowerSchemeCapabilityId =
     "power.switch_power_scheme";
+inline constexpr std::string_view kStandbyPurgeCapabilityId =
+    "memory.purge_standby";
+inline constexpr std::string_view kFileCacheTrimCapabilityId =
+    "memory.file_cache_trim";
 
 // 读取台账：文件不存在 = 无可记录（Success + 空台账，不是错误）；内容信封不符亦按空台账处理；
 // 读取 IO 失败如实返回 Failure。

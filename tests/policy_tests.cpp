@@ -575,8 +575,11 @@ bool TestCooldownGateAndLedger() {
     std::filesystem::remove(path, ec);
     const auto missing = ReadCooldownLedger(path);
     const auto emptyPath = ReadCooldownLedger({});
-    // 编译期开关：默认关（与宏默认 0 一致）。
-    const bool compiledOff = !optimizer::policy::MemoryCleanCompiledIn();
+    // 编译期开关：默认关（与宏默认 0 一致）；**逐能力**，不得共用。
+    const bool compiledOff = !optimizer::policy::MemoryCleanCompiledIn() &&
+                             !optimizer::policy::PowerSchemeSwitchCompiledIn() &&
+                             !optimizer::policy::StandbyPurgeCompiledIn() &&
+                             !optimizer::policy::FileCacheTrimCompiledIn();
     return noRecord && blocked && boundaryOpen && rollbackBlocked && otherOpen &&
            roundTrip && missing && missing.Value().lastRunUnixSeconds.empty() &&
            !emptyPath && compiledOff;

@@ -32,6 +32,8 @@ set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/thirdParty)
 # 核心功能所需能力不作为开关出现，而作为运行需求存在。
 option(OPTIMIZER_ENABLE_MEMORY_CLEAN "Build in the default-off memory clean capability" OFF)
 option(OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH "Build in the default-off power scheme switch capability" OFF)
+option(OPTIMIZER_ENABLE_STANDBY_PURGE "Build in the default-off standby list purge capability (R3; isolated environment only)" OFF)
+option(OPTIMIZER_ENABLE_FILE_CACHE_TRIM "Build in the default-off system file cache trim capability (R3; isolated environment only)" OFF)
 
 add_executable(CppOptimizer
     source/main.cpp
@@ -90,6 +92,12 @@ if(OPTIMIZER_ENABLE_MEMORY_CLEAN)
 endif()
 if(OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH)
     target_compile_definitions(CppOptimizer PRIVATE OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH=1)
+endif()
+if(OPTIMIZER_ENABLE_STANDBY_PURGE)
+    target_compile_definitions(CppOptimizer PRIVATE OPTIMIZER_ENABLE_STANDBY_PURGE=1)
+endif()
+if(OPTIMIZER_ENABLE_FILE_CACHE_TRIM)
+    target_compile_definitions(CppOptimizer PRIVATE OPTIMIZER_ENABLE_FILE_CACHE_TRIM=1)
 endif()
 
 target_compile_features(CppOptimizer PRIVATE cxx_std_20)

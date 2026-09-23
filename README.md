@@ -29,20 +29,27 @@ Windows x64 用户态系统性能观测与受控优化工具。
   [--acknowledge-system-wide-side-effects]` 为**本进程工作集修剪的真实路径（R1，可逆）**：
   **六道门全通才执行**（否则只输出首个阻塞门并拒绝、exit 2）、**审计不可用一律拒绝**、单步单次、不提权、
   作用目标固定为本进程；成功才写冷却台账（原子替换，防时钟回拨），三段日记的 `state` 段记录修剪前后工作集字节。
-  更重的步骤（Standby 列表清理 / 系统文件缓存修剪，R3 不可逆）**尚无真实后端**：`--execute` 显式拒绝，
-  占位后端一律返回 `Unsupported`，真实动作只在隔离环境执行（见 `ISOLATION-VM-SETUP.md`）
+  更重的步骤（Standby 列表清理 / 系统文件缓存修剪，R3 不可逆）**尚无真实后端**，但**门禁与就绪预检已接线**：
+  `--memory-clean <config> --execute [--acknowledge-system-wide-side-effects]
+  [--acknowledge-isolated-environment]` 先**逐步骤**评估六道门（R3 步骤用自己的编译期开关
+  `OPTIMIZER_ENABLE_STANDBY_PURGE` / `OPTIMIZER_ENABLE_FILE_CACHE_TRIM`、自己的冷却键，
+  并要求额外的隔离环境确认），再做**就绪度预检**：计划里若有尚无真实后端的步骤，在**任何系统调用之前**拒绝
+  并点名该步骤。真实的 R3 动作只在隔离环境执行（见 `ISOLATION-VM-SETUP.md`）
 - **电源计划切换（R2，可逆）**：`--power-scheme status|saved` 只读读回当前活动计划 GUID 与保存的恢复依据；
   `--power-scheme <balanced|high-performance|power-saver|GUID> [config.toml] [--acknowledge-system-wide-side-effects]`
   为**切换路径**：**先读回并保存原 GUID（读不到则拒绝切换——没有回滚信息不得改全局状态）→ 切换 → 只读读回校验**；
   `--power-scheme restore` 按保存的 GUID 回滚并读回校验，回滚路径**不受冷却门限制**（不得把回滚卡在冷却上）；
   切换与恢复都受六道门约束（每个能力**自己的**编译期开关 `OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH`，默认 OFF）、
   必须审计可用、成功后写冷却台账，三段日记记录前后 GUID。真实“切换→恢复”属隔离环境验证项（宿主不执行）
-- **危险能力门禁诊断**：`--gates [config.toml]` 只读列出各危险能力（电源计划切换、计划内存清理、Native 写、
-  清理级别）的**六道门**状态（编译期开关 / 配置显式开启 / 命令行显式确认 / 权限与环境 / 审计可用 / 冷却），
-  并标明**首个阻塞门**；其中**权限与环境门为真实只读探测**（OS/架构支持、交流电或电池供电、远程会话、锁屏、交互会话），
-  支持 `--json` 输出机器可读结果（供脚本/CI 消费；字段与列一一对应）；
+- **危险能力门禁诊断**：`--gates [config.toml] [--acknowledge-system-wide-side-effects]
+  [--acknowledge-isolated-environment]` 只读列出各危险能力（电源计划切换、Standby 清理、系统文件缓存修剪、
+  计划内存清理、Native 写、清理级别）的**六道门**状态（编译期开关 / 配置显式开启 / 命令行显式确认 / 权限与环境 /
+  审计可用 / 冷却），并标明**首个阻塞门**；其中**编译期开关逐能力独立**（六行各用自己的构建开关），
+  **R3 两行的命令行门需“两条确认”**（`--acknowledge-system-wide-side-effects` **和**
+  `--acknowledge-isolated-environment`）；**权限与环境门为真实只读探测**（OS/架构支持、交流电或电池供电、
+  远程会话、锁屏、交互会话），支持 `--json` 输出机器可读结果（供脚本/CI 消费；字段与列一一对应）；
   并如实打印探测结果（未知即显示 `unknown`，不当作安全）；**审计门为真实可写探测**（只打开不写入，不产生审计记录）；
-  **命令行门为动作特定确认**：`--acknowledge-system-wide-side-effects` 才打开该门，通用 `--force` 被明确拒绝（exit 2）；不执行任何动作，也不改变任何门禁状态（R2/R3 真实动作另需隔离环境）
+  不执行任何动作，也不改变任何门禁状态（R2/R3 真实动作另需隔离环境）
 - **动作日记回看**：`--journal [path] [lines]` 只读回看动作日记（默认每用户 `action-journal.log`，最近 20 行、上限 200；数字首参按行数解读；输出 before/after/state 阶段计数与末尾条目；不写不删、不参与审计压缩）
 - **动作日记（仅本地存储）**：每个危险/注册类动作按**操作前 → 操作后 → 操作后状态**三段**实时**追加到独立的
   本地文件 `%LOCALAPPDATA%\CppOptimizerction-journal.log`（逐次留痕、不聚合），与审计文件分工：审计按操作聚合计数、

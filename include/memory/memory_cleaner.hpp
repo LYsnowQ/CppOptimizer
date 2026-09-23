@@ -2,6 +2,7 @@
 
 #include "config/config_manager.hpp"
 
+#include <optional>
 #include <vector>
 
 namespace optimizer::memory {
@@ -15,6 +16,14 @@ enum class CleanKind {
 
 // 步骤名（ASCII，恒成功）。
 [[nodiscard]] const char* CleanKindToString(CleanKind kind) noexcept;
+
+// 步骤对应的**能力 ID**（冷却台账键 / 门禁表行名）。单一真相：CLI 与诊断表都从这里取，
+// 避免“诊断显示可跑、执行却按另一个键判冷却”。
+[[nodiscard]] const char* CleanKindCapabilityId(CleanKind kind) noexcept;
+
+// 该步骤在本构建中是否有**真实后端**（当前仅 `WorkingSetTrim` 为真；S3/S4 仍是占位后端，
+// 一律 `Unsupported`）。**纯函数，不尝试执行**。
+[[nodiscard]] bool CleanStepImplemented(CleanKind kind) noexcept;
 
 // 清理计划（纯函数结果）：`allowed` 仅在**级别合法且门禁全通过**时为真。
 // `steps` 是“若门禁开放将要执行什么”，供 dry-run 如实展示；本模块不执行任何系统调用。
@@ -60,5 +69,17 @@ struct CleanExecutionReport {
 // - 否则逐步调用后端，**失败即停**（不继续后续步骤），并返回带部分结果的报告。
 [[nodiscard]] common::Result<CleanExecutionReport> ExecuteMemoryCleanPlan(
     const MemoryCleanPlan& plan, CleanBackend& backend) noexcept;
+
+// 计划就绪度（纯函数）：真实执行前的**预检**。
+// 理由：“失败即停” 能防“做一半”，但防不住“明知会失败还开始”——若计划里含有尚无真实后端的步骤，
+// 就应在**任何系统调用之前**拒绝，而不是先修剪工作集再报 Standby 不可用。
+struct CleanPlanReadiness {
+    bool allImplemented = true;
+    bool hasStep = false;
+    std::optional<CleanKind> firstUnimplemented; // 第一个未实现的步骤（allImplemented=false 时有值）
+};
+
+[[nodiscard]] CleanPlanReadiness EvaluateCleanPlanReadiness(
+    const MemoryCleanPlan& plan) noexcept;
 
 } // namespace optimizer::memory

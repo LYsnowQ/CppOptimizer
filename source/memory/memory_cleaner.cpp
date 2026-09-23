@@ -30,6 +30,23 @@ const char* CleanKindToString(CleanKind kind) noexcept {
     return "unknown";
 }
 
+const char* CleanKindCapabilityId(CleanKind kind) noexcept {
+    switch (kind) {
+        case CleanKind::WorkingSetTrim:
+            return "memory.clean";
+        case CleanKind::StandbyListPurge:
+            return "memory.purge_standby";
+        case CleanKind::SystemFileCacheTrim:
+            return "memory.file_cache_trim";
+    }
+    return "memory.unknown";
+}
+
+bool CleanStepImplemented(CleanKind kind) noexcept {
+    // 只有本进程工作集修剪有真实后端；S3/S4 的占位后端一律 Unsupported。
+    return kind == CleanKind::WorkingSetTrim;
+}
+
 MemoryCleanPlan PlanMemoryClean(optimizer::config::CleanLevel requested,
                                 optimizer::config::CleanLevel configuredMax,
                                 bool gatesAllowed) noexcept {
@@ -93,6 +110,21 @@ common::Result<CleanExecutionReport> ExecuteMemoryCleanPlan(
     }
     report.ok = true;
     return common::Result<CleanExecutionReport>::Success(std::move(report));
+}
+
+CleanPlanReadiness EvaluateCleanPlanReadiness(
+    const MemoryCleanPlan& plan) noexcept {
+    CleanPlanReadiness readiness;
+    readiness.hasStep = !plan.steps.empty();
+    for (const auto step : plan.steps) {
+        if (!CleanStepImplemented(step)) {
+            readiness.allImplemented = false;
+            if (!readiness.firstUnimplemented.has_value()) {
+                readiness.firstUnimplemented = step;
+            }
+        }
+    }
+    return readiness;
 }
 
 } // namespace optimizer::memory

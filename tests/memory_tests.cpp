@@ -308,6 +308,43 @@ bool TestWorkingSetDeltaAndBackend() {
     return bothOk && grewOk && missingOk && refusesHeavierSteps && ownTrim;
 }
 
+bool TestCleanStepMetadataAndReadiness() {
+    using optimizer::config::CleanLevel;
+    using optimizer::memory::CleanKind;
+    using optimizer::memory::CleanKindCapabilityId;
+    using optimizer::memory::CleanStepImplemented;
+    using optimizer::memory::EvaluateCleanPlanReadiness;
+    using optimizer::memory::PlanMemoryClean;
+    // 步骤 -> 能力 ID 映射（冷却台账键 / 门禁表行名必须一致）。
+    const bool ids =
+        std::string(CleanKindCapabilityId(CleanKind::WorkingSetTrim)) == "memory.clean" &&
+        std::string(CleanKindCapabilityId(CleanKind::StandbyListPurge)) ==
+            "memory.purge_standby" &&
+        std::string(CleanKindCapabilityId(CleanKind::SystemFileCacheTrim)) ==
+            "memory.file_cache_trim";
+    // 已实现性：当前只有本进程工作集修剪有真实后端（S3/S4 仍是占位 Unsupported）。
+    const bool implemented = CleanStepImplemented(CleanKind::WorkingSetTrim) &&
+                             !CleanStepImplemented(CleanKind::StandbyListPurge) &&
+                             !CleanStepImplemented(CleanKind::SystemFileCacheTrim);
+    // 就绪度预检：light 全就绪；medium/deep 指出第一个未实现步骤；空计划 -> hasStep=false 但不算“不就绪”。
+    const auto light = EvaluateCleanPlanReadiness(
+        PlanMemoryClean(CleanLevel::Light, CleanLevel::Light, true));
+    const auto medium = EvaluateCleanPlanReadiness(
+        PlanMemoryClean(CleanLevel::Medium, CleanLevel::Medium, true));
+    const auto deep = EvaluateCleanPlanReadiness(
+        PlanMemoryClean(CleanLevel::Deep, CleanLevel::Deep, true));
+    const auto none = EvaluateCleanPlanReadiness(
+        PlanMemoryClean(CleanLevel::None, CleanLevel::None, true));
+    const bool readiness =
+        light.hasStep && light.allImplemented && !light.firstUnimplemented.has_value() &&
+        medium.hasStep && !medium.allImplemented && medium.firstUnimplemented.has_value() &&
+        *medium.firstUnimplemented == CleanKind::StandbyListPurge &&
+        deep.hasStep && !deep.allImplemented && deep.firstUnimplemented.has_value() &&
+        *deep.firstUnimplemented == CleanKind::StandbyListPurge &&
+        !none.hasStep && none.allImplemented && !none.firstUnimplemented.has_value();
+    return ids && implemented && readiness;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -338,5 +375,6 @@ int wmain() {
     run(L"refusing clean backend is honest", &TestRefusingCleanBackendIsHonest);
     run(L"clean plan orchestration", &TestCleanPlanOrchestration);
     run(L"working set delta and backend", &TestWorkingSetDeltaAndBackend);
+    run(L"clean step metadata and readiness", &TestCleanStepMetadataAndReadiness);
     return failed == 0 ? 0 : 1;
 }
