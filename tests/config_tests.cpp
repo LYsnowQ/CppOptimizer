@@ -352,16 +352,16 @@ bool TestLoadConfigBadModeFails() {
            result.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
 }
 
-bool TestLoadConfigBadCleanLevelDefaults() {
+bool TestLoadConfigBadCleanLevelRejected() {
     const std::wstring path = MakeTempConfigPath();
     if (!WriteTempConfig(path, "[memory]\nmax_clean_level = \"full\"\n")) {
         return false;
     }
     auto result = optimizer::config::LoadConfig(path);
     std::filesystem::remove(std::filesystem::path(path));
-    // 非法清理级别失败安全：保持默认 Light，不视为致命。
-    return result.HasValue() &&
-           result.Value().memory.maxCleanLevel == optimizer::config::CleanLevel::Light;
+    // 未知级别**显式拒绝**（与 version/mode 同口径）：不得静默回退默认值。
+    return !result.HasValue() &&
+           result.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
 }
 
 bool TestLoadConfigChineseValues() {
@@ -926,7 +926,8 @@ int wmain() {
     run(L"Load config rejects syntax error", &TestLoadConfigSyntaxError);
     run(L"Load config rejects missing file", &TestLoadConfigMissingFile);
     run(L"Load config rejects bad mode", &TestLoadConfigBadModeFails);
-    run(L"Load config defaults bad clean level", &TestLoadConfigBadCleanLevelDefaults);
+    run(L"Load config rejects bad clean level",
+        &TestLoadConfigBadCleanLevelRejected);
     run(L"Load config keeps Chinese values", &TestLoadConfigChineseValues);
     run(L"Parse priority level", &TestParsePriorityLevel);
     run(L"Load config extended sections", &TestLoadConfigExtendedSections);

@@ -400,8 +400,21 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
     const auto plan = optimizer::memory::PlanMemoryClean(configuredMax, configuredMax,
                                                          gates.allowed);
     const std::string target = configPath.has_value() ? "config" : "defaults";
-    const wchar_t* levelName =
-        configuredMax == optimizer::config::CleanLevel::None ? L"none" : L"light";
+    const wchar_t* levelName = L"none";
+    switch (configuredMax) {
+        case optimizer::config::CleanLevel::None:
+            levelName = L"none";
+            break;
+        case optimizer::config::CleanLevel::Light:
+            levelName = L"light";
+            break;
+        case optimizer::config::CleanLevel::Medium:
+            levelName = L"medium";
+            break;
+        case optimizer::config::CleanLevel::Deep:
+            levelName = L"deep";
+            break;
+    }
     JournalAction("memory.clean_plan", target, true,
                   optimizer::audit::JournalPhase::Before,
                   "intent: plan memory clean (dry-run, no system call)");

@@ -528,11 +528,14 @@ common::Result<ConfigSnapshot> LoadConfig(std::wstring_view path) {
             snapshot.memory.allowNativeWrite = *write;
         }
         if (const auto level = (*section)["max_clean_level"].value<std::string>()) {
+            // 未知/非法级别**显式拒绝**（不做宽松转换，也不静默回退默认值）——
+            // 否则用户会以为已配置的级别生效，与实际执行级别不符。
             auto parsed = ParseCleanLevel(*level);
-            if (parsed) {
-                snapshot.memory.maxCleanLevel = parsed.Value();
+            if (!parsed) {
+                return common::Result<ConfigSnapshot>::Failure(
+                    parsed.ErrorValue());
             }
-            // 非法清理级别保持默认，不视为致命错误。
+            snapshot.memory.maxCleanLevel = parsed.Value();
         }
     }
 
