@@ -28,6 +28,10 @@ set(SPDLOG_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/thirdParty/spdlog/include)
 set(TOMLPLUSPLUS_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/thirdParty/tomlplusplus/include)
 set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/thirdParty)
 
+# 危险能力的编译期开关：**默认关**（OFF）。只有构建时显式打开，相关能力的“编译期门”才视为通过；
+# 核心功能所需能力不作为开关出现，而作为运行需求存在。
+option(OPTIMIZER_ENABLE_MEMORY_CLEAN "Build in the default-off memory clean capability" OFF)
+
 add_executable(CppOptimizer
     source/main.cpp
     source/common/error.cpp
@@ -77,6 +81,10 @@ target_link_libraries(CppOptimizer PRIVATE
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
 )
+if(OPTIMIZER_ENABLE_MEMORY_CLEAN)
+    target_compile_definitions(CppOptimizer PRIVATE OPTIMIZER_ENABLE_MEMORY_CLEAN=1)
+endif()
+
 target_compile_features(CppOptimizer PRIVATE cxx_std_20)
 target_compile_definitions(CppOptimizer PRIVATE
     UNICODE

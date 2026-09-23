@@ -375,7 +375,8 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
     const auto auditProbe =
         optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath());
     optimizer::policy::GateInputs inputs;
-    inputs.compileTime = false;
+    inputs.compileTime =
+        optimizer::policy::MemoryCleanCompiledIn(); // 编译期开关（默认关）
     inputs.config = configuredMax != optimizer::config::CleanLevel::None;
     inputs.commandLine = acknowledged; // 动作特定确认参数（显式动作）
     inputs.permissionAndEnvironment =
@@ -422,7 +423,9 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
     {
         std::wostringstream line;
         line << L"  verdict  : "
-             << (plan.allowed ? L"allowed" : L"refused (execution not performed)");
+             << (plan.allowed
+                     ? L"gates passed (but this slice never executes: 0 system calls)"
+                     : L"refused (execution not performed)");
         if (!gates.allowed && gates.firstBlocking.has_value()) {
             const std::string gate =
                 optimizer::policy::GateIdToString(*gates.firstBlocking);
