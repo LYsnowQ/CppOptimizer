@@ -332,10 +332,15 @@ optimizer::policy::EnvironmentFacts GatherEnvironmentFacts() {
 // 门禁未全通过时如实拒绝执行；dry-run 展示“若门禁开放将要执行什么”，并写审计 + 三段日记。
 int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
     std::optional<std::filesystem::path> configPath;
+    bool acknowledged = false;
     for (int i = 2; i < argc; ++i) {
         const std::wstring_view arg(argv[i]);
         if (arg == L"--dry-run") {
             continue; // 本切片默认且仅有 dry-run（保留参数供后续切片显式化）
+        }
+        if (arg == L"--acknowledge-system-wide-side-effects") {
+            acknowledged = true; // 动作特定确认（不使用通用 --force）
+            continue;
         }
         if (arg == L"--execute") {
             ErrorLine{} << L"  --memory-clean --execute is refused: this slice ships planning"
@@ -369,7 +374,7 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
     optimizer::policy::GateInputs inputs;
     inputs.compileTime = false;
     inputs.config = configuredMax != optimizer::config::CleanLevel::None;
-    inputs.commandLine = false;
+    inputs.commandLine = acknowledged; // 动作特定确认参数（显式动作）
     inputs.permissionAndEnvironment =
         optimizer::policy::EvaluateEnvironmentGate(environment);
     inputs.audit = static_cast<bool>(auditProbe);
@@ -424,6 +429,13 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
     }
     optimizer::common::WriteConsoleLine(
         L"  note     : no system call was made; --execute is refused in this slice");
+    {
+        std::wostringstream line;
+        line << L"  confirm  : acknowledge-system-wide-side-effects="
+             << (acknowledged ? L"yes" : L"no")
+             << L" (action-specific confirmation; --force is not accepted)";
+        optimizer::common::WriteConsoleLine(line.str());
+    }
     AuditAction("memory.clean_plan", optimizer::audit::RiskLevel::R2, target, true,
                 "plan only (dry-run; no system call)",
                 plan.steps.empty()
@@ -434,16 +446,34 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
 
 int RunGatesCommand(int argc, wchar_t* argv[]) {
     std::optional<optimizer::config::ConfigSnapshot> snapshot;
-    if (argc >= 3) {
-        const auto loaded = optimizer::config::LoadConfig(argv[2]);
-        if (!loaded) {
-            const auto& error = loaded.ErrorValue();
-            ErrorLine{} << L"  config load failed ["
-                        << optimizer::common::ToString(error.domain) << L":"
-                        << error.code << L"] " << error.message << L"\n";
+    bool acknowledged = false;
+    for (int i = 2; i < argc; ++i) {
+        const std::wstring_view arg(argv[i]);
+        if (arg == L"--acknowledge-system-wide-side-effects") {
+            acknowledged = true;
+            continue;
+        }
+        if (arg == L"--force") {
+            ErrorLine{} << L"  --force is not accepted; use an action-specific"
+                           L" confirmation such as --acknowledge-system-wide-side-effects"
+                        << L"\n";
             return 2;
         }
-        snapshot = loaded.Value();
+        if (snapshot.has_value()) {
+            ErrorLine{} << L"  unknown --gates option: " << arg << L"\n";
+            return 2;
+        }
+        {
+            const auto loaded = optimizer::config::LoadConfig(arg);
+            if (!loaded) {
+                const auto& error = loaded.ErrorValue();
+                ErrorLine{} << L"  config load failed ["
+                            << optimizer::common::ToString(error.domain) << L":"
+                            << error.code << L"] " << error.message << L"\n";
+                return 2;
+            }
+            snapshot = loaded.Value();
+        }
     }
     optimizer::common::WriteConsoleLine(
         L"Safety gates (read-only; no action is performed)");
@@ -475,7 +505,7 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
         optimizer::policy::GateInputs inputs;
         inputs.compileTime = false;          // 未定义该能力的编译期开关
         inputs.config = capability.configured;
-        inputs.commandLine = false;          // 未实现该能力的命令行显式确认
+        inputs.commandLine = acknowledged;   // 动作特定确认（命令行显式动作）
         inputs.permissionAndEnvironment = environmentGateOpen; // 真实只读探测（电池/远程/锁屏…）
         inputs.audit = auditGateOpen;                        // 真实可写探测（只打开不写入）
         inputs.cooldown = false;                             // 未实现冷却门
@@ -504,6 +534,9 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
         }
         optimizer::common::WriteConsoleLine(line.str());
     }
+    optimizer::common::WriteConsoleLine(
+        L"  confirm  : acknowledge-system-wide-side-effects="
+        + std::wstring(acknowledged ? L"yes" : L"no"));
     optimizer::common::WriteConsoleLine(
         L"  note     : R2/R3 real actions additionally require an isolated environment;"
         L" this command performs nothing");
@@ -4945,8 +4978,7 @@ int wmain(int argc, wchar_t* argv[]) {
         if (argc >= 2 && std::wstring_view(argv[1]) == L"--memory-clean") {
             return RunMemoryCleanCommand(argc, argv);
         }
-        if ((argc == 2 || argc == 3) &&
-            std::wstring_view(argv[1]) == L"--gates") {
+        if (argc >= 2 && std::wstring_view(argv[1]) == L"--gates") {
             return RunGatesCommand(argc, argv);
         }
         if (argc == 3 && std::wstring_view(argv[1]) == L"--config") {
