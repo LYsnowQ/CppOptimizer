@@ -40,6 +40,11 @@ enum class OsSupport {
 // 当前进程原生架构是否为 x64（GetNativeSystemInfo，只读）。
 [[nodiscard]] bool IsNativeX64() noexcept;
 
+// 是否使用电池供电（GetSystemPowerStatus，只读）。
+// 语义：`true` = 电池供电且未接交流电；`false` = 交流供电；
+// 状态未知（API 失败或 ACLineStatus=255）返回 Failure——调用方不得把“未知”当作“安全”。
+[[nodiscard]] common::Result<bool> QueryOnBatteryPower() noexcept;
+
 // 仅运行时能力探测。本类有意不暴露任何改系统的操作；写 API 需另行安全许可与实验开关。
 class NativeApi final {
 public:

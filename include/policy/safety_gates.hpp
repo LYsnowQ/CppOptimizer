@@ -39,4 +39,19 @@ struct GateEvaluation {
 
 [[nodiscard]] GateEvaluation EvaluateGates(const GateInputs& inputs) noexcept;
 
+// 权限与环境门的事实输入（全部来自**只读探测**）。`factsKnown == false` 表示探测失败——
+// 未知一律不得视为安全。
+struct EnvironmentFacts {
+    bool factsKnown = false;         // 全部事实是否取到
+    bool osSupported = false;        // OS/build/x64 在支持矩阵内
+    bool onBattery = false;          // 电池供电
+    bool remoteSession = false;      // 远程会话（RDP）
+    bool sessionLocked = false;      // 工作站锁屏
+    bool interactiveSession = false; // 交互会话（非 Session 0）
+};
+
+// 权限与环境门判定（纯函数）：事实未知、OS 不支持、电池供电、远程会话、锁屏、
+// 非交互会话——任一成立即**不得通过**（保守方向）。
+[[nodiscard]] bool EvaluateEnvironmentGate(const EnvironmentFacts& facts) noexcept;
+
 } // namespace optimizer::policy

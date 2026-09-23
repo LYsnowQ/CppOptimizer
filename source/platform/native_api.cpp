@@ -62,6 +62,19 @@ common::Result<OsVersion> QueryOsVersion() noexcept {
     return common::Result<OsVersion>::Success(version);
 }
 
+common::Result<bool> QueryOnBatteryPower() noexcept {
+    SYSTEM_POWER_STATUS status{};
+    if (!::GetSystemPowerStatus(&status)) {
+        return common::Result<bool>::Failure(common::Error::FromWin32(
+            ::GetLastError(), "GetSystemPowerStatus"));
+    }
+    if (status.ACLineStatus == 255) {
+        return common::Result<bool>::Failure(common::Error::Unsupported(
+            "QueryOnBatteryPower", L"交流电状态未知（ACLineStatus=255）"));
+    }
+    return common::Result<bool>::Success(status.ACLineStatus == 0);
+}
+
 bool IsNativeX64() noexcept {
     SYSTEM_INFO info{};
     ::GetNativeSystemInfo(&info);

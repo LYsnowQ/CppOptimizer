@@ -17,6 +17,8 @@
 #include "platform/native_api.hpp"
 #include "policy/policy_engine.hpp"
 #include "policy/policy_executor.hpp"
+#include "activity/user_activity.hpp"
+#include "platform/native_api.hpp"
 #include "policy/safety_gates.hpp"
 #include "power/power_locker.hpp"
 #include "priority/priority_booster.hpp"
@@ -285,6 +287,47 @@ int RunObserve(std::wstring_view secondsText, std::wstring_view thresholdText,
 
 // --gates [config.toml]：危险能力的**门禁诊断**（只读）。逐能力列出六道门的状态与首个阻塞门；
 // 不执行任何动作、不改变任何门禁状态。R2/R3 的真实动作还额外要求隔离环境（危险操作策略）。
+// 权限与环境门的**真实只读探测**（电池 / OS 支持 / 远程会话 / 锁屏 / 交互会话）：
+// 任一项取不到即视为“未知”，门禁不得通过（不得把未知当安全）。
+optimizer::policy::EnvironmentFacts GatherEnvironmentFacts() {
+    optimizer::policy::EnvironmentFacts facts;
+    bool osSupported = false;
+    bool osKnown = false;
+    if (const auto version = optimizer::platform::QueryOsVersion(); version) {
+        osSupported =
+            optimizer::platform::ClassifyOsSupport(version.Value(),
+                                                  optimizer::platform::IsNativeX64()) ==
+            optimizer::platform::OsSupport::Supported;
+        osKnown = true;
+    }
+    bool batteryKnown = false;
+    bool onBattery = false;
+    if (const auto battery = optimizer::platform::QueryOnBatteryPower(); battery) {
+        onBattery = battery.Value();
+        batteryKnown = true;
+    }
+    bool sessionKnown = false;
+    bool remote = false;
+    bool locked = false;
+    bool interactive = false;
+    if (auto probe = optimizer::activity::CreateWin32SessionProbe(); probe != nullptr) {
+        if (const auto context = probe->Query(); context) {
+            remote = context.Value().remoteSession;
+            locked = context.Value().locked;
+            // 交互会话：查询成功即视为已识别（WTS 查询失败会整样本降级，见 activity 契约）。
+            interactive = true;
+            sessionKnown = true;
+        }
+    }
+    facts.factsKnown = osKnown && batteryKnown && sessionKnown;
+    facts.osSupported = osSupported;
+    facts.onBattery = onBattery;
+    facts.remoteSession = remote;
+    facts.sessionLocked = locked;
+    facts.interactiveSession = interactive;
+    return facts;
+}
+
 // --memory-clean [config.toml] [--dry-run]：内存清理能力的**计划与 dry-run**（本切片不执行任何系统调用）。
 // 门禁未全通过时如实拒绝执行；dry-run 展示“若门禁开放将要执行什么”，并写审计 + 三段日记。
 int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
@@ -318,12 +361,15 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
         }
         configuredMax = loaded.Value().memory.maxCleanLevel;
     }
-    // 门禁输入：compile/cmdline/perm_env/audit/cooldown 五门尚未实现，如实按未通过处理。
+    // 门禁输入：compile/cmdline/audit/cooldown 四门尚未实现（如实按未通过处理）；
+    // 权限与环境门用**真实只读探测**结果。
+    const auto environment = GatherEnvironmentFacts();
     optimizer::policy::GateInputs inputs;
     inputs.compileTime = false;
     inputs.config = configuredMax != optimizer::config::CleanLevel::None;
     inputs.commandLine = false;
-    inputs.permissionAndEnvironment = false;
+    inputs.permissionAndEnvironment =
+        optimizer::policy::EvaluateEnvironmentGate(environment);
     inputs.audit = false;
     inputs.cooldown = false;
     const auto gates = optimizer::policy::EvaluateGates(inputs);
@@ -407,6 +453,9 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
         bool configured;
     };
     const bool hasConfig = snapshot.has_value();
+    const auto environment = GatherEnvironmentFacts();
+    const bool environmentGateOpen =
+        optimizer::policy::EvaluateEnvironmentGate(environment);
     const Capability capabilities[] = {
         {L"power.switch_power_scheme",
          hasConfig && snapshot->power.switchPowerScheme},
@@ -422,7 +471,7 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
         inputs.compileTime = false;          // 未定义该能力的编译期开关
         inputs.config = capability.configured;
         inputs.commandLine = false;          // 未实现该能力的命令行显式确认
-        inputs.permissionAndEnvironment = false; // 未实现权限/环境探测
+        inputs.permissionAndEnvironment = environmentGateOpen; // 真实只读探测结果
         inputs.audit = false;                // 未实现“审计可用”门
         inputs.cooldown = false;             // 未实现冷却门
         const auto evaluation = optimizer::policy::EvaluateGates(inputs);
@@ -452,6 +501,24 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     optimizer::common::WriteConsoleLine(
         L"  note     : R2/R3 real actions additionally require an isolated environment;"
         L" this command performs nothing");
+    {
+        // 环境事实如实展示（只读）：未知也如实说“未知”。
+        std::wostringstream line;
+        line << L"  env      : os="
+             << (environment.factsKnown ? (environment.osSupported ? L"supported"
+                                                                  : L"unsupported")
+                                        : L"unknown")
+             << L" power=" << (environment.factsKnown
+                                   ? (environment.onBattery ? L"battery" : L"ac")
+                                   : L"unknown")
+             << L" session="
+             << (environment.factsKnown
+                     ? (environment.remoteSession
+                            ? L"remote"
+                            : (environment.sessionLocked ? L"locked" : L"interactive"))
+                     : L"unknown");
+        optimizer::common::WriteConsoleLine(line.str());
+    }
     return 0;
 }
 

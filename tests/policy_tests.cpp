@@ -495,6 +495,34 @@ bool TestEvaluateGatesFirstBlockingOrder() {
            *cooldownBlocked.firstBlocking == GateId::Cooldown;
 }
 
+bool TestEvaluateEnvironmentGate() {
+    using optimizer::policy::EnvironmentFacts;
+    using optimizer::policy::EvaluateEnvironmentGate;
+    // 全部就绪：唯一放行的组合。
+    EnvironmentFacts ok;
+    ok.factsKnown = true;
+    ok.osSupported = true;
+    ok.interactiveSession = true;
+    const bool open = EvaluateEnvironmentGate(ok);
+    // 未知事实 / 电池 / 远程 / 锁屏 / 非交互：逐一不得通过。
+    EnvironmentFacts unknown;
+    const bool unknownBlocked = !EvaluateEnvironmentGate(unknown);
+    EnvironmentFacts battery = ok;
+    battery.onBattery = true;
+    EnvironmentFacts remote = ok;
+    remote.remoteSession = true;
+    EnvironmentFacts locked = ok;
+    locked.sessionLocked = true;
+    EnvironmentFacts backdrop = ok;
+    backdrop.interactiveSession = false;
+    EnvironmentFacts unsupported = ok;
+    unsupported.osSupported = false;
+    return open && unknownBlocked && !EvaluateEnvironmentGate(battery) &&
+           !EvaluateEnvironmentGate(remote) && !EvaluateEnvironmentGate(locked) &&
+           !EvaluateEnvironmentGate(backdrop) &&
+           !EvaluateEnvironmentGate(unsupported);
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -547,5 +575,6 @@ int wmain() {
     run(L"evaluate gates all pass", &TestEvaluateGatesAllPass);
     run(L"evaluate gates first blocking order",
         &TestEvaluateGatesFirstBlockingOrder);
+    run(L"evaluate environment gate", &TestEvaluateEnvironmentGate);
     return failed == 0 ? 0 : 1;
 }

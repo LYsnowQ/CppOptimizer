@@ -47,4 +47,11 @@ GateEvaluation EvaluateGates(const GateInputs& inputs) noexcept {
     return evaluation;
 }
 
+bool EvaluateEnvironmentGate(const EnvironmentFacts& facts) noexcept {
+    // 任一不安全或未知情形即不通过：门禁宁可误拒，不可误放。
+    return facts.factsKnown && facts.osSupported && !facts.onBattery &&
+           !facts.remoteSession && !facts.sessionLocked &&
+           facts.interactiveSession;
+}
+
 } // namespace optimizer::policy
