@@ -54,6 +54,9 @@
     <ClInclude Include="include\power\power_locker.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\power\power_scheme.hpp">
+      <Filter>include\power</Filter>
+    </ClInclude>
     <ClInclude Include="include\priority\priority_booster.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -149,6 +152,9 @@
     </ClCompile>
     <ClCompile Include="source\power\power_locker.cpp">
       <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\power\power_scheme.cpp">
+      <Filter>source\power</Filter>
     </ClCompile>
     <ClCompile Include="source\priority\priority_booster.cpp">
       <Filter>源文件</Filter>

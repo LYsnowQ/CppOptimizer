@@ -1,4 +1,5 @@
 ﻿#include "power/power_locker.hpp"
+#include "power/power_scheme.hpp"
 
 #include <iostream>
 #include <map>
@@ -460,6 +461,126 @@ bool TestCreateWin32Backend() {
 
 } // namespace
 
+bool TestSchemeGuidPureFunctions() {
+    using optimizer::power::NormalizeSchemeGuid;
+    using optimizer::power::ResolveSchemeArgument;
+    // 归一化：去大括号与空白、转大写；长度/分隔/非十六进制字符一律拒绝（不宽松转换）。
+    const auto braces = NormalizeSchemeGuid("{8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c}");
+    const auto spaced =
+        NormalizeSchemeGuid(" 8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C ");
+    const bool normalized =
+        braces.has_value() &&
+        *braces == "8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C" && braces == spaced;
+    const bool rejected = !NormalizeSchemeGuid("").has_value() &&
+                          !NormalizeSchemeGuid("8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635").has_value() &&
+                          !NormalizeSchemeGuid("8C5E7FDA_E8BF_4A96_9A85_A6E23A8C635C").has_value() &&
+                          !NormalizeSchemeGuid("8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635Z").has_value();
+    // 别名解析：大小写不敏感 + 下划线等价横线；也接受直接给出的 GUID；未知一律 nullopt。
+    const auto alias = ResolveSchemeArgument("High_Performance");
+    const auto direct = ResolveSchemeArgument("{8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c}");
+    const bool resolved =
+        alias.has_value() && *alias == optimizer::power::kSchemeHighPerformance &&
+        direct.has_value() && *direct == *alias &&
+        ResolveSchemeArgument("power-saver").has_value() &&
+        ResolveSchemeArgument("balanced").has_value();
+    const bool unknownRejected = !ResolveSchemeArgument("turbo").has_value() &&
+                                 !ResolveSchemeArgument("high performance").has_value();
+    return normalized && rejected && resolved && unknownRejected;
+}
+
+// fake 后端：可注入读/写失败，并记录调用顺序（不触碰真实电源计划）。
+class FakeSchemeBackend final : public optimizer::power::PowerSchemeBackend {
+public:
+    explicit FakeSchemeBackend(std::string active)
+        : active_(std::move(active)) {}
+
+    Result<std::string> GetActive() override {
+        if (failGet) {
+            return Result<std::string>::Failure(
+                Error::FromWin32(5, "PowerGetActiveScheme"));
+        }
+        return Result<std::string>::Success(active_);
+    }
+
+    Result<void> SetActive(std::string_view guid) override {
+        writes.push_back(std::string(guid));
+        if (failSet) {
+            return Result<void>::Failure(Error::FromWin32(5, "PowerSetActiveScheme"));
+        }
+        if (!ignoreSet) {
+            active_ = std::string(guid);
+        }
+        return Result<void>::Success();
+    }
+
+    bool failGet = false;
+    bool failSet = false;
+    bool ignoreSet = false; // 模拟“调用成功但状态未变”
+    std::vector<std::string> writes;
+
+private:
+    std::string active_;
+};
+
+bool TestApplyAndRestoreScheme() {
+    using optimizer::power::ApplyScheme;
+    using optimizer::power::kSchemeHighPerformance;
+    using optimizer::power::kSchemePowerSaver;
+    using optimizer::power::RestoreScheme;
+    // 正常路径：保存原 GUID -> 切换 -> 读回校验 -> 恢复 -> 读回校验。
+    FakeSchemeBackend backend{std::string(kSchemePowerSaver)};
+    const auto applied = ApplyScheme(backend, kSchemeHighPerformance);
+    const bool appliedOk =
+        applied && applied.Value().previousGuid == std::string(kSchemePowerSaver) &&
+        applied.Value().targetGuid == std::string(kSchemeHighPerformance) &&
+        applied.Value().activeGuid == std::string(kSchemeHighPerformance) &&
+        applied.Value().changed;
+    const auto restored = RestoreScheme(backend, applied.Value().previousGuid);
+    const bool restoredOk =
+        restored && restored.Value().savedGuid == std::string(kSchemePowerSaver) &&
+        restored.Value().activeGuid == std::string(kSchemePowerSaver) &&
+        restored.Value().restored;
+    // 读不到原 GUID -> **拒绝切换**（一步也不写）。
+    FakeSchemeBackend blind{std::string(kSchemePowerSaver)};
+    blind.failGet = true;
+    const auto noRollbackInfo = ApplyScheme(blind, kSchemeHighPerformance);
+    const bool refusedWithoutRollback = !noRollbackInfo && blind.writes.empty();
+    // 切换调用失败 -> Failure 且不读回。
+    FakeSchemeBackend writeFails{std::string(kSchemePowerSaver)};
+    writeFails.failSet = true;
+    const auto writeFailure = ApplyScheme(writeFails, kSchemeHighPerformance);
+    const bool writeRefused = !writeFailure &&
+                              writeFailure.ErrorValue().domain ==
+                                  optimizer::common::ErrorDomain::Win32;
+    // “调用成功但状态未变” -> changed=false（不冒充已切换）。
+    FakeSchemeBackend silent{std::string(kSchemePowerSaver)};
+    silent.ignoreSet = true;
+    const auto notChanged = ApplyScheme(silent, kSchemeHighPerformance);
+    const bool changedReportedHonest = notChanged && !notChanged.Value().changed;
+    // 非法 GUID -> Validation 且零写入。
+    FakeSchemeBackend invalid{std::string(kSchemePowerSaver)};
+    const auto invalidTarget = ApplyScheme(invalid, "not-a-guid");
+    const bool invalidRefused =
+        !invalidTarget && invalid.writes.empty() &&
+        invalidTarget.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
+    // 恢复同样做读回校验。
+    FakeSchemeBackend restoreSilent{std::string(kSchemeHighPerformance)};
+    restoreSilent.ignoreSet = true;
+    const auto notRestored = RestoreScheme(restoreSilent, kSchemePowerSaver);
+    const bool restoreHonest = notRestored && !notRestored.Value().restored;
+    return appliedOk && restoredOk && refusedWithoutRollback && writeRefused &&
+           changedReportedHonest && invalidRefused && restoreHonest;
+}
+
+bool TestWin32SchemeBackendReadOnly() {
+    // 真实后端**只读**调用（不切换）：读回当前活动电源计划 GUID 必须是合法形式。
+    const auto active = optimizer::power::Win32PowerSchemeBackend().GetActive();
+    if (!active) {
+        return false;
+    }
+    return optimizer::power::NormalizeSchemeGuid(active.Value()).has_value();
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -485,5 +606,8 @@ int wmain() {
     run(L"parse power lock type", &TestParseLockType);
     run(L"power lock type to string", &TestLockTypeToString);
     run(L"create win32 backend", &TestCreateWin32Backend);
+    run(L"scheme guid pure functions", &TestSchemeGuidPureFunctions);
+    run(L"apply and restore scheme", &TestApplyAndRestoreScheme);
+    run(L"win32 scheme backend read only", &TestWin32SchemeBackendReadOnly);
     return failed == 0 ? 0 : 1;
 }

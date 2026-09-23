@@ -31,6 +31,12 @@ Windows x64 用户态系统性能观测与受控优化工具。
   作用目标固定为本进程；成功才写冷却台账（原子替换，防时钟回拨），三段日记的 `state` 段记录修剪前后工作集字节。
   更重的步骤（Standby 列表清理 / 系统文件缓存修剪，R3 不可逆）**尚无真实后端**：`--execute` 显式拒绝，
   占位后端一律返回 `Unsupported`，真实动作只在隔离环境执行（见 `ISOLATION-VM-SETUP.md`）
+- **电源计划切换（R2，可逆）**：`--power-scheme status|saved` 只读读回当前活动计划 GUID 与保存的恢复依据；
+  `--power-scheme <balanced|high-performance|power-saver|GUID> [config.toml] [--acknowledge-system-wide-side-effects]`
+  为**切换路径**：**先读回并保存原 GUID（读不到则拒绝切换——没有回滚信息不得改全局状态）→ 切换 → 只读读回校验**；
+  `--power-scheme restore` 按保存的 GUID 回滚并读回校验，回滚路径**不受冷却门限制**（不得把回滚卡在冷却上）；
+  切换与恢复都受六道门约束（每个能力**自己的**编译期开关 `OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH`，默认 OFF）、
+  必须审计可用、成功后写冷却台账，三段日记记录前后 GUID。真实“切换→恢复”属隔离环境验证项（宿主不执行）
 - **危险能力门禁诊断**：`--gates [config.toml]` 只读列出各危险能力（电源计划切换、计划内存清理、Native 写、
   清理级别）的**六道门**状态（编译期开关 / 配置显式开启 / 命令行显式确认 / 权限与环境 / 审计可用 / 冷却），
   并标明**首个阻塞门**；其中**权限与环境门为真实只读探测**（OS/架构支持、交流电或电池供电、远程会话、锁屏、交互会话），

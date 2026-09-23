@@ -22,6 +22,7 @@
 #include "platform/native_api.hpp"
 #include "policy/safety_gates.hpp"
 #include "power/power_locker.hpp"
+#include "power/power_scheme.hpp"
 #include "priority/priority_booster.hpp"
 #include "process/process_watcher.hpp"
 #include "service/service_host.hpp"
@@ -73,6 +74,9 @@ void JournalAction(const char* operationId, const std::string& target, bool ok,
                    optimizer::audit::JournalPhase phase,
                    const std::string& detail);
 std::string DescribeAgentFormsSnapshot();
+
+// 电源计划恢复依据的每用户文件路径（定义见本文件后部）。
+std::filesystem::path DefaultPowerSchemeSavePath() noexcept;
 
 // 作用域错误行（替代宽字符标准错误流）：链式拼接后在临时对象析构时按 stderr 双路径一次性写出。
 // 存在的理由：宽字符标准错误流在默认 C locale 下遇非 ASCII（本地化 Win32 错误消息）会进入 failbit
@@ -683,6 +687,8 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     struct Capability {
         const wchar_t* name;
         bool configured;
+        bool compiledIn;                 // **每个能力自己的编译期开关**（不得共用）
+        std::string_view capabilityId;   // 冷却台账键（与动作路径一致）
     };
     const bool hasConfig = snapshot.has_value();
     const auto environment = GatherEnvironmentFacts();
@@ -691,27 +697,34 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     // 审计门：只打开不写入的可写探测（不改变审计记录内容）。
     const bool auditGateOpen =
         static_cast<bool>(optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath()));
-    // 编译期开关（默认关）与冷却台账（每用户文件；默认 15 分钟）。
-    const bool compiledIn = optimizer::policy::MemoryCleanCompiledIn();
+    // 冷却台账（每用户文件；默认 15 分钟）。
     const auto cooldownLedger =
         optimizer::policy::ReadCooldownLedger(DefaultCooldownLedgerPath());
     const auto nowUnix = static_cast<std::int64_t>(std::time(nullptr));
-    const bool cooldownGateOpen =
-        cooldownLedger &&
-        optimizer::policy::EvaluateCooldownGate(
-            cooldownLedger.Value(), optimizer::policy::kMemoryCleanCapabilityId,
-            nowUnix,
-            std::chrono::duration_cast<std::chrono::seconds>(
-                optimizer::policy::kDefaultCooldown));
+    // 冷却门**逐能力**判定（与动作路径同键）。
+    const auto cooldownGateOpenFor = [&](std::string_view capabilityId) {
+        return static_cast<bool>(cooldownLedger) &&
+               optimizer::policy::EvaluateCooldownGate(
+                   cooldownLedger.Value(), capabilityId, nowUnix,
+                   std::chrono::duration_cast<std::chrono::seconds>(
+                       optimizer::policy::kDefaultCooldown));
+    };
     const Capability capabilities[] = {
-        {L"power.switch_power_scheme",
-         hasConfig && snapshot->power.switchPowerScheme},
+        {L"power.switch_power_scheme", hasConfig && snapshot->power.switchPowerScheme,
+         optimizer::policy::PowerSchemeSwitchCompiledIn(),
+         optimizer::policy::kPowerSchemeCapabilityId},
         {L"memory.scheduled_clean_enabled",
-         hasConfig && snapshot->memory.scheduledCleanEnabled},
-        {L"memory.allow_native_write", hasConfig && snapshot->memory.allowNativeWrite},
+         hasConfig && snapshot->memory.scheduledCleanEnabled,
+         optimizer::policy::MemoryCleanCompiledIn(),
+         optimizer::policy::kMemoryCleanCapabilityId},
+        {L"memory.allow_native_write", hasConfig && snapshot->memory.allowNativeWrite,
+         optimizer::policy::MemoryCleanCompiledIn(),
+         optimizer::policy::kMemoryCleanCapabilityId},
         {L"memory.max_clean_level",
          hasConfig &&
-             snapshot->memory.maxCleanLevel != optimizer::config::CleanLevel::None},
+             snapshot->memory.maxCleanLevel != optimizer::config::CleanLevel::None,
+         optimizer::policy::MemoryCleanCompiledIn(),
+         optimizer::policy::kMemoryCleanCapabilityId},
     };
     // --json：机器可读输出（只读）。放在事实采集之后、人读表头之前，避免先输出横幅污染 JSON。
     if (jsonOut) {
@@ -725,12 +738,12 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
         report.auditWritable = auditGateOpen;
         for (const auto& capability : capabilities) {
             optimizer::policy::GateInputs inputs;
-            inputs.compileTime = compiledIn;
+            inputs.compileTime = capability.compiledIn; // 每个能力自己的开关
             inputs.config = capability.configured;
             inputs.commandLine = acknowledged;
             inputs.permissionAndEnvironment = environmentGateOpen;
             inputs.audit = auditGateOpen;
-            inputs.cooldown = cooldownGateOpen;
+            inputs.cooldown = cooldownGateOpenFor(capability.capabilityId);
             const auto evaluation = optimizer::policy::EvaluateGates(inputs);
             optimizer::policy::GatesReportEntry entry;
             std::string name;
@@ -756,12 +769,12 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
         L"  capability                   compile config cmdline perm_env audit cooldown  verdict");
     for (const auto& capability : capabilities) {
         optimizer::policy::GateInputs inputs;
-        inputs.compileTime = compiledIn;     // 编译期开关（默认关）
+        inputs.compileTime = capability.compiledIn; // 每个能力自己的开关
         inputs.config = capability.configured;
         inputs.commandLine = acknowledged;   // 动作特定确认（命令行显式动作）
         inputs.permissionAndEnvironment = environmentGateOpen; // 真实只读探测（电池/远程/锁屏…）
         inputs.audit = auditGateOpen;                        // 真实可写探测（只打开不写入）
-        inputs.cooldown = cooldownGateOpen;                             // 未实现冷却门
+        inputs.cooldown = cooldownGateOpenFor(capability.capabilityId); // 逐能力台账键
         const auto evaluation = optimizer::policy::EvaluateGates(inputs);
         std::wostringstream line;
         line << L"  " << capability.name;
@@ -2211,6 +2224,348 @@ int RunStartupCommand(int argc, wchar_t* argv[]) {
     return 2;
 }
 
+// 电源计划切换的门禁事实（R2；与内存清理同构）。
+struct PowerSchemeGateContext {
+    optimizer::policy::GateInputs inputs{};
+    optimizer::policy::GateEvaluation gates{};
+    bool auditWritable = false;
+};
+
+// `cooldownApplies=false` 用于**回滚（restore）**：回滚路径不得被冷却门拦住——
+// 冷却的目的是“限制正向动作的频率”，拿它卡住回滚会让系统停在错误状态上。
+PowerSchemeGateContext GatherPowerSchemeGates(bool acknowledged, bool configEnabled,
+                                             bool cooldownApplies = true) {
+    PowerSchemeGateContext context;
+    context.auditWritable = static_cast<bool>(
+        optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath()));
+    context.inputs.compileTime = optimizer::policy::PowerSchemeSwitchCompiledIn();
+    context.inputs.config = configEnabled;
+    context.inputs.commandLine = acknowledged;
+    context.inputs.permissionAndEnvironment =
+        optimizer::policy::EvaluateEnvironmentGate(GatherEnvironmentFacts());
+    context.inputs.audit = context.auditWritable;
+    context.inputs.cooldown = true;
+    if (cooldownApplies) {
+        const auto ledger =
+            optimizer::policy::ReadCooldownLedger(DefaultCooldownLedgerPath());
+        context.inputs.cooldown =
+            ledger && optimizer::policy::EvaluateCooldownGate(
+                          ledger.Value(),
+                          optimizer::policy::kPowerSchemeCapabilityId,
+                          static_cast<std::int64_t>(std::time(nullptr)),
+                          std::chrono::duration_cast<std::chrono::seconds>(
+                              optimizer::policy::kDefaultCooldown));
+    }
+    context.gates = optimizer::policy::EvaluateGates(context.inputs);
+    return context;
+}
+
+// 首个阻塞门的可读描述（二进制/CLI 输出共用）。
+std::string FirstBlockingGateName(
+    const optimizer::policy::GateEvaluation& gates) {
+    return gates.firstBlocking.has_value()
+               ? optimizer::policy::GateIdToString(*gates.firstBlocking)
+               : std::string("unknown");
+}
+
+std::string ToAsciiToken(const std::wstring& text) {
+    std::string token;
+    for (const wchar_t ch : text) {
+        token.push_back(ch >= 0 && ch <= 0x7F ? static_cast<char>(ch) : '?');
+    }
+    return token;
+}
+
+// --power-scheme status | saved | restore | <balanced|high-performance|power-saver|GUID>
+//                      [config.toml] [--acknowledge-system-wide-side-effects]
+// R0：`status` / `saved`（只读）；R2：切换与恢复（系统级但**可逆**：保存原 GUID -> 切换 -> 读回；
+// 恢复 -> 读回）。真实“切换 -> 恢复”属隔离环境验证项（宿主不得执行）。
+int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
+    std::optional<std::filesystem::path> configPath;
+    bool acknowledged = false;
+    std::string action;
+    std::string targetGuid;
+    for (int i = 2; i < argc; ++i) {
+        const std::wstring_view arg(argv[i]);
+        if (arg == L"--acknowledge-system-wide-side-effects") {
+            acknowledged = true;
+            continue;
+        }
+        if (arg == L"--force") {
+            ErrorLine{} << L"  --force is not accepted; use an action-specific"
+                           L" confirmation such as --acknowledge-system-wide-side-effects\n";
+            return 2;
+        }
+        const auto utf8 = optimizer::common::WideToUtf8(arg);
+        if (!utf8) {
+            ErrorLine{} << L"  --power-scheme accepts ASCII tokens only\n";
+            return 2;
+        }
+        const std::string text = utf8.Value();
+        if (action.empty()) {
+            std::string folded;
+            for (const char ch : text) {
+                folded.push_back(ch >= 'A' && ch <= 'Z'
+                                     ? static_cast<char>(ch - 'A' + 'a')
+                                     : ch);
+            }
+            if (folded == "status" || folded == "saved" || folded == "restore") {
+                action = folded;
+                continue;
+            }
+            const auto resolved = optimizer::power::ResolveSchemeArgument(text);
+            if (resolved.has_value()) {
+                action = "apply";
+                targetGuid = *resolved;
+                continue;
+            }
+            ErrorLine{} << L"  unknown --power-scheme target: "
+                        << WidenAscii(text)
+                        << L" (use status|saved|restore|balanced|high-performance|"
+                           L"power-saver|<GUID>)\n";
+            return 2;
+        }
+        if (configPath.has_value()) {
+            ErrorLine{} << L"  unknown --power-scheme option: " << arg << L"\n";
+            return 2;
+        }
+        configPath = std::filesystem::path(argv[i]);
+    }
+    if (action.empty()) {
+        ErrorLine{} << L"  --power-scheme requires status|saved|restore|balanced|"
+                       L"high-performance|power-saver|<GUID>\n";
+        return 2;
+    }
+    auto& backend = optimizer::power::Win32PowerSchemeBackend();
+
+    if (action == "status") {
+        const auto active = backend.GetActive();
+        if (!active) {
+            const auto& error = active.ErrorValue();
+            ErrorLine{} << L"  active scheme query failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        optimizer::common::WriteConsoleLine(
+            L"Power scheme (read-only, PowerGetActiveScheme)");
+        optimizer::common::WriteConsoleLine(L"  active   : " +
+                                            WidenAscii(active.Value()));
+        const auto saved = optimizer::power::ReadSavedSchemeGuid(
+            DefaultPowerSchemeSavePath());
+        optimizer::common::WriteConsoleLine(
+            L"  saved    : " +
+            (saved && saved.Value().has_value() ? WidenAscii(*saved.Value())
+                                                : std::wstring(L"none")));
+        return 0;
+    }
+
+    if (action == "saved") {
+        const auto saved = optimizer::power::ReadSavedSchemeGuid(
+            DefaultPowerSchemeSavePath());
+        if (!saved) {
+            const auto& error = saved.ErrorValue();
+            ErrorLine{} << L"  saved scheme read failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        optimizer::common::WriteConsoleLine(
+            L"Saved power scheme (read-only; restore basis)");
+        optimizer::common::WriteConsoleLine(
+            L"  saved    : " +
+            (saved.Value().has_value() ? WidenAscii(*saved.Value())
+                                       : std::wstring(L"none")));
+        return 0;
+    }
+
+    // 以下为 R2 真实动作：门禁全通才执行（恢复路径不看冷却）。
+    optimizer::config::ConfigSnapshot snapshot{};
+    bool configEnabled = false;
+    if (configPath.has_value()) {
+        const auto loaded = optimizer::config::LoadConfig(configPath->wstring());
+        if (!loaded) {
+            const auto& error = loaded.ErrorValue();
+            ErrorLine{} << L"  config load failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        snapshot = loaded.Value();
+        configEnabled = snapshot.power.switchPowerScheme;
+    }
+    const bool isRestore = action == "restore";
+    const auto context =
+        GatherPowerSchemeGates(acknowledged, configEnabled, !isRestore);
+    const std::string target = configPath.has_value() ? "config" : "defaults";
+    if (!context.gates.allowed) {
+        const std::string gate = FirstBlockingGateName(context.gates);
+        ErrorLine{} << L"  --power-scheme " << WidenAscii(action)
+                    << L" refused [first blocked gate: " << WidenAscii(gate)
+                    << L"] (no system call was made)\n";
+        if (!context.auditWritable) {
+            ErrorLine{} << L"  audit    : unavailable - a real action is refused before any"
+                           L" system call (audit must be writable first)\n";
+        }
+        if (!context.inputs.compileTime) {
+            ErrorLine{} << L"  hint     : this capability is compiled out by default"
+                           L" (build option OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH)\n";
+        }
+        if (!context.inputs.config) {
+            ErrorLine{} << L"  hint     : set [power].switch_power_scheme = true in the config\n";
+        }
+        if (!context.inputs.commandLine) {
+            ErrorLine{} << L"  hint     : pass --acknowledge-system-wide-side-effects\n";
+        }
+        if (!context.inputs.cooldown && !isRestore) {
+            ErrorLine{} << L"  hint     : the cooldown window is still open; restore"
+                           L" is never blocked by cooldown\n";
+        }
+        return 2;
+    }
+
+    std::string restoreBasis = targetGuid; // apply: 目标；restore: 保存值
+    if (isRestore) {
+        const auto saved = optimizer::power::ReadSavedSchemeGuid(
+            DefaultPowerSchemeSavePath());
+        if (!saved) {
+            const auto& error = saved.ErrorValue();
+            ErrorLine{} << L"  saved scheme read failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        if (!saved.Value().has_value()) {
+            ErrorLine{} << L"  --power-scheme restore refused: no saved scheme on disk"
+                           L" (nothing to roll back to; no system call was made)\n";
+            return 2;
+        }
+        restoreBasis = *saved.Value();
+    }
+
+    if (!isRestore) {
+        JournalAction("power.scheme_apply", target, true,
+                      optimizer::audit::JournalPhase::Before,
+                      "intent: switch active power scheme (save original GUID first)");
+        const auto switched =
+            optimizer::power::ApplyScheme(backend, targetGuid);
+        bool ok = false;
+        std::wstring detail;
+        std::string state;
+        if (switched) {
+            const auto& outcome = switched.Value();
+            ok = outcome.changed;
+            state = "previous=" + outcome.previousGuid +
+                    " target=" + outcome.targetGuid +
+                    " active=" + outcome.activeGuid;
+            if (ok) {
+                // 保存恢复依据**在切换之后**写入：先读写回确认已切换，再落盘（失败也如实上报）。
+                const auto savedPath = DefaultPowerSchemeSavePath();
+                const auto saved = optimizer::power::SaveSchemeGuid(
+                    savedPath, outcome.previousGuid);
+                detail = L"switched to target and verified by read-back";
+                if (!saved) {
+                    const auto& error = saved.ErrorValue();
+                    detail += L"; WARNING saved scheme not persisted [";
+                    detail += optimizer::common::ToString(error.domain);
+                    detail += L":";
+                    detail += std::to_wstring(error.code);
+                    detail += L"] ";
+                    detail += error.message;
+                } else {
+                    detail += L"; original GUID saved for restore";
+                }
+            } else {
+                detail = L"switch call returned success but read-back shows "
+                         L"a different active scheme (not reported as switched)";
+            }
+        } else {
+            const auto& error = switched.ErrorValue();
+            detail = L"failed [";
+            detail += optimizer::common::ToString(error.domain);
+            detail += L":";
+            detail += std::to_wstring(error.code);
+            detail += L"] ";
+            detail += error.message;
+        }
+        optimizer::common::WriteConsoleLine(
+            L"Power scheme apply (R2, reversible; original GUID saved first)");
+        optimizer::common::WriteConsoleLine(L"  target   : " +
+                                            WidenAscii(targetGuid));
+        if (!state.empty()) {
+            optimizer::common::WriteConsoleLine(L"  state    : " + WidenAscii(state));
+        }
+        optimizer::common::WriteConsoleLine(
+            L"  verdict  : " + std::wstring(ok ? L"switched (verified by read-back)"
+                                              : L"not applied"));
+        if (!ok) {
+            ErrorLine{} << L"  detail   : " << detail << L"\n";
+        }
+        optimizer::common::WriteConsoleLine(
+            L"  note     : roll back with --power-scheme restore (automatic restore after"
+            L" a crash is not implemented yet)");
+        AuditAction("power.scheme_apply", optimizer::audit::RiskLevel::R2, target,
+                    ok, ToAsciiToken(detail), state);
+        if (!ok) {
+            return 2;
+        }
+        const auto recorded = optimizer::policy::RecordCooldownRun(
+            DefaultCooldownLedgerPath(),
+            optimizer::policy::kPowerSchemeCapabilityId,
+            static_cast<std::int64_t>(std::time(nullptr)));
+        if (!recorded) {
+            const auto& error = recorded.ErrorValue();
+            std::wostringstream line;
+            line << L"  cooldown : not recorded ["
+                 << optimizer::common::ToString(error.domain) << L":"
+                 << error.code << L"] " << error.message
+                 << L" (the action itself did complete)";
+            optimizer::common::WriteConsoleLine(line.str());
+        }
+        return 0;
+    }
+
+    // restore 路径（回滚）：不受冷却门限制。
+    JournalAction("power.scheme_restore", target, true,
+                  optimizer::audit::JournalPhase::Before,
+                  "intent: restore saved power scheme (rollback)");
+    const auto restored = optimizer::power::RestoreScheme(backend, restoreBasis);
+    bool ok = false;
+    std::wstring detail;
+    std::string state;
+    if (restored) {
+        const auto& outcome = restored.Value();
+        ok = outcome.restored;
+        state = "saved=" + outcome.savedGuid + " active=" + outcome.activeGuid;
+        detail = ok ? L"restored and verified by read-back"
+                    : L"restore call returned success but read-back differs";
+    } else {
+        const auto& error = restored.ErrorValue();
+        detail = L"failed [";
+        detail += optimizer::common::ToString(error.domain);
+        detail += L":";
+        detail += std::to_wstring(error.code);
+        detail += L"] ";
+        detail += error.message;
+    }
+    optimizer::common::WriteConsoleLine(
+        L"Power scheme restore (R2, rollback; never blocked by cooldown)");
+    optimizer::common::WriteConsoleLine(L"  saved    : " +
+                                        WidenAscii(restoreBasis));
+    if (!state.empty()) {
+        optimizer::common::WriteConsoleLine(L"  state    : " + WidenAscii(state));
+    }
+    optimizer::common::WriteConsoleLine(
+        L"  verdict  : " + std::wstring(ok ? L"restored (verified by read-back)"
+                                          : L"not restored"));
+    if (!ok) {
+        ErrorLine{} << L"  detail   : " << detail << L"\n";
+    }
+    AuditAction("power.scheme_restore", optimizer::audit::RiskLevel::R2, target,
+                ok, ToAsciiToken(detail), state);
+    return ok ? 0 : 2;
+}
+
 int RunPowerLockCommand(int argc, wchar_t* argv[]) {
     // --power-lock <s> [execution|display|both] [reason...]：
     // R1 局部可逆演示命令——前台有界持有电源请求（阻止睡眠/熄屏），
@@ -3056,6 +3411,11 @@ std::filesystem::path DefaultCooldownLedgerPath() noexcept {
 
 std::filesystem::path DefaultJournalPath() noexcept {
     return DefaultHostConfigPath().parent_path() / L"action-journal.log";
+}
+
+// 电源计划恢复依据（每用户小文件：信封 + saved=<GUID>）。
+std::filesystem::path DefaultPowerSchemeSavePath() noexcept {
+    return DefaultHostConfigPath().parent_path() / L"power-scheme-save.txt";
 }
 
 std::filesystem::path DefaultAuditLogPath() noexcept {
@@ -5221,6 +5581,15 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --power-lock <s> [execution|display|both]\n"
         << L"                             [reason...]  Hold a power request for 1..60 s\n"
         << L"                             (R1, reversible; released on exit)\n"
+        << L"  CppOptimizer.exe --power-scheme status|saved  Read the active/saved power\n"
+        << L"                             scheme GUID (R0, read-only)\n"
+        << L"  CppOptimizer.exe --power-scheme <balanced|high-performance|power-saver|GUID>\n"
+        << L"                             [config.toml] [--acknowledge-system-wide-side-effects]\n"
+        << L"                             Switch the active power scheme (R2, reversible: the\n"
+        << L"                             original GUID is saved first; all six gates must pass)\n"
+        << L"  CppOptimizer.exe --power-scheme restore [config.toml]\n"
+        << L"                             [--acknowledge-system-wide-side-effects]  Roll back to\n"
+        << L"                             the saved GUID (never blocked by cooldown)\n"
         << L"  CppOptimizer.exe --priority-boost <s> <pid> [config.toml]\n"
         << L"                             Temporarily raise a process priority class\n"
         << L"                             for 1..60 s (R1, reversible; level from\n"
@@ -5359,6 +5728,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--power-lock") {
             return RunPowerLockCommand(argc, argv);
+        }
+        if (argc >= 3 && std::wstring_view(argv[1]) == L"--power-scheme") {
+            return RunPowerSchemeCommand(argc, argv);
         }
         if ((argc == 4 || argc == 5) &&
             std::wstring_view(argv[1]) == L"--priority-boost") {

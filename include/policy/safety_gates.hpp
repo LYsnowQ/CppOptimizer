@@ -52,13 +52,21 @@ struct GateEvaluation {
 // 原则（2026-09-20 定）：**危险能力默认关**；只有构建时显式定义
 // `OPTIMIZER_ENABLE_<能力>=1` 才视为“编译期已开启”。核心功能所需的能力不以配置形式出现，
 // 而作为软件的**运行需求**（不在本表内）。
+// **每个能力一个开关**：共用同一个宏会让“未实现的能力”在诊断表里显得已开启（如实性缺陷）。
 #ifndef OPTIMIZER_ENABLE_MEMORY_CLEAN
 #define OPTIMIZER_ENABLE_MEMORY_CLEAN 0
+#endif
+#ifndef OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH
+#define OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH 0
 #endif
 
 // 各能力的编译期开关状态（默认恒为 false，与宏默认 0 一致）。
 [[nodiscard]] constexpr bool MemoryCleanCompiledIn() noexcept {
     return OPTIMIZER_ENABLE_MEMORY_CLEAN != 0;
+}
+
+[[nodiscard]] constexpr bool PowerSchemeSwitchCompiledIn() noexcept {
+    return OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH != 0;
 }
 
 // ---------- 冷却门（cooldown） ----------
@@ -72,9 +80,10 @@ struct CooldownLedger {
     std::map<std::string, std::int64_t, std::less<>> lastRunUnixSeconds;
 };
 
-// 内存清理能力的 ID（`--gates` 与 `--memory-clean` 的真实执行路径共用同一常量，
-// 避免两处硬编码漂移导致“门禁显示放行、执行却按另一个 key 判定”）。
+// 能力 ID（冷却台账键）。**动作路径与诊断表必须用同一个键**，否则会“诊断显示可跑、执行却按另一个键判冷却”。
 inline constexpr std::string_view kMemoryCleanCapabilityId = "memory.clean";
+inline constexpr std::string_view kPowerSchemeCapabilityId =
+    "power.switch_power_scheme";
 
 // 读取台账：文件不存在 = 无可记录（Success + 空台账，不是错误）；内容信封不符亦按空台账处理；
 // 读取 IO 失败如实返回 Failure。

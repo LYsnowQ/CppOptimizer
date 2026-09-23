@@ -31,6 +31,7 @@ set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/thirdParty)
 # 危险能力的编译期开关：**默认关**（OFF）。只有构建时显式打开，相关能力的“编译期门”才视为通过；
 # 核心功能所需能力不作为开关出现，而作为运行需求存在。
 option(OPTIMIZER_ENABLE_MEMORY_CLEAN "Build in the default-off memory clean capability" OFF)
+option(OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH "Build in the default-off power scheme switch capability" OFF)
 
 add_executable(CppOptimizer
     source/main.cpp
@@ -47,6 +48,7 @@ add_executable(CppOptimizer
     source/policy/policy_engine.cpp
     source/policy/policy_executor.cpp
     source/power/power_locker.cpp
+    source/power/power_scheme.cpp
     source/priority/priority_booster.cpp
     source/policy/safety_gates.cpp
     source/process/process_watcher.cpp
@@ -79,11 +81,15 @@ target_link_libraries(CppOptimizer PRIVATE
     ole32
     oleaut32
     taskschd
+    powrprof
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
 )
 if(OPTIMIZER_ENABLE_MEMORY_CLEAN)
     target_compile_definitions(CppOptimizer PRIVATE OPTIMIZER_ENABLE_MEMORY_CLEAN=1)
+endif()
+if(OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH)
+    target_compile_definitions(CppOptimizer PRIVATE OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH=1)
 endif()
 
 target_compile_features(CppOptimizer PRIVATE cxx_std_20)
@@ -287,6 +293,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         tests/power_tests.cpp
         source/common/error.cpp
         source/power/power_locker.cpp
+        source/power/power_scheme.cpp
     )
     target_include_directories(CppOptimizerPowerTests PRIVATE include)
     target_compile_features(CppOptimizerPowerTests PRIVATE cxx_std_20)
@@ -296,6 +303,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
     target_compile_options(CppOptimizerPowerTests PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
     )
+    target_link_libraries(CppOptimizerPowerTests PRIVATE powrprof)
     if(MINGW)
         target_link_options(CppOptimizerPowerTests PRIVATE -municode)
     endif()
