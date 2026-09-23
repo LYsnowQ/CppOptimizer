@@ -724,6 +724,213 @@ bool TestCompactAuditFileFailureKeepsOriginal() {
     return failedHonestly && originalKept && tempCleaned;
 }
 
+// ---------- AUD-005：汇总文件二级折叠（5 MiB 触发 / 20 MiB 上限） ----------
+
+// 汇总行内容为 ASCII，直接用 std::string（写入时按 UTF-8 字节落盘）。
+const std::string kSummaryLineA =
+    "2026-09-17 00:00:00..2026-09-17 01:00:00 [audit-summary] total=10 "
+    "ok=8 fail=2 unparsed=1 power.hold=6/2 priority.boost=2/0\n";
+const std::string kSummaryLineB =
+    "2026-09-18 00:00:00..2026-09-18 02:00:00 [audit-summary] total=5 "
+    "ok=5 fail=0 unparsed=0 power.hold=1/0 power.release=4/0\n";
+
+bool TestParseAuditSummaryLineOperationCounts() {
+    using optimizer::audit::ParseAuditSummaryLine;
+    const std::string line =
+        "2026-09-17 00:00:00..2026-09-17 01:00:00 [audit-summary] total=10 "
+        "ok=8 fail=2 unparsed=1 power.hold=6/2 priority.boost=2/0";
+    const auto record = ParseAuditSummaryLine(line);
+    if (!record || record->byOperation.size() != 2) {
+        return false;
+    }
+    const bool first = record->byOperation[0].operationId == "power.hold" &&
+                       record->byOperation[0].ok == 6 &&
+                       record->byOperation[0].fail == 2;
+    const bool second = record->byOperation[1].operationId == "priority.boost" &&
+                        record->byOperation[1].ok == 2 &&
+                        record->byOperation[1].fail == 0;
+    // 无尾部字段合法（旧行/空聚合）；尾部字段畸形则整行不可解析。
+    const auto plain = ParseAuditSummaryLine(
+        " [audit-summary] total=3 ok=3 fail=0 unparsed=0");
+    const bool plainOk = plain && plain->byOperation.empty();
+    const bool rejects =
+        !ParseAuditSummaryLine(
+            " [audit-summary] total=3 ok=3 fail=0 unparsed=0 power.hold=1") &&
+        !ParseAuditSummaryLine(
+            " [audit-summary] total=3 ok=3 fail=0 unparsed=0 =1/0") &&
+        !ParseAuditSummaryLine(
+            " [audit-summary] total=3 ok=3 fail=0 unparsed=0 power.hold=1/x");
+    return first && second && plainOk && rejects;
+}
+
+bool TestFoldAuditSummaryMergesCounts() {
+    using optimizer::audit::AuditSummaryPath;
+    using optimizer::audit::CompactOptions;
+    using optimizer::audit::FoldAuditSummaryFile;
+    using optimizer::audit::ParseAuditSummaryLine;
+    using optimizer::audit::ReadAuditTail;
+    const auto auditPath = TempAuditPath(L"foldmerge");
+    if (auditPath.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const auto summaryPath = AuditSummaryPath(auditPath);
+    std::filesystem::remove(auditPath, ec);
+    std::filesystem::remove(summaryPath, ec);
+    {
+        std::ofstream out(summaryPath, std::ios::binary | std::ios::trunc);
+        out << kSummaryLineA;
+        out << kSummaryLineB;
+    }
+    CompactOptions options;
+    options.summaryMaxBytes = 1; // 达上限即折叠（测试用极小阈值）
+    const auto folded = FoldAuditSummaryFile(summaryPath, options);
+    if (!folded || !folded.Value().folded) {
+        std::filesystem::remove(auditPath, ec);
+        std::filesystem::remove(summaryPath, ec);
+        return false;
+    }
+    const bool counts = folded.Value().mergedRanges == 2 &&
+                        folded.Value().afterLines == 1;
+    const auto tail = ReadAuditTail(summaryPath, 10);
+    if (!tail || tail.Value().lines.size() != 1) {
+        std::filesystem::remove(auditPath, ec);
+        std::filesystem::remove(summaryPath, ec);
+        return false;
+    }
+    const auto merged = ParseAuditSummaryLine(tail.Value().lines[0]);
+    // 计数求和、时间范围跨两段、逐操作计数合并（power.hold 跨两行相加）。
+    bool operationMerged = false;
+    if (merged) {
+        for (const auto& entry : merged->byOperation) {
+            if (entry.operationId == "power.hold" && entry.ok == 7 && entry.fail == 2) {
+                operationMerged = true;
+            }
+        }
+    }
+    const bool mergedOk = merged && merged->total == 15 && merged->ok == 13 &&
+                          merged->fail == 2 && merged->unparsed == 1 &&
+                          merged->byOperation.size() == 3 && operationMerged &&
+                          merged->firstTimestamp == "2026-09-17 00:00:00" &&
+                          merged->lastTimestamp == "2026-09-18 02:00:00";
+    // 自审计：折叠事件写入审计 trail（审计文件可能因此被新建）。
+    const auto auditTail = ReadAuditTail(auditPath, 10);
+    const bool selfAudited =
+        auditTail && auditTail.Value().lines.size() == 1 &&
+        auditTail.Value().lines[0].find("audit.fold") != std::string::npos &&
+        auditTail.Value().lines[0].find("merged_ranges=2") != std::string::npos;
+    std::filesystem::remove(auditPath, ec);
+    std::filesystem::remove(summaryPath, ec);
+    return counts && mergedOk && selfAudited;
+}
+
+bool TestFoldAuditSummaryNoopBelowCap() {
+    using optimizer::audit::AuditSummaryPath;
+    using optimizer::audit::CompactOptions;
+    using optimizer::audit::FoldAuditSummaryFile;
+    const auto auditPath = TempAuditPath(L"foldnoop");
+    if (auditPath.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const auto summaryPath = AuditSummaryPath(auditPath);
+    std::filesystem::remove(auditPath, ec);
+    std::filesystem::remove(summaryPath, ec);
+    {
+        std::ofstream out(summaryPath, std::ios::binary | std::ios::trunc);
+        out << kSummaryLineA;
+    }
+    const auto before = ReadAllBytes(summaryPath);
+    const auto folded = FoldAuditSummaryFile(summaryPath, CompactOptions{});
+    const bool untouched = ReadAllBytes(summaryPath) == before &&
+                           !std::filesystem::exists(auditPath, ec);
+    const bool result = folded && !folded.Value().folded;
+    // 上限为 0 = 该维度不参与判定（永不折叠）。
+    CompactOptions disabled;
+    disabled.summaryMaxBytes = 0;
+    const auto skipped = FoldAuditSummaryFile(summaryPath, disabled);
+    std::filesystem::remove(summaryPath, ec);
+    return result && untouched && skipped && !skipped.Value().folded;
+}
+
+bool TestFoldAuditSummaryKeepsUnparsableLines() {
+    using optimizer::audit::AuditSummaryPath;
+    using optimizer::audit::CompactOptions;
+    using optimizer::audit::FoldAuditSummaryFile;
+    using optimizer::audit::ReadAuditTail;
+    const auto auditPath = TempAuditPath(L"foldgarbage");
+    if (auditPath.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const auto summaryPath = AuditSummaryPath(auditPath);
+    std::filesystem::remove(auditPath, ec);
+    std::filesystem::remove(summaryPath, ec);
+    {
+        std::ofstream out(summaryPath, std::ios::binary | std::ios::trunc);
+        out << "garbage summary line\n";
+        out << kSummaryLineA;
+        out << kSummaryLineB; // 两行可折叠汇总：才会真正减少行数
+    }
+    CompactOptions options;
+    options.summaryMaxBytes = 1;
+    const auto folded = FoldAuditSummaryFile(summaryPath, options);
+    const auto tail = ReadAuditTail(summaryPath, 10);
+    const bool kept =
+        folded && folded.Value().folded && folded.Value().unparsableKept == 1 &&
+        tail && tail.Value().lines.size() == 2 &&
+        tail.Value().lines[0].find("[audit-summary]") != std::string::npos &&
+        tail.Value().lines[1] == "garbage summary line";
+    std::filesystem::remove(auditPath, ec);
+    std::filesystem::remove(summaryPath, ec);
+    return kept;
+}
+
+bool TestFoldAuditSummaryFailuresAreReported() {
+    using optimizer::audit::AuditSummaryPath;
+    using optimizer::audit::CompactOptions;
+    using optimizer::audit::FoldAuditSummaryFile;
+    const auto auditPath = TempAuditPath(L"foldfail");
+    if (auditPath.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const auto summaryPath = AuditSummaryPath(auditPath);
+    std::filesystem::remove(auditPath, ec);
+    std::filesystem::remove(summaryPath, ec);
+    CompactOptions options;
+    options.summaryMaxBytes = 1;
+    // 空路径拒绝。
+    const auto empty = FoldAuditSummaryFile({}, options);
+    // 目录当文件：读失败如实返回。
+    if (!std::filesystem::create_directory(summaryPath, ec) || ec) {
+        return false;
+    }
+    const auto directory = FoldAuditSummaryFile(summaryPath, options);
+    const bool rejected = !empty &&
+                          empty.ErrorValue().domain == optimizer::common::ErrorDomain::Validation &&
+                          !directory;
+    // 自审计目标不可写（同名目录占位）时：折叠已生效但如实返回失败（契约声明的顺序）。
+    std::filesystem::remove(summaryPath, ec);
+    {
+        std::ofstream out(summaryPath, std::ios::binary | std::ios::trunc);
+        out << kSummaryLineA;
+        out << kSummaryLineB; // 两行不同内容：折叠会真正改变文件（单行折叠 = no-op）
+    }
+    if (!std::filesystem::create_directory(auditPath, ec) || ec) {
+        return false;
+    }
+    const auto selfAuditFailed = FoldAuditSummaryFile(summaryPath, options);
+    const auto summaryTail = optimizer::audit::ReadAuditTail(summaryPath, 10);
+    const bool foldedButReported =
+        !selfAuditFailed &&
+        selfAuditFailed.ErrorValue().domain == optimizer::common::ErrorDomain::Win32 &&
+        summaryTail && summaryTail.Value().totalLines == 1;
+    std::filesystem::remove(auditPath, ec);
+    std::filesystem::remove(summaryPath, ec);
+    return rejected && foldedButReported;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -771,6 +978,15 @@ int wmain() {
     run(L"format audit summary line", &TestFormatAuditSummaryLine);
     run(L"should compact audit file thresholds", &TestShouldCompactAuditFile);
     run(L"parse audit summary line total", &TestParseAuditSummaryLine);
+    run(L"parse audit summary operation counts",
+        &TestParseAuditSummaryLineOperationCounts);
+    run(L"fold audit summary merges counts", &TestFoldAuditSummaryMergesCounts);
+    run(L"fold audit summary noop below cap",
+        &TestFoldAuditSummaryNoopBelowCap);
+    run(L"fold audit summary keeps unparsable lines",
+        &TestFoldAuditSummaryKeepsUnparsableLines);
+    run(L"fold audit summary failures are reported",
+        &TestFoldAuditSummaryFailuresAreReported);
     run(L"analyze audit summary lines", &TestAnalyzeAuditSummaryLines);
     run(L"compact audit file noop below threshold",
         &TestCompactAuditFileNoopBelowThreshold);

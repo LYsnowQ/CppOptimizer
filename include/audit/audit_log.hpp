@@ -93,14 +93,38 @@ struct AuditLineSummary {
 // 空时间戳时省略 `..` 区间（仍输出计数）。
 [[nodiscard]] std::string FormatAuditSummaryLine(const AuditLineSummary& summary);
 
-// 压缩选项（AUD-004）：任一阈值**达到或超过**即应压缩；某项为 0 表示该维度不参与判定，
+// 压缩选项（AUD-004/AUD-005）：任一阈值**达到或超过**即应压缩；某项为 0 表示该维度不参与判定，
 // 两者都为 0 时永不触发。`keepTailLines` 指定重写后至少保留的尾部行数（未被压缩的部分，
 // 含不可解析行——它们必须原样保留）。
+// 规模策略（压缩优先、永不删除）：
+// - `maxBytes`：正常审计文件的压缩触发阈值（默认 5 MiB）；
+// - `summaryMaxBytes`：汇总文件的上限（默认 20 MiB）；达到上限时对**汇总文件本身**再折叠
+//   （多行汇总 -> 一行合并汇总），计数与时间范围继续保留，而不是删除任何计数。
 struct CompactOptions {
-    std::uintmax_t maxBytes = 4u * 1024u * 1024u; // 4 MiB
+    std::uintmax_t maxBytes = 5u * 1024u * 1024u;        // 5 MiB（触发审计文件压缩）
     std::size_t maxLines = 20000;
     std::size_t keepTailLines = 2000;
+    std::uintmax_t summaryMaxBytes = 20u * 1024u * 1024u; // 20 MiB（汇总文件上限）
 };
+
+// 汇总文件折叠结果（AUD-005）：`folded=false` = 未达上限或无内容可折叠（文件未被触碰）。
+struct FoldSummaryResult {
+    bool folded = false;
+    std::size_t beforeLines = 0;
+    std::size_t afterLines = 0;
+    std::size_t mergedRanges = 0;   // 被合并的汇总行数（原区间数）
+    std::size_t unparsableKept = 0; // 原样保留的不可解析行数
+};
+
+// 汇总文件折叠（AUD-005，二级压缩）：汇总文件达到 `summaryMaxBytes` 上限时，把其中的汇总行
+// 合并为**一行**（保留总计数、整体时间范围与逐 operationId 计数），**不可解析行原样保留**（置于
+// 合并行之后，原文不变），并以临时文件 + 原子替换重写（失败不破坏原文件）。
+// 只有“确实减少行数”才重写（全部行均不可解析、或仅 1 行可解析时为 no-op）。
+// 折叠后仍追加一条 `audit.fold` 自审计记录到同目录的审计文件（`<stem>` 去掉 `-summary`）；
+// 未达上限/文件不存在/无可折叠内容时为 no-op。
+[[nodiscard]] common::Result<FoldSummaryResult> FoldAuditSummaryFile(
+    const std::filesystem::path& summaryPath,
+    const CompactOptions& options = {}) noexcept;
 
 [[nodiscard]] bool ShouldCompactAuditFile(std::uintmax_t currentBytes,
                                           std::size_t currentLines,
@@ -115,6 +139,8 @@ struct AuditSummaryRecord {
     std::size_t ok = 0;
     std::size_t fail = 0;
     std::size_t unparsed = 0;
+    // 逐 operationId 计数（尾部 `<op>=<ok>/<fail>` 字段，按出现顺序）；无尾部字段时为空。
+    std::vector<AuditOperationCount> byOperation;
 };
 [[nodiscard]] std::optional<AuditSummaryRecord> ParseAuditSummaryLine(
     std::string_view line) noexcept;

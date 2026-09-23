@@ -437,6 +437,64 @@ common::Result<AuditTail> ReadAuditTail(const std::filesystem::path& path,
     return common::Result<AuditTail>::Success(std::move(tail));
 }
 
+namespace {
+
+// 解析十进制数字串（空串/非数字/溢出返回 false）。
+bool ParseDigits(std::string_view text, std::size_t& out) noexcept {
+    if (text.empty()) {
+        return false;
+    }
+    std::size_t value = 0;
+    for (const char ch : text) {
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+        if (value > (std::numeric_limits<std::size_t>::max() - 9) / 10) {
+            return false;
+        }
+        value = value * 10 + static_cast<std::size_t>(ch - '0');
+    }
+    out = value;
+    return true;
+}
+
+// 解析 `<op>=<ok>/<fail>` 形式的逐操作计数；格式不符返回 false（不部分采纳）。
+bool ParseOperationCount(std::string_view token, AuditOperationCount& out) {
+    const auto eq = token.find('=');
+    if (eq == std::string_view::npos || eq == 0) {
+        return false;
+    }
+    const auto slash = token.find('/', eq + 1);
+    if (slash == std::string_view::npos) {
+        return false;
+    }
+    std::size_t ok = 0;
+    std::size_t fail = 0;
+    if (!ParseDigits(token.substr(eq + 1, slash - eq - 1), ok) ||
+        !ParseDigits(token.substr(slash + 1), fail)) {
+        return false;
+    }
+    out.operationId = std::string(token.substr(0, eq));
+    out.ok = ok;
+    out.fail = fail;
+    return true;
+}
+
+// 汇总文件对应的审计文件：去掉 stem 的 `-summary` 后缀（折叠事件记在审计trail 里）。
+std::filesystem::path AuditPathForSummary(const std::filesystem::path& summaryPath) {
+    const std::wstring stem = summaryPath.stem().wstring();
+    constexpr std::wstring_view kSuffix = L"-summary";
+    if (stem.size() > kSuffix.size() &&
+        stem.compare(stem.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0) {
+        return summaryPath.parent_path() /
+               (stem.substr(0, stem.size() - kSuffix.size()) +
+                summaryPath.extension().wstring());
+    }
+    return std::filesystem::path(); // 命名不符：不猜目标文件
+}
+
+} // namespace
+
 std::optional<AuditSummaryRecord> ParseAuditSummaryLine(
     std::string_view line) noexcept {
     constexpr std::string_view kMarker = " [audit-summary] ";
@@ -463,6 +521,30 @@ std::optional<AuditSummaryRecord> ParseAuditSummaryLine(
         !ExtractCount(fields, "fail=", record.fail) ||
         !ExtractCount(fields, "unparsed=", record.unparsed)) {
         return std::nullopt; // 缺字段：整体视为不可解析，不按局部值静默部分采纳
+    }
+    // 尾部逐操作计数：先跳过四个已知字段，其余 token 必须是 <op>=<ok>/<fail>；
+    // 任一 token 畸形即整行不可解析（折叠时不能部分采纳计数）。
+    std::string_view rest = fields;
+    for (const std::string_view key : {"total=", "ok=", "fail=", "unparsed="}) {
+        const auto at = rest.find(key);
+        const auto end = rest.find(' ', at);
+        rest = end == std::string_view::npos ? std::string_view{}
+                                             : rest.substr(end + 1);
+    }
+    while (!rest.empty()) {
+        const auto end = rest.find(' ');
+        const std::string_view token = rest.substr(0, end);
+        if (!token.empty()) {
+            AuditOperationCount count;
+            if (!ParseOperationCount(token, count)) {
+                return std::nullopt;
+            }
+            record.byOperation.push_back(std::move(count));
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        rest = rest.substr(end + 1);
     }
     return record;
 }
@@ -656,6 +738,175 @@ common::Result<CompactResult> CompactAuditFile(
     result.unparsedKept = summary.unparsed;
     result.summaryPath = summaryPath;
     return common::Result<CompactResult>::Success(std::move(result));
+}
+
+common::Result<FoldSummaryResult> FoldAuditSummaryFile(
+    const std::filesystem::path& summaryPath,
+    const CompactOptions& options) noexcept {
+    if (summaryPath.empty()) {
+        return common::Result<FoldSummaryResult>::Failure(common::Error::Validation(
+            "FoldAuditSummaryFile", L"路径不能为空"));
+    }
+    std::error_code ec;
+    // 目录不是文件：Windows 上 file_size(目录) 可能返回 0 且不报错，故显式拒绝，
+    // 避免把“路径用错”当成“未达上限”而静默放过。
+    if (std::filesystem::is_directory(summaryPath, ec)) {
+        return common::Result<FoldSummaryResult>::Failure(common::Error::Validation(
+            "FoldAuditSummaryFile", L"汇总路径是目录，不是文件"));
+    }
+    if (ec) {
+        return common::Result<FoldSummaryResult>::Failure(common::Error::FromWin32(
+            static_cast<std::uint32_t>(ec.value()), "is_directory(audit summary)"));
+    }
+    if (!std::filesystem::exists(summaryPath, ec)) {
+        if (ec) {
+            return common::Result<FoldSummaryResult>::Failure(
+                common::Error::FromWin32(static_cast<std::uint32_t>(ec.value()),
+                                         "exists(audit summary)"));
+        }
+        return common::Result<FoldSummaryResult>::Success(FoldSummaryResult{});
+    }
+    const auto size = std::filesystem::file_size(summaryPath, ec);
+    if (ec) {
+        return common::Result<FoldSummaryResult>::Failure(
+            common::Error::FromWin32(static_cast<std::uint32_t>(ec.value()),
+                                     "file_size(audit summary)"));
+    }
+    FoldSummaryResult result;
+    // 未达上限（或上限为 0 = 不参与判定）：不触碰文件。
+    if (options.summaryMaxBytes == 0 || size < options.summaryMaxBytes) {
+        return common::Result<FoldSummaryResult>::Success(std::move(result));
+    }
+    // 读取上限必须高于汇总上限（否则上限永远无法生效）；超限如实拒绝，不无界读取。
+    // 内存只与“不可解析行”相关：可解析行边读边合并，不保留原文。
+    constexpr std::uintmax_t kMaxSummaryReadBytes = 64u * 1024u * 1024u;
+    if (size > kMaxSummaryReadBytes) {
+        return common::Result<FoldSummaryResult>::Failure(common::Error::Validation(
+            "FoldAuditSummaryFile", L"汇总文件超出可折叠读取上限（64 MiB）"));
+    }
+    AuditLineSummary merged;
+    std::vector<std::string> keptUnparsable;
+    {
+        std::ifstream in(summaryPath, std::ios::binary);
+        if (!in) {
+            return common::Result<FoldSummaryResult>::Failure(
+                common::Error::FromWin32(
+                    static_cast<std::uint32_t>(::GetLastError()),
+                    "open audit summary for fold"));
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            ++result.beforeLines;
+            const auto record = ParseAuditSummaryLine(line);
+            if (!record) {
+                keptUnparsable.push_back(line); // 不可解析行：原文保留，不丢弃
+                continue;
+            }
+            ++result.mergedRanges;
+            merged.total += record->total;
+            merged.ok += record->ok;
+            merged.fail += record->fail;
+            merged.unparsed += record->unparsed;
+            for (const auto& entry : record->byOperation) {
+                AuditOperationCount* slot = nullptr;
+                for (auto& candidate : merged.byOperation) {
+                    if (candidate.operationId == entry.operationId) {
+                        slot = &candidate;
+                        break;
+                    }
+                }
+                if (slot == nullptr) {
+                    merged.byOperation.push_back(
+                        AuditOperationCount{entry.operationId, 0, 0});
+                    slot = &merged.byOperation.back();
+                }
+                slot->ok += entry.ok;
+                slot->fail += entry.fail;
+            }
+            if (merged.firstTimestamp.empty()) {
+                merged.firstTimestamp = record->firstTimestamp;
+            }
+            if (!record->lastTimestamp.empty()) {
+                merged.lastTimestamp = record->lastTimestamp;
+            }
+        }
+        if (in.bad()) {
+            return common::Result<FoldSummaryResult>::Failure(
+                common::Error::FromWin32(
+                    static_cast<std::uint32_t>(::GetLastError()),
+                    "read audit summary for fold"));
+        }
+    }
+    result.afterLines = result.beforeLines;
+    result.unparsableKept = keptUnparsable.size();
+    if (result.mergedRanges == 0) {
+        return common::Result<FoldSummaryResult>::Success(std::move(result)); // 无可折叠内容
+    }
+    // 只有“确实减少行数”才重写（合并 1 行、或仅重排不可解析行都不产生收益，视为 no-op）。
+    const std::size_t foldedLines = 1 + keptUnparsable.size();
+    if (foldedLines >= result.beforeLines) {
+        return common::Result<FoldSummaryResult>::Success(std::move(result));
+    }
+    std::vector<std::string> rewritten;
+    rewritten.reserve(keptUnparsable.size() + 1);
+    rewritten.push_back(FormatAuditSummaryLine(merged));
+    for (auto& line : keptUnparsable) {
+        rewritten.push_back(std::move(line));
+    }
+    // 临时文件 + 原子替换（失败不破坏原文件）。
+    const std::wstring pathText = summaryPath.wstring();
+    const std::wstring tempText = pathText + L".tmp";
+    {
+        std::ofstream out(tempText, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return common::Result<FoldSummaryResult>::Failure(
+                common::Error::FromWin32(
+                    static_cast<std::uint32_t>(::GetLastError()),
+                    "create audit summary temp file"));
+        }
+        for (const auto& line : rewritten) {
+            out << line << '\n';
+        }
+        out.flush();
+        if (!out) {
+            const auto code = static_cast<std::uint32_t>(::GetLastError());
+            out.close();
+            ::DeleteFileW(tempText.c_str());
+            return common::Result<FoldSummaryResult>::Failure(
+                common::Error::FromWin32(code, "write audit summary temp file"));
+        }
+    }
+    if (!::MoveFileExW(tempText.c_str(), pathText.c_str(),
+                       MOVEFILE_REPLACE_EXISTING)) {
+        const auto code = static_cast<std::uint32_t>(::GetLastError());
+        ::DeleteFileW(tempText.c_str());
+        return common::Result<FoldSummaryResult>::Failure(
+            common::Error::FromWin32(code, "MoveFileExW(audit summary fold)"));
+    }
+    result.folded = true;
+    result.afterLines = rewritten.size();
+    // 自审计：折叠事件记入审计 trail（追加失败如实返回，但折叠已生效——由此函数契约声明）。
+    const std::filesystem::path auditPath = AuditPathForSummary(summaryPath);
+    if (!auditPath.empty()) {
+        AuditRecord foldRecord;
+        foldRecord.operationId = "audit.fold";
+        foldRecord.risk = RiskLevel::R0;
+        foldRecord.caller = "audit";
+        foldRecord.target = auditPath.stem().string() + auditPath.extension().string();
+        foldRecord.ok = true;
+        foldRecord.detail =
+            "merged_ranges=" + std::to_string(result.mergedRanges) +
+            " before=" + std::to_string(result.beforeLines) +
+            " after=" + std::to_string(result.afterLines) +
+            " unparsable_kept=" + std::to_string(result.unparsableKept) +
+            " summary_max_bytes=" + std::to_string(options.summaryMaxBytes);
+        const auto appended = AppendAuditLine(auditPath, foldRecord);
+        if (!appended) {
+            return common::Result<FoldSummaryResult>::Failure(
+                appended.ErrorValue()); // 折叠已完成但自审计失败：如实上报
+        }
+    }
+    return common::Result<FoldSummaryResult>::Success(std::move(result));
 }
 
 } // namespace optimizer::audit

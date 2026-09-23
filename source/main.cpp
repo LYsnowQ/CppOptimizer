@@ -702,12 +702,15 @@ int RunAuditSummaryCommand(int argc, wchar_t* argv[]) {
 }
 
 int RunAuditCompactCommand(int argc, wchar_t* argv[]) {
-    // --audit-compact [path]：手动触发审计语义压缩（R0，仅本地文件）。压缩而非删除：旧记录
-    // 聚合为一行汇总写入同目录汇总文件，计数与时间范围保留，逐条细节丢弃；不可解析行原样保留。
+    // --audit-compact [path]：手动触发审计语义压缩（R0，仅本地文件）。
+    // 两阶段（压缩优先、永不删除）：
+    //   1) 正常审计文件达触发阈值（默认 5 MiB）-> 旧记录聚合为一行汇总写入同目录汇总文件；
+    //   2) 汇总文件达上限（默认 20 MiB）-> 把多行汇总折叠为一行合并汇总（计数与时间范围保留）。
+    // 不可解析行在两阶段都原样保留；两阶段均以临时文件 + 原子替换重写，失败不破坏原文件。
     const std::filesystem::path path = argc >= 3 ? std::filesystem::path(argv[2])
                                                 : DefaultAuditLogPath();
-    const auto compacted =
-        optimizer::audit::CompactAuditFile(path, optimizer::audit::CompactOptions{});
+    const optimizer::audit::CompactOptions options{};
+    const auto compacted = optimizer::audit::CompactAuditFile(path, options);
     if (!compacted) {
         const auto& error = compacted.ErrorValue();
         ErrorLine{} << L"  audit compact failed ["
@@ -726,19 +729,35 @@ int RunAuditCompactCommand(int argc, wchar_t* argv[]) {
         line << L"  result  : skipped (below threshold or nothing to compact; "
              << result.beforeLines << L" line(s) untouched)";
         optimizer::common::WriteConsoleLine(line.str());
-        return 0;
-    }
-    {
+    } else {
         std::wostringstream line;
         line << L"  result  : compacted " << result.beforeLines << L" -> "
              << result.afterLines << L" line(s); summarized "
              << result.summarizedLines << L", unparsed kept "
              << result.unparsedKept;
         optimizer::common::WriteConsoleLine(line.str());
+        {
+            std::wostringstream summaryLine;
+            summaryLine << L"  summary : " << result.summaryPath.wstring();
+            optimizer::common::WriteConsoleLine(summaryLine.str());
+        }
     }
-    {
+    // 汇总文件上限独立检查：即使审计文件未达阈值，汇总文件达上限也要折叠。
+    const auto folded = optimizer::audit::FoldAuditSummaryFile(
+        optimizer::audit::AuditSummaryPath(path), options);
+    if (!folded) {
+        const auto& error = folded.ErrorValue();
+        ErrorLine{} << L"  audit summary fold failed ["
+                    << optimizer::common::ToString(error.domain) << L":"
+                    << error.code << L"] " << error.message << L"\n";
+        return 2;
+    }
+    if (folded.Value().folded) {
         std::wostringstream line;
-        line << L"  summary : " << result.summaryPath.wstring();
+        line << L"  folded  : " << folded.Value().mergedRanges
+             << L" summarized range(s) -> 1 line (" << folded.Value().beforeLines
+             << L" -> " << folded.Value().afterLines << L" line(s); unparsable kept "
+             << folded.Value().unparsableKept << L")";
         optimizer::common::WriteConsoleLine(line.str());
     }
     return 0;
@@ -4151,9 +4170,9 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --audit-log [path] [lines]  Read back the tail of the\n"
         << L"                             persisted audit trail (read-only; default: per-user\n"
         << L"                             audit.log, last 20 lines, max 200)\n"
-        << L"  CppOptimizer.exe --audit-compact [path]  Summarize old audit records into one\n"
-        << L"                             summary line (counts and time range kept; no counts\n"
-        << L"                             deleted; default: per-user audit.log)\n"
+        << L"  CppOptimizer.exe --audit-compact [path]  Compact the audit trail (two stages: the\n"
+        << L"                             audit file compacts past 5 MiB; the summary file folds\n"
+        << L"                             past 20 MiB; counts are never deleted)\n"
         << L"  CppOptimizer.exe --audit-summary [path] [lines]  Read back compacted summary\n"
         << L"                             totals (read-only; default: per-user summary file,\n"
         << L"                             last 20 lines, max 200)\n"
