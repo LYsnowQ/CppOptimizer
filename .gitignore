@@ -56,5 +56,8 @@ thirdParty/
 
 # Local private workspace (never commit)
 /work.md
+
+# Local private: isolation-environment deployment guide (kept out of the repo)
+/ISOLATION-VM-SETUP.md
 /works/
 

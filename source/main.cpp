@@ -716,7 +716,6 @@ int RunConfigCommand(std::wstring_view path) {
     // 如实区分“已解析”与“已生效”：以下字段尚无消费者（能力待落地或模块未实施），
     // 回显它们不代表行为已生效（与日志/审计同口径：不伪装成功）。
     std::wcout << L"  pending    : parsed but not effective yet:\n"
-                  L"               [memory].max_clean_level\n"
                   L"               [gpu_heartbeat]/[scheduler]/[disk_cache] (modules not implemented)\n";
     // 未知键如实上报（拼写错误不再被静默吞掉）。键名允许非 ASCII，故先冲刷 std::wcout
     // 缓冲再走双路径输出（std::wcout 在默认 C locale 下遇非 ASCII 会进入 failbit 截断后续输出）。
