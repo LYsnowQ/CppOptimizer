@@ -229,6 +229,8 @@ std::string FormatGatesJson(const GatesReport& report) {
     json += report.readOnly ? "true" : "false";
     json += ",\"acknowledged\":";
     json += report.acknowledged ? "true" : "false";
+    json += ",\"isolatedAcknowledged\":";
+    json += report.isolatedAcknowledged ? "true" : "false";
     json += ",\"environment\":{\"factsKnown\":";
     json += report.factsKnown ? "true" : "false";
     json += ",\"osSupported\":";

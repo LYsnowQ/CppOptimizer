@@ -159,6 +159,9 @@ struct GatesReportEntry {
 struct GatesReport {
     bool readOnly = true;
     bool acknowledged = false;
+    // R3 专属的第二条动作确认（隔离环境已由操作者确认）。人读表的 confirm 行与 JSON 必须一致，
+    // 否则脚本消费 JSON 时会看不出 R3 行还缺哪一条确认。
+    bool isolatedAcknowledged = false;
     bool factsKnown = false;
     bool osSupported = false;
     bool onBattery = false;

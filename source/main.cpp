@@ -942,6 +942,7 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     if (jsonOut) {
         optimizer::policy::GatesReport report;
         report.acknowledged = acknowledged;
+        report.isolatedAcknowledged = isolatedAcknowledged;
         report.factsKnown = environment.factsKnown;
         report.osSupported = environment.osSupported;
         report.onBattery = environment.onBattery;

@@ -649,6 +649,7 @@ bool TestFormatGatesJson() {
     using optimizer::policy::GatesReportEntry;
     GatesReport report;
     report.acknowledged = true;
+    report.isolatedAcknowledged = true;
     report.factsKnown = true;
     report.osSupported = true;
     report.auditWritable = true;
@@ -674,6 +675,8 @@ bool TestFormatGatesJson() {
     const bool fields = json.rfind("{\"readOnly\":true", 0) == 0 &&
                         json.find("\"acknowledged\":true") != std::string::npos &&
                         json.find("\"auditWritable\":true") != std::string::npos &&
+                        json.find("\"isolatedAcknowledged\":true") !=
+                            std::string::npos &&
                         json.find("\"name\":\"power.switch_power_scheme\"") !=
                             std::string::npos &&
                         json.find("\"firstBlocking\":\"config\"") !=
@@ -683,7 +686,9 @@ bool TestFormatGatesJson() {
     const std::string emptyJson = FormatGatesJson(GatesReport{});
     const bool emptyOk = emptyJson.find("\"capabilities\":[]") !=
                          std::string::npos &&
-                         emptyJson.find("\"readOnly\":true") != std::string::npos;
+                         emptyJson.find("\"readOnly\":true") != std::string::npos &&
+                         emptyJson.find("\"isolatedAcknowledged\":false") !=
+                             std::string::npos;
     return balanced && noTrailingComma && fields && emptyOk;
 }
 
