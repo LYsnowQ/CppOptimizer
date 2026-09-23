@@ -52,6 +52,13 @@ namespace {
 // 每用户数据目录下的审计文件路径（定义见本文件后部）。
 std::filesystem::path DefaultAuditLogPath() noexcept;
 
+// 动作审计（定义见本文件后部）：供本文件前部的各命令实现调用。
+void AuditAction(const char* operationId, optimizer::audit::RiskLevel risk,
+                 const std::string& target, bool ok,
+                 const std::string& detail);
+void AuditAgentFormAction(optimizer::service::AgentForm form, bool install,
+                          bool ok);
+
 // 作用域错误行（替代宽字符标准错误流）：链式拼接后在临时对象析构时按 stderr 双路径一次性写出。
 // 存在的理由：宽字符标准错误流在默认 C locale 下遇非 ASCII（本地化 Win32 错误消息）会进入 failbit
 // 并丢弃之后的所有输出，造成“错误原因静默丢失”；本类保证消息完整，且重定向 stderr 时仍为 UTF-8 字节。
@@ -1451,6 +1458,8 @@ int RunScheduledTaskCommand(int argc, wchar_t* argv[]) {
                            L"(one-time UAC); the task itself never runs elevated\n";
             return 2;
         }
+        AuditAgentFormAction(optimizer::service::AgentForm::ScheduledTask, true,
+                             true);
         optimizer::common::WriteConsoleLine(
             L"  scheduled: installed (per-user, logon trigger) -> " + command);
         optimizer::common::WriteConsoleLine(
@@ -1466,6 +1475,8 @@ int RunScheduledTaskCommand(int argc, wchar_t* argv[]) {
                         << error.code << L"] " << error.message << L"\n";
             return 2;
         }
+        AuditAgentFormAction(optimizer::service::AgentForm::ScheduledTask, false,
+                             true);
         optimizer::common::WriteConsoleLine(
             L"  scheduled: removed (idempotent)");
         return 0;
@@ -1520,6 +1531,8 @@ int RunStartupCommand(int argc, wchar_t* argv[]) {
                         << error.code << L"] " << error.message << L"\n";
             return 2;
         }
+        AuditAgentFormAction(optimizer::service::AgentForm::StartupTray, true,
+                             true);
         optimizer::common::WriteConsoleLine(
             L"  startup  : installed (per-user) -> " + command);
         optimizer::common::WriteConsoleLine(
@@ -1535,6 +1548,8 @@ int RunStartupCommand(int argc, wchar_t* argv[]) {
                         << error.code << L"] " << error.message << L"\n";
             return 2;
         }
+        AuditAgentFormAction(optimizer::service::AgentForm::StartupTray, false,
+                             true);
         optimizer::common::WriteConsoleLine(L"  startup  : removed (idempotent)");
         return 0;
     }
@@ -1611,9 +1626,14 @@ int RunPowerLockCommand(int argc, wchar_t* argv[]) {
                 << optimizer::power::PowerLockTypeToString(type)
                 << L" failed [" << optimizer::common::ToString(error.domain)
                 << L":" << error.code << L"] " << error.message << L"\n";
+            AuditAction("power.hold", optimizer::audit::RiskLevel::R1,
+                        "power-lock(cli)", false,
+                        "acquire failed: " + error.operation);
             locker.ReleaseAll();
             return 2;
         }
+        AuditAction("power.hold", optimizer::audit::RiskLevel::R1,
+                    "power-lock(cli)", true, "bounded foreground hold (cli)");
         std::wcout << L"  [acquired] "
                    << optimizer::power::PowerLockTypeToString(type) << L"\n";
     }
@@ -1626,6 +1646,8 @@ int RunPowerLockCommand(int argc, wchar_t* argv[]) {
     }
 
     locker.ReleaseAll();
+    AuditAction("power.release", optimizer::audit::RiskLevel::R1,
+                "power-lock(cli)", true, "released on bounded exit (cli)");
     std::wcout << L"  [released] all power requests (sleep/display restored)\n";
     return 0;
 }
@@ -1703,6 +1725,9 @@ int RunPriorityBoostCommand(int argc, wchar_t* argv[]) {
         booster.AcquireBoost("cli-demo", pid, 0, level);
     if (!acquired) {
         const auto& error = acquired.ErrorValue();
+        AuditAction("priority.boost", optimizer::audit::RiskLevel::R1,
+                    "pid " + std::to_string(pid), false,
+                    "acquire failed: " + error.operation);
         ErrorLine{} << L"  acquire failed ["
                    << optimizer::common::ToString(error.domain) << L":"
                    << error.code << L"] " << error.message << L"\n";
@@ -1718,6 +1743,10 @@ int RunPriorityBoostCommand(int argc, wchar_t* argv[]) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    AuditAction("priority.boost", optimizer::audit::RiskLevel::R1,
+                "pid " + std::to_string(pid), true, "bounded lease (cli)");
+    AuditAction("priority.unboost", optimizer::audit::RiskLevel::R1,
+                "pid " + std::to_string(pid), true, "bounded lease exit (cli)");
     booster.ReleaseAll();
     std::wcout
         << L"  [restored] priority (conditional restore; external changes "
@@ -3079,6 +3108,7 @@ int RunServiceInstallCommand(int argc, wchar_t* argv[]) {
         optimizer::common::WriteConsoleLine(err.str());
         return 2;
     }
+    AuditAgentFormAction(optimizer::service::AgentForm::Service, true, true);
     std::wostringstream done;
     done << L"Service installed: " << kServiceName
          << L" (demand start, requires SCM start)";
@@ -3108,6 +3138,7 @@ int RunServiceUninstallCommand() {
         optimizer::common::WriteConsoleLine(err.str());
         return 2;
     }
+    AuditAgentFormAction(optimizer::service::AgentForm::Service, false, true);
     std::wostringstream done;
     done << L"Service uninstalled: " << kServiceName;
     optimizer::common::WriteConsoleLine(done.str());
@@ -3170,24 +3201,20 @@ int RunAgentFormAction(optimizer::service::AgentForm target, bool install) {
 
 // 注册类动作审计：形态安装/卸载必须可审计（危险操作策略的提权分界第 6 条）。
 // 审计不可用时如实提示，但不回滚已完成的系统动作（回滚属用户显式选择）。
-void AuditAgentFormAction(optimizer::service::AgentForm form, bool install) {
+// 危险/注册类动作审计（成功与失败都记录）：operationId 与策略执行器保持一致（power.*/priority.*/
+// agent.form_*），便于按操作聚合；审计不可用时如实提示，但不改变调用方动作的成败语义。
+// 字段一律用 ASCII（operationId/target/detail 均为本仓库内的固定文本或十进制编号）。
+void AuditAction(const char* operationId, optimizer::audit::RiskLevel risk,
+                 const std::string& target, bool ok, const std::string& detail) {
     optimizer::audit::AuditRecord record;
-    record.operationId =
-        std::string(install ? "agent.form_install" : "agent.form_remove");
-    record.risk = optimizer::audit::RiskLevel::R1;
+    record.operationId = operationId;
+    record.risk = risk;
     record.caller = "cli";
-    const std::wstring formName(optimizer::service::AgentFormToString(form));
-    // 形态名是 ASCII 常量：显式逐字符收窄（避免隐式转换告警）；非 ASCII 不应出现，替换为 '?' 后如实保留。
-    std::string narrow;
-    narrow.reserve(formName.size());
-    for (const wchar_t ch : formName) {
-        narrow.push_back(ch >= 0 && ch <= 0x7F ? static_cast<char>(ch) : '?');
-    }
-    record.target = narrow;
-    record.ok = true;
-    record.detail = install ? "install (explicit action)" : "remove (explicit action)";
-    const auto appended = optimizer::audit::AppendAuditLine(
-        DefaultAuditLogPath(), record);
+    record.target = target;
+    record.ok = ok;
+    record.detail = detail;
+    const auto appended =
+        optimizer::audit::AppendAuditLine(DefaultAuditLogPath(), record);
     if (!appended) {
         const auto& error = appended.ErrorValue();
         std::wostringstream line;
@@ -3196,6 +3223,20 @@ void AuditAgentFormAction(optimizer::service::AgentForm form, bool install) {
              << error.code << L"] " << error.message;
         optimizer::common::WriteConsoleLine(line.str());
     }
+}
+
+// 形态安装/卸载的审计（target = 形态名）。
+void AuditAgentFormAction(optimizer::service::AgentForm form, bool install,
+                          bool ok) {
+    const std::wstring formName(optimizer::service::AgentFormToString(form));
+    std::string narrow;
+    narrow.reserve(formName.size());
+    for (const wchar_t ch : formName) {
+        narrow.push_back(ch >= 0 && ch <= 0x7F ? static_cast<char>(ch) : 0x3F);
+    }
+    AuditAction(install ? "agent.form_install" : "agent.form_remove",
+                optimizer::audit::RiskLevel::R1, narrow, ok,
+                install ? "explicit action (install)" : "explicit action (remove)");
 }
 
 int RunAgentFormApply(int argc, wchar_t* argv[]) {
@@ -3279,8 +3320,8 @@ int RunAgentFormApply(int argc, wchar_t* argv[]) {
         return 0;
     }
     for (const auto& action : actions) {
+        // 审计由叶子命令各自写入（--startup/--scheduled-task/--service），此处不重复记录。
         const int result = RunAgentFormAction(action.form, action.install);
-        AuditAgentFormAction(action.form, action.install);
         if (result != 0) {
             ErrorLine{} << L"  apply stopped: "
                         << (action.install ? L"install" : L"remove") << L" "
