@@ -1032,6 +1032,32 @@ bool TestProbeAuditWritable() {
            ok && noRecords && !directory;
 }
 
+bool TestParseJournalLine() {
+    using optimizer::audit::ParseJournalLine;
+    const auto before = ParseJournalLine(
+        "2026-09-23 21:09:23 [journal] before power.hold ok caller=cli target=x "
+        "detail=intent");
+    const auto after = ParseJournalLine(
+        "2026-09-23 21:09:23 [journal] after agent.form_install fail caller=cli "
+        "target=task detail=denied");
+    if (!before || !after) {
+        return false;
+    }
+    const bool fields = before->timestamp == "2026-09-23 21:09:23" &&
+                        before->phase == "before" &&
+                        before->operationId == "power.hold" && before->ok &&
+                        after->phase == "after" &&
+                        after->operationId == "agent.form_install" && !after->ok;
+    // 非日记行 / 缺字段 / 结果非 ok|fail：一律 nullopt。
+    const bool rejects =
+        !ParseJournalLine("2026-09-17 00:33:17 [audit] R1 op ok") &&
+        !ParseJournalLine("") &&
+        !ParseJournalLine("[journal] before op ok") &&
+        !ParseJournalLine(" [journal] before") &&
+        !ParseJournalLine(" [journal] before op maybe");
+    return fields && rejects;
+}
+
 int wmain() {
     int failed = 0;
     const auto run = [&failed](const wchar_t* name, bool (*test)()) {
@@ -1091,6 +1117,7 @@ int wmain() {
     run(L"journal phases and fields", &TestJournalPhasesAndFields);
     run(L"journal failure is honest", &TestJournalFailureIsHonest);
     run(L"probe audit writable", &TestProbeAuditWritable);
+    run(L"parse journal line", &TestParseJournalLine);
     run(L"analyze audit summary lines", &TestAnalyzeAuditSummaryLines);
     run(L"compact audit file noop below threshold",
         &TestCompactAuditFileNoopBelowThreshold);

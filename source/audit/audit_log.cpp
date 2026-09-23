@@ -306,6 +306,37 @@ const char* JournalPhaseToString(JournalPhase phase) noexcept {
     return "unknown";
 }
 
+std::optional<JournalEntry> ParseJournalLine(std::string_view line) noexcept {
+    constexpr std::string_view kMarker = " [journal] ";
+    const auto markerAt = line.find(kMarker);
+    if (markerAt == std::string_view::npos) {
+        return std::nullopt; // 非日记行
+    }
+    JournalEntry entry;
+    entry.timestamp = std::string(line.substr(0, markerAt));
+    const std::string_view fields = line.substr(markerAt + kMarker.size());
+    const auto firstSpace = fields.find(' ');
+    if (firstSpace == std::string_view::npos) {
+        return std::nullopt;
+    }
+    entry.phase = std::string(fields.substr(0, firstSpace));
+    const std::string_view rest = fields.substr(firstSpace + 1);
+    const auto secondSpace = rest.find(' ');
+    if (secondSpace == std::string_view::npos) {
+        return std::nullopt;
+    }
+    entry.operationId = std::string(rest.substr(0, secondSpace));
+    const std::string_view result = rest.substr(secondSpace + 1);
+    if (result.rfind("ok", 0) == 0) {
+        entry.ok = true;
+    } else if (result.rfind("fail", 0) == 0) {
+        entry.ok = false;
+    } else {
+        return std::nullopt; // 结果字段不是 ok/fail
+    }
+    return entry;
+}
+
 common::Result<void> AppendJournalLine(const std::filesystem::path& path,
                                        JournalPhase phase,
                                        std::string_view operationId, bool ok,

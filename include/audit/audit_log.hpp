@@ -226,6 +226,17 @@ enum class JournalPhase {
 
 [[nodiscard]] const char* JournalPhaseToString(JournalPhase phase) noexcept;
 
+// 日记行解析（纯函数）：取出时间戳文本、阶段、operationId 与结果；
+// 非日记行（无 ` [journal] ` 标记）或字段缺失返回 nullopt（不得静默当作可解析）。
+struct JournalEntry {
+    std::string timestamp;
+    std::string phase;       // before / after / state
+    std::string operationId;
+    bool ok = false;
+};
+[[nodiscard]] std::optional<JournalEntry> ParseJournalLine(
+    std::string_view line) noexcept;
+
 [[nodiscard]] common::Result<void> AppendJournalLine(
     const std::filesystem::path& path, JournalPhase phase,
     std::string_view operationId, bool ok, std::string_view target,

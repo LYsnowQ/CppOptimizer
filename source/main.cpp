@@ -59,6 +59,9 @@ std::filesystem::path DefaultAuditLogPath() noexcept;
 // 冷却台账路径（每用户文件；定义见本文件后部）。
 std::filesystem::path DefaultCooldownLedgerPath() noexcept;
 
+// 动作日记路径（每用户文件；定义见本文件后部）。
+std::filesystem::path DefaultJournalPath() noexcept;
+
 // 动作审计（定义见本文件后部）：供本文件前部的各命令实现调用。
 void AuditAction(const char* operationId, optimizer::audit::RiskLevel risk,
                  const std::string& target, bool ok,
@@ -1136,6 +1139,102 @@ int RunAuditCompactCommand(int argc, wchar_t* argv[]) {
              << L" -> " << folded.Value().afterLines << L" line(s); unparsable kept "
              << folded.Value().unparsableKept << L")";
         optimizer::common::WriteConsoleLine(line.str());
+    }
+    return 0;
+}
+
+// --journal [path] [lines]：只读回看**动作日记**（默认每用户 action-journal.log，最近 20 行，上限 200）。
+// 与 --audit-log 同口径：纯数字首参按行数解读；不写、不截断、不删；"尚无记录"与"读取失败"分开报。
+int RunJournalCommand(int argc, wchar_t* argv[]) {
+    constexpr std::size_t kDefaultLines = 20;
+    constexpr std::uint32_t kMaxLines = 200;
+    std::filesystem::path path = DefaultJournalPath();
+    std::size_t maxLines = kDefaultLines;
+    std::uint32_t leadingLines = 0;
+    const bool leadingIsLines =
+        argc >= 3 && ParseUint32(argv[2], leadingLines) && leadingLines >= 1 &&
+        leadingLines <= kMaxLines;
+    if (argc >= 3 && !leadingIsLines) {
+        path = argv[2];
+    }
+    if (leadingIsLines) {
+        maxLines = leadingLines;
+    }
+    if (argc >= 4) {
+        std::uint32_t parsed = 0;
+        if (!ParseUint32(argv[3], parsed) || parsed < 1 || parsed > kMaxLines) {
+            optimizer::common::WriteConsoleLine(
+                L"  --journal <lines> must be 1..200");
+            return 2;
+        }
+        maxLines = parsed;
+    }
+    const auto tail = optimizer::audit::ReadAuditTail(path, maxLines);
+    if (!tail) {
+        const auto& error = tail.ErrorValue();
+        std::wostringstream line;
+        line << L"  journal read failed ["
+             << optimizer::common::ToString(error.domain) << L":"
+             << error.code << L"] " << error.message;
+        optimizer::common::WriteConsoleLine(line.str());
+        return 2;
+    }
+    optimizer::common::WriteConsoleLine(L"Action journal (read-only)");
+    {
+        std::wostringstream line;
+        line << L"  path    : " << path.wstring();
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    {
+        std::wostringstream line;
+        line << L"  records : " << tail.Value().totalLines << L" line(s)";
+        if (tail.Value().totalLines > 0) {
+            line << L", showing last " << tail.Value().lines.size();
+        }
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (tail.Value().totalLines == 0) {
+        optimizer::common::WriteConsoleLine(
+            L"  note    : no journal entries yet (dangerous/registration actions write");
+        optimizer::common::WriteConsoleLine(
+            L"            before/after/state entries when they run)");
+        return 0;
+    }
+    std::size_t before = 0;
+    std::size_t after = 0;
+    std::size_t state = 0;
+    std::size_t unparsable = 0;
+    for (const auto& line : tail.Value().lines) {
+        const auto entry = optimizer::audit::ParseJournalLine(line);
+        if (!entry) {
+            ++unparsable;
+            continue;
+        }
+        if (entry->phase == "before") {
+            ++before;
+        } else if (entry->phase == "after") {
+            ++after;
+        } else if (entry->phase == "state") {
+            ++state;
+        } else {
+            ++unparsable;
+        }
+    }
+    {
+        std::wostringstream line;
+        line << L"  phases  : before " << before << L", after " << after
+             << L", state " << state;
+        if (unparsable > 0) {
+            line << L", unparsable " << unparsable;
+        }
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    optimizer::common::WriteConsoleLine(
+        L"  note    : append-only; local only (never aggregated by --audit-compact)");
+    for (const auto& line : tail.Value().lines) {
+        const auto wide = optimizer::common::Utf8ToWide(line);
+        optimizer::common::WriteConsoleLine(
+            wide ? wide.Value() : L"  <undecodable journal line>");
     }
     return 0;
 }
@@ -4923,6 +5022,8 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --scheduled-task <status|install|remove> [name]  Maintain the\n"
         << L"                             per-user logon-triggered scheduled task (registration needs\n"
         << L"                             admin; the task itself never runs elevated)\n"
+        << L"  CppOptimizer.exe --journal [path] [lines]  Read back the action journal\n"
+        << L"                             (read-only; before/after/state entries; local only)\n"
         << L"  CppOptimizer.exe --audit-log [path] [lines]  Read back the tail of the\n"
         << L"                             persisted audit trail (read-only; default: per-user\n"
         << L"                             audit.log, last 20 lines, max 200)\n"
@@ -5052,6 +5153,10 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--log") {
             return RunLogCommand(argc, argv);
+        }
+        if (argc >= 2 && argc <= 4 &&
+            std::wstring_view(argv[1]) == L"--journal") {
+            return RunJournalCommand(argc, argv);
         }
         if (argc >= 2 && argc <= 4 &&
             std::wstring_view(argv[1]) == L"--audit-log") {
