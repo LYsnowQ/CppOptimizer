@@ -1410,6 +1410,35 @@ bool TestServiceInstallFailuresAreReported() {
 
 // ---------- AGENT-A7：形态互斥与宿主单实例（纯函数 / 进程内锁） ----------
 
+bool TestResolveFormApplyActions() {
+    using optimizer::service::AgentForm;
+    using optimizer::service::ResolveFormApplyActions;
+    // 已收敛：声明形态已安装且无其它形态 -> 无动作（不产生系统变更）。
+    const auto converged = ResolveFormApplyActions(AgentForm::StartupTray, true,
+                                                   false, false);
+    const auto convergedTask =
+        ResolveFormApplyActions(AgentForm::ScheduledTask, false, true, false);
+    // 声明形态未安装 -> 先装；其它形态已注册 -> 再卸（顺序稳定：先装后卸）。
+    const auto installOnly =
+        ResolveFormApplyActions(AgentForm::Service, false, false, false);
+    const auto switchToTask =
+        ResolveFormApplyActions(AgentForm::ScheduledTask, true, false, false);
+    const auto switchAndClean =
+        ResolveFormApplyActions(AgentForm::ScheduledTask, false, false, true);
+    const bool installFirst =
+        !switchToTask.empty() && switchToTask[0].form == AgentForm::ScheduledTask &&
+        switchToTask[0].install && switchToTask.size() == 2 &&
+        switchToTask[1].form == AgentForm::StartupTray && !switchToTask[1].install;
+    const bool installThenRemove =
+        switchAndClean.size() == 2 && switchAndClean[0].install &&
+        switchAndClean[0].form == AgentForm::ScheduledTask &&
+        !switchAndClean[1].install && switchAndClean[1].form == AgentForm::Service;
+    return converged.empty() && convergedTask.empty() &&
+           installOnly.size() == 1 && installOnly[0].install &&
+           installOnly[0].form == AgentForm::Service && installFirst &&
+           installThenRemove;
+}
+
 bool TestConflictingAgentForms() {
     using optimizer::service::AgentForm;
     using optimizer::service::ConflictingAgentForms;
@@ -1458,6 +1487,61 @@ bool TestHostInstanceLockIsExclusive() {
     const bool reacquired = third != nullptr;
     third.reset();
     return exclusive && reacquired;
+}
+
+// ---------- 恢复异常处置（`safe_mode_on_recovery_error` 消费口径：可见但不阻断） ----------
+
+bool TestDecideRecoveryAnomalyAction() {
+    using optimizer::service::DecideRecoveryAnomalyAction;
+    using optimizer::service::RecoveryAnomalyAction;
+    // 无标记 / 已确认：均无待处理异常（与配置无关）。
+    const bool none = DecideRecoveryAnomalyAction(false, false, true) ==
+                          RecoveryAnomalyAction::None &&
+                      DecideRecoveryAnomalyAction(false, false, false) ==
+                          RecoveryAnomalyAction::None &&
+                      DecideRecoveryAnomalyAction(true, true, true) ==
+                          RecoveryAnomalyAction::None &&
+                      DecideRecoveryAnomalyAction(true, true, false) ==
+                          RecoveryAnomalyAction::None;
+    // 标记存在且未确认：默认锁存；配置关闭时**不阻断但仍需上报**（NoteOnly）。
+    const bool latch =
+        DecideRecoveryAnomalyAction(true, false, true) ==
+        RecoveryAnomalyAction::Latch;
+    const bool noteOnly =
+        DecideRecoveryAnomalyAction(true, false, false) ==
+        RecoveryAnomalyAction::NoteOnly;
+    return none && latch && noteOnly;
+}
+
+bool TestRecoveryMarkerRoundTripWithDecision() {
+    // 端到端（文件级）：写标记 -> 未确认 -> 两档决定；确认清除 -> None。
+    using optimizer::service::ClearRecoveryMarker;
+    using optimizer::service::DecideRecoveryAnomalyAction;
+    using optimizer::service::IsRecoveryMarkerSet;
+    using optimizer::service::RecoveryAnomalyAction;
+    using optimizer::service::WriteRecoveryMarker;
+    std::error_code ec;
+    const auto path = std::filesystem::temp_directory_path(ec) /
+                      (std::wstring(L"cpo_recovery_decision_") +
+                       std::to_wstring(::GetCurrentProcessId()) + L".json");
+    if (ec) {
+        return false;
+    }
+    std::filesystem::remove(path, ec);
+    if (!WriteRecoveryMarker(path)) {
+        return false;
+    }
+    const auto set = IsRecoveryMarkerSet(path);
+    const bool unconfirmed =
+        set && set.Value() &&
+        DecideRecoveryAnomalyAction(true, false, true) ==
+            RecoveryAnomalyAction::Latch &&
+        DecideRecoveryAnomalyAction(true, false, false) ==
+            RecoveryAnomalyAction::NoteOnly;
+    const auto cleared = ClearRecoveryMarker(path);
+    const auto afterClear = IsRecoveryMarkerSet(path);
+    std::filesystem::remove(path, ec);
+    return unconfirmed && cleared && afterClear && !afterClear.Value();
 }
 
 int wmain() {
@@ -1534,6 +1618,9 @@ int wmain() {
     run(L"recovery marker absent file not set", &TestRecoveryMarkerAbsentFileNotSet);
     run(L"recovery marker malformed content not set",
         &TestRecoveryMarkerMalformedContentNotSet);
+    run(L"decide recovery anomaly action", &TestDecideRecoveryAnomalyAction);
+    run(L"recovery marker round trip with decision",
+        &TestRecoveryMarkerRoundTripWithDecision);
     run(L"startup install rejects empty path", &TestStartupInstallRejectsEmptyPath);
     run(L"startup install quotes path and reads back",
         &TestStartupInstallQuotesPathAndReadsBack);
@@ -1557,6 +1644,7 @@ int wmain() {
     run(L"agent form round trip and elevation",
         &TestAgentFormRoundTripAndElevation);
     run(L"conflicting agent forms", &TestConflictingAgentForms);
+    run(L"resolve form apply actions", &TestResolveFormApplyActions);
     run(L"host instance lock is exclusive", &TestHostInstanceLockIsExclusive);
     run(L"service install rejects before backend",
         &TestServiceInstallRejectsBeforeBackend);

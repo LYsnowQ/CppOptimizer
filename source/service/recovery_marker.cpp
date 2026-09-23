@@ -86,4 +86,15 @@ common::Result<bool> IsRecoveryMarkerSet(
     return common::Result<bool>::Success(firstLine == kRecoveryMarkerEnvelope);
 }
 
+RecoveryAnomalyAction DecideRecoveryAnomalyAction(bool markerSet,
+                                                  bool confirmRecovery,
+                                                  bool latchEnabled) noexcept {
+    if (!markerSet || confirmRecovery) {
+        return RecoveryAnomalyAction::None; // 无待处理异常（或已被显式确认）
+    }
+    // 配置可关闭“阻断”，但不能关闭“上报”：关闭时返回 NoteOnly，调用方仍需留痕。
+    return latchEnabled ? RecoveryAnomalyAction::Latch
+                        : RecoveryAnomalyAction::NoteOnly;
+}
+
 } // namespace optimizer::service

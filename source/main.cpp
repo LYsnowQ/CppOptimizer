@@ -336,7 +336,6 @@ int RunConfigCommand(std::wstring_view path) {
     // 如实区分“已解析”与“已生效”：以下字段尚无消费者（能力待落地或模块未实施），
     // 回显它们不代表行为已生效（与日志/审计同口径：不伪装成功）。
     std::wcout << L"  pending    : parsed but not effective yet:\n"
-                  L"               [application].safe_mode_on_recovery_error\n"
                   L"               [memory].max_clean_level\n"
                   L"               [gpu_heartbeat]/[scheduler]/[disk_cache] (modules not implemented)\n";
     // 未知键如实上报（拼写错误不再被静默吞掉）。键名允许非 ASCII，故先冲刷 std::wcout
@@ -2099,7 +2098,8 @@ struct ServiceHostDemoState {
     // SVC-004：每用户默认配置无效（启动自动消费时解析失败）-> Safe Mode「配置无效」离散触发。
     bool ipcConfigAnomaly = false;                // 默认配置无效（已触发锁存）
     // IPC-018：上次异常退出且恢复未确认（recovery-state.json）——启动发现标记即锁存 Safe Mode。
-    bool ipcRecoveryUnconfirmed = false;          // 上次会话未正常结束且未确认
+    bool ipcRecoveryUnconfirmed = false;          // 上次会话未正常结束且未确认（已锁存）
+    bool ipcRecoveryNotedOnly = false;            // 同上，但配置关闭了阻断（可见不阻断，未锁存）
     std::size_t ipcAnomalyEntries = 0;            // 窗口内离散异常触发次数（汇总）
     // SVC-006/007：宿主在场台账（Agent user_idle 汇总；仅展示/记录，不参与 Safe Mode 触发判定）。
     std::optional<optimizer::service::HostPresenceTracker> ipcPresence;
@@ -2711,7 +2711,15 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
             }
             return false; // 读取 IO 失败按未设置（目录异常不阻断启动，见模块注释）
         }();
-        if (markerSet && !confirmRecovery) {
+        // 消费 `[application].safe_mode_on_recovery_error`（口径：可见但不阻断）：
+        // true（默认）= 锁存 Safe Mode；false = 不暂停受理，但**照常上报**异常退出事实。
+        const bool recoveryLatchEnabled =
+            !consoleConfigSnapshot ||
+            consoleConfigSnapshot->application.safeModeOnRecoveryError;
+        const auto recoveryAction =
+            optimizer::service::DecideRecoveryAnomalyAction(
+                markerSet, confirmRecovery, recoveryLatchEnabled);
+        if (recoveryAction == optimizer::service::RecoveryAnomalyAction::Latch) {
             state.ipcRecoveryUnconfirmed = true;
             state.ipcSafeMode->OnAnomalyDetected();
             ++state.ipcAnomalyEntries;
@@ -2719,6 +2727,14 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                 optimizer::logger::LogLevel::Info, L"service",
                 L"ipc  : Safe Mode entered - 上次异常退出且恢复未确认"
                 L"（pass --confirm-recovery to acknowledge）");
+        } else if (recoveryAction ==
+                   optimizer::service::RecoveryAnomalyAction::NoteOnly) {
+            // 不阻断，但不得静默：如实上报“上次异常退出”且说明本次被配置放行。
+            state.ipcRecoveryNotedOnly = true;
+            state.logger.Write(
+                optimizer::logger::LogLevel::Info, L"service",
+                L"ipc  : last run exited abnormally (unconfirmed) - not blocked by "
+                L"[application].safe_mode_on_recovery_error = false");
         }
         (void)optimizer::service::WriteRecoveryMarker(recoveryMarkerPath);
     }
@@ -2848,6 +2864,11 @@ int RunServiceConsoleCommand(int argc, wchar_t* argv[]) {
                     L"  recovery : last run exited abnormally (unconfirmed) -> "
                     L"Safe Mode (intake paused); pass --confirm-recovery to "
                     L"acknowledge");
+            } else if (state.ipcRecoveryNotedOnly) {
+                optimizer::common::WriteConsoleLine(
+                    L"  recovery : last run exited abnormally (unconfirmed) -> not "
+                    L"blocked (safe_mode_on_recovery_error = false; the fact is still "
+                    L"logged)");
             } else if (confirmRecovery) {
                 optimizer::common::WriteConsoleLine(
                     L"  recovery : acknowledged (marker cleared)");
@@ -3132,7 +3153,147 @@ int RunServiceStatusCommand() {
     return 0;
 }
 
-// 以合成参数调用既有命令实现：复用其权限校验/幂等/输出语义，不重复实现。
+// 形态动作执行器：启动项/计划任务复用既有命令实现，服务用其专用命令。
+int RunAgentFormAction(optimizer::service::AgentForm target, bool install) {
+    if (target == optimizer::service::AgentForm::Service) {
+        return install ? RunServiceInstallCommand(1, nullptr)
+                       : RunServiceUninstallCommand();
+    }
+    std::wstring verb(install ? L"install" : L"remove");
+    wchar_t* argv[4] = {const_cast<wchar_t*>(L"CppOptimizer.exe"),
+                        const_cast<wchar_t*>(L"--agent-form"), verb.data(),
+                        nullptr};
+    return (target == optimizer::service::AgentForm::StartupTray
+                ? &RunStartupCommand
+                : &RunScheduledTaskCommand)(3, argv);
+}
+
+// 注册类动作审计：形态安装/卸载必须可审计（危险操作策略的提权分界第 6 条）。
+// 审计不可用时如实提示，但不回滚已完成的系统动作（回滚属用户显式选择）。
+void AuditAgentFormAction(optimizer::service::AgentForm form, bool install) {
+    optimizer::audit::AuditRecord record;
+    record.operationId =
+        std::string(install ? "agent.form_install" : "agent.form_remove");
+    record.risk = optimizer::audit::RiskLevel::R1;
+    record.caller = "cli";
+    const std::wstring formName(optimizer::service::AgentFormToString(form));
+    // 形态名是 ASCII 常量：显式逐字符收窄（避免隐式转换告警）；非 ASCII 不应出现，替换为 '?' 后如实保留。
+    std::string narrow;
+    narrow.reserve(formName.size());
+    for (const wchar_t ch : formName) {
+        narrow.push_back(ch >= 0 && ch <= 0x7F ? static_cast<char>(ch) : '?');
+    }
+    record.target = narrow;
+    record.ok = true;
+    record.detail = install ? "install (explicit action)" : "remove (explicit action)";
+    const auto appended = optimizer::audit::AppendAuditLine(
+        DefaultAuditLogPath(), record);
+    if (!appended) {
+        const auto& error = appended.ErrorValue();
+        std::wostringstream line;
+        line << L"  audit    : action not recorded ["
+             << optimizer::common::ToString(error.domain) << L":"
+             << error.code << L"] " << error.message;
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+}
+
+int RunAgentFormApply(int argc, wchar_t* argv[]) {
+    // --agent-form apply [config.toml] [--dry-run]：**声明式收敛**（半自动）。
+    // 读声明形态 -> 与实态比较 -> 若需变更则执行（先装声明形态、再卸其它形态）。
+    // 注册仍属**显式动作**（本命令就是那次动作），仍受提权与回滚约束；不在启动路径自动执行。
+    std::optional<std::filesystem::path> configPath;
+    bool dryRun = false;
+    for (int i = 3; i < argc; ++i) {
+        const std::wstring_view arg(argv[i]);
+        if (arg == L"--dry-run") {
+            dryRun = true;
+        } else if (configPath.has_value()) {
+            ErrorLine{} << L"  unknown --agent-form apply option: " << arg << L"\n";
+            return 2;
+        } else {
+            configPath = std::filesystem::path(argv[i]);
+        }
+    }
+    std::string declared = "startup_tray";
+    if (configPath.has_value()) {
+        const auto loaded = optimizer::config::LoadConfig(configPath->wstring());
+        if (!loaded) {
+            const auto& error = loaded.ErrorValue();
+            ErrorLine{} << L"  config load failed ["
+                        << optimizer::common::ToString(error.domain) << L":"
+                        << error.code << L"] " << error.message << L"\n";
+            return 2;
+        }
+        declared = loaded.Value().agent.form;
+    }
+    const auto declaredForm = optimizer::service::ParseAgentForm(
+        std::wstring(declared.begin(), declared.end()));
+    if (!declaredForm) {
+        ErrorLine{} << L"  config declares an unsupported form\n";
+        return 2;
+    }
+    bool startupInstalled = false;
+    bool taskInstalled = false;
+    bool serviceInstalled = false;
+    if (const auto queried = optimizer::service::QueryStartupEntry(); queried) {
+        startupInstalled = !queried.Value().empty();
+    }
+    if (const auto queried = optimizer::service::QueryScheduledTask(
+            optimizer::service::kScheduledTaskName);
+        queried) {
+        taskInstalled = queried.Value().installed;
+    }
+    if (const auto queried = optimizer::service::QueryService(kServiceName);
+        queried) {
+        serviceInstalled = queried.Value().installed;
+    }
+    const auto actions = optimizer::service::ResolveFormApplyActions(
+        *declaredForm, startupInstalled, taskInstalled, serviceInstalled);
+    {
+        std::wostringstream line;
+        line << L"  declared : " << optimizer::service::AgentFormToString(*declaredForm)
+             << L" (from "
+             << (configPath.has_value() ? configPath->wstring()
+                                        : std::wstring(L"built-in default"))
+             << L")";
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (actions.empty()) {
+        optimizer::common::WriteConsoleLine(
+            L"  result   : already converged (nothing to do)");
+        return 0;
+    }
+    for (const auto& action : actions) {
+        std::wostringstream line;
+        line << (action.install ? L"  install  : " : L"  remove   : ")
+             << optimizer::service::AgentFormToString(action.form);
+        if (dryRun) {
+            line << L" (dry-run: not executed)";
+        }
+        optimizer::common::WriteConsoleLine(line.str());
+    }
+    if (dryRun) {
+        optimizer::common::WriteConsoleLine(
+            L"  note     : dry-run only; no system change was made");
+        return 0;
+    }
+    for (const auto& action : actions) {
+        const int result = RunAgentFormAction(action.form, action.install);
+        AuditAgentFormAction(action.form, action.install);
+        if (result != 0) {
+            ErrorLine{} << L"  apply stopped: "
+                        << (action.install ? L"install" : L"remove") << L" "
+                        << optimizer::service::AgentFormToString(action.form)
+                        << L" failed (already-applied actions are kept; rerun after\n"
+                           L"             fixing the cause, or revert with --agent-form remove)\n";
+            return result;
+        }
+    }
+    optimizer::common::WriteConsoleLine(L"  result   : converged");
+    return 0;
+}
+
 int InvokeFormAction(int (*command)(int, wchar_t**), const wchar_t* action) {
     std::wstring verb(action);
     wchar_t* argv[4] = {const_cast<wchar_t*>(L"CppOptimizer.exe"),
@@ -3155,6 +3316,9 @@ int RunAgentFormCommand(int argc, wchar_t* argv[]) {
         return 2;
     }
     const std::wstring_view action(argv[2]);
+    if (action == L"apply") {
+        return RunAgentFormApply(argc, argv);
+    }
     bool startupInstalled = false;
     bool taskInstalled = false;
     bool serviceInstalled = false;
@@ -4230,10 +4394,10 @@ void PrintUsage() {
         << L"                             (GetForegroundWindow/GetWindowThreadProcessId) on\n"
         << L"                             active/idle samples only\n"
 
-        << L"  CppOptimizer.exe --agent-form <status|install|remove> [form] [config.toml] [--replace]\n"
-        << L"                             Report or apply one agent form (startup_tray|task|service);\n"
-        << L"                             only one form may be active (--replace switches); a declared\n"
-        << L"                             form never installs itself; task/service registration needs admin\n"
+        << L"  CppOptimizer.exe --agent-form <status|install|remove|apply> [form] [config] [--replace|--dry-run]\n"
+        << L"                             Report, apply one form, or converge to the declared form\n"
+        << L"                             (startup_tray|task|service); only one form may be active;\n"
+        << L"                             a declared form never installs itself; registration needs admin\n"
         << L"  CppOptimizer.exe --service status  Report the SCM service install state (read-only)\n"
         << L"  CppOptimizer.exe --startup <status|install|remove>  Per-user startup entry\n"
         << L"                             (HKCU Run; R1, reversible, standard user;\n"

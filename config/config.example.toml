@@ -2,7 +2,8 @@ version = "1.0.0"          # 三段数字；可带预发布标识（如 "1.2.0-b
 
 [application]
 mode = "observe"              # observe / balanced / experimental
-safe_mode_on_recovery_error = true
+safe_mode_on_recovery_error = true   # 上次异常退出且未确认时是否暂停 Agent 受理；
+                                      # false = 不阻断，但该事实仍会写入日志/横幅/审计（可见性不可关闭）
 
 [logging]
 level = "info"

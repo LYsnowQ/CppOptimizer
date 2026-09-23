@@ -81,4 +81,24 @@ std::vector<AgentForm> ConflictingAgentForms(AgentForm target,
     return conflicts;
 }
 
+std::vector<AgentFormAction> ResolveFormApplyActions(
+    AgentForm declared, bool startupInstalled, bool taskInstalled,
+    bool serviceInstalled) {
+    std::vector<AgentFormAction> actions;
+    const bool declaredInstalled =
+        declared == AgentForm::StartupTray
+            ? startupInstalled
+            : (declared == AgentForm::ScheduledTask ? taskInstalled
+                                                    : serviceInstalled);
+    if (!declaredInstalled) {
+        actions.push_back(AgentFormAction{declared, true}); // 先装声明形态
+    }
+    for (const auto other : ConflictingAgentForms(declared, startupInstalled,
+                                                  taskInstalled,
+                                                  serviceInstalled)) {
+        actions.push_back(AgentFormAction{other, false}); // 再卸其它形态
+    }
+    return actions;
+}
+
 } // namespace optimizer::service

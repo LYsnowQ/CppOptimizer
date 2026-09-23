@@ -38,4 +38,19 @@ inline constexpr std::string_view kRecoveryMarkerEnvelope =
 [[nodiscard]] common::Result<bool> IsRecoveryMarkerSet(
     const std::filesystem::path& path) noexcept;
 
+// 恢复异常处置（纯函数，配置字段 `[application].safe_mode_on_recovery_error` 的消费口径）：
+// - `markerSet == false` 或 `confirmRecovery == true` -> `None`（无异常待处理）；
+// - 否则：`latchEnabled == true` -> `Latch`（进入 Safe Mode，现状行为）；
+//         `latchEnabled == false` -> `NoteOnly`（**不阻断，但仍上报**）。
+// `NoteOnly` 的语义是“可见但不阻断”：不暂停 Agent 受理，但调用方必须照常写日志/横幅/审计，
+// 不能静默丢弃“上次异常退出”这一事实。
+enum class RecoveryAnomalyAction {
+    None,
+    Latch,
+    NoteOnly,
+};
+
+[[nodiscard]] RecoveryAnomalyAction DecideRecoveryAnomalyAction(
+    bool markerSet, bool confirmRecovery, bool latchEnabled) noexcept;
+
 } // namespace optimizer::service

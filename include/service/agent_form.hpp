@@ -42,4 +42,17 @@ enum class AgentForm {
                                                            bool taskInstalled,
                                                            bool serviceInstalled);
 
+// 声明式收敛的动作项：`install == true` 表示安装，`false` 表示卸载。
+struct AgentFormAction {
+    AgentForm form = AgentForm::StartupTray;
+    bool install = true;
+};
+
+// 声明式收敛（半自动 `--agent-form apply`）：把实态收敛到 `declared`。
+// 顺序保证“不会出现一个形态都没有”的窗口：**先安装声明形态（若未安装），再卸载其它已注册形态**。
+// 已收敛时返回空列表（调用方据此报告“already converged”，不产生任何系统变更）。
+[[nodiscard]] std::vector<AgentFormAction> ResolveFormApplyActions(
+    AgentForm declared, bool startupInstalled, bool taskInstalled,
+    bool serviceInstalled);
+
 } // namespace optimizer::service
