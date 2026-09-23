@@ -12,7 +12,7 @@ public:
         (void)kind;
         return common::Result<void>::Failure(common::Error::Unsupported(
             "CleanBackend::Execute",
-            L"内存清理未实现：真实系统调用需先满足六道门禁并在隔离环境验证"));
+            L"保守后端不执行任何系统调用（真实清理请走门禁允许的专用后端）"));
     }
 };
 

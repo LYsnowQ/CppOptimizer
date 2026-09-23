@@ -40,8 +40,8 @@ private:
 
 } // namespace
 
-// Win32 后端：实现 StartupEntryBackend。当前阶段**委托给上面的自由函数**（避免重复实现），
-// 后续切片再把注册表读写下沉到本类、由自由函数反向委托（分两步迁移，每步均可编译）。
+// Win32 后端：注册表读写实现在本类内（句柄/错误域/资源释放就近处理）；
+// 自由函数层只做“校验 + 委托后端”的编排，便于测试注入替换。
 class Win32StartupEntryBackend final : public StartupEntryBackend {
 public:
     [[nodiscard]] optimizer::common::Result<std::wstring> Read() override {

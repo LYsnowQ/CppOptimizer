@@ -136,7 +136,7 @@ bool TestQueryMemoryStatusReturnsValidSnapshot() {
 
 } // namespace
 
-// ---------- 内存清理计划（本切片：只计划，不执行） ----------
+// ---------- 内存清理计划（纯函数：只产出计划，不执行） ----------
 
 bool TestPlanMemoryCleanNoneLevel() {
     using optimizer::config::CleanLevel;

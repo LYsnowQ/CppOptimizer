@@ -7,7 +7,8 @@
 
 namespace optimizer::memory {
 
-// 内存清理的“步骤”种类（本切片只有计划，不执行）。
+// 内存清理的“步骤”种类。计划与编排在本模块；**真实后端**见 `working_set`（工作集修剪，
+// 仅本进程）与各占位后端（其余步骤返回 Unsupported）。
 enum class CleanKind {
     WorkingSetTrim,      // 工作集修剪（轻量、局部可逆）
     StandbyListPurge,    // Standby/Modified List 清理（R2/R3：全局影响，需隔离环境验证）
@@ -42,8 +43,9 @@ struct MemoryCleanPlan {
     optimizer::config::CleanLevel requested,
     optimizer::config::CleanLevel configuredMax, bool gatesAllowed) noexcept;
 
-// 清理后端（可注入）：本切片只提供 **拒绝执行** 的真实后端与供测试使用的 fake；
-// 真实系统调用（工作集修剪 / Standby 清理）属后续切片，且必须先满足门禁与隔离环境要求。
+// 清理后端（可注入）：真实实现见 `working_set`（工作集修剪，仅本进程）；
+// 本文件另提供**保守后端**（拒绝执行）与供测试使用的 fake。
+// 任何真实系统调用都必须先满足六道门禁（R3 步骤另需隔离环境确认与后端实现）。
 class CleanBackend {
 public:
     virtual ~CleanBackend() = default;
@@ -51,7 +53,7 @@ public:
     [[nodiscard]] virtual common::Result<void> Execute(CleanKind kind) = 0;
 };
 
-// 真实后端占位：**永远如实拒绝**（未实现真正的系统调用；不伪装成功）。
+// 保守后端：**永远如实拒绝**（不执行任何系统调用，也不伪装成功）。
 [[nodiscard]] CleanBackend& RefusingCleanBackend() noexcept;
 
 // 执行报告：只有在“确实尝试过至少一步”时才会返回（参 ExecuteMemoryCleanPlan 契约）。

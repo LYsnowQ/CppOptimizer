@@ -248,8 +248,8 @@ struct JournalEntry {
 [[nodiscard]] common::Result<void> ProbeAuditWritable(
     const std::filesystem::path& path) noexcept;
 
-// 有界审计日志（AUD-001）：进程内顺序保存最近 capacity 条受审计动作记录，供窗口汇总/诊断与
-// 后续“审计不可用”Safe Mode 触发源使用（真实持久化/服务形态属后续切片）。
+// 有界审计日志（AUD-001）：进程内顺序保存最近 capacity 条受审计动作记录，供窗口汇总/诊断使用；
+// `Options::filePath` 非空时**同时持久化**到该文件（先落盘后入内存）。
 // 线程安全（内部互斥）。Append 在 enabled=false 时返回 Failure（审计不可用语义，不伪装成功）。
 class AuditLog {
 public:

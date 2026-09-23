@@ -44,9 +44,9 @@ struct LayerConfig {
 struct PowerConfig {
     bool executionRequired = true;
     bool displayRequired = false;
-    // switchPowerScheme 已解析未消费：R2 危险开关，全局电源计划切换待独立能力
-    // （PowerSchemeController）实现后消费
-    bool switchPowerScheme = false; // R2：默认关闭
+    // R2：默认关闭。显式开启后才允许切换全局电源计划（另需 experimental + emergency 的
+    // 模式/层叠加，以及编译期开关与其余门禁）
+    bool switchPowerScheme = false;
 };
 
 // [priority] 节。maxLevel 上限无 realtime。
@@ -133,11 +133,12 @@ struct LoggingConfig {
 // [memory] 节。危险开关默认 false，配置不得自动打开 R2/R3 能力。
 struct MemoryConfig {
     bool queryEnabled = true;
-    // scheduledCleanEnabled 已解析未消费：R2 危险开关，MemoryTuner 清理能力
-    // （Experimental）门禁就绪后消费
-    bool scheduledCleanEnabled = false; // R2：默认关闭
-    // allowNativeWrite 已解析未消费：R3 预留，Native 写能力经安全评审后消费
-    bool allowNativeWrite = false;      // R3：默认关闭
+    // R2：默认关闭。清理能力总开关；与 maxCleanLevel、allowNativeWrite 及模式/层叠加
+    // **共同**构成各清理步骤的配置门（任一未开启即拒绝执行并点名缺失项）
+    bool scheduledCleanEnabled = false;
+    // R3：默认关闭。Standby 列表清理与系统文件缓存修剪的配置门合取项；
+    // 这两个步骤的 Native 调用本体尚未实现，当前只会被门禁与就绪预检拒绝
+    bool allowNativeWrite = false;
     CleanLevel maxCleanLevel = CleanLevel::Light;
 };
 

@@ -4871,7 +4871,7 @@ int RunAgentFormCommand(int argc, wchar_t* argv[]) {
     // --agent-form <status|install|remove> [startup_tray|task|service]：常驻形态入口。
     // 语义：
     // - **默认形态不可更改**：唯一默认是 startup_tray；本命令的 install/remove 只是“本次动作”，
-    //   不写配置（配置 [agent].form 取值开放属后续切片）；
+    //   不写配置（配置的 [agent].form 只表达声明意图，不触发注册）；
     // - 三个形态各自保持原有权限语义：startup_tray 标准用户即可；task 注册需管理员
     //   （任务本身不提权）；service 安装需管理员；
     // - status 只读汇总：逐个形态查询，单个形态查询失败只影响它自己的行（如实标注）；
@@ -5594,7 +5594,7 @@ int RunIpcServerCommand(int argc, wchar_t* argv[]) {
                 << L"  --ipc-token must be 1..64 ASCII letters/digits/_/-\n";
             return 2;
         }
-        sessionOptions.expectedToken = token; // 明文仅限 demo；真实供给属后续切片
+        sessionOptions.expectedToken = token; // 明文仅限 demo；真实供给走 ipc_credentials
     }
     // IPC-007 真实供给：--ipc-token-file 优先（私有 ACL 存储），替代/覆盖内联明文。
     if (auto tokenFile = FindIpcTokenFile(argc, argv, 4)) {
