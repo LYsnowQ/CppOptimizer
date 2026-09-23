@@ -479,10 +479,15 @@ int RunMemoryCleanCommand(int argc, wchar_t* argv[]) {
 int RunGatesCommand(int argc, wchar_t* argv[]) {
     std::optional<optimizer::config::ConfigSnapshot> snapshot;
     bool acknowledged = false;
+    bool jsonOut = false; // --json：机器可读输出（只读）
     for (int i = 2; i < argc; ++i) {
         const std::wstring_view arg(argv[i]);
         if (arg == L"--acknowledge-system-wide-side-effects") {
             acknowledged = true;
+            continue;
+        }
+        if (arg == L"--json") {
+            jsonOut = true;
             continue;
         }
         if (arg == L"--force") {
@@ -507,10 +512,6 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
             snapshot = loaded.Value();
         }
     }
-    optimizer::common::WriteConsoleLine(
-        L"Safety gates (read-only; no action is performed)");
-    optimizer::common::WriteConsoleLine(
-        L"  capability                   compile config cmdline perm_env audit cooldown  verdict");
     // 每个能力：只填**已知**的门；未实现的门一律显示 n/a 并计入裁决（不得假装已通过）。
     struct Capability {
         const wchar_t* name;
@@ -528,6 +529,12 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
     const auto cooldownLedger =
         optimizer::policy::ReadCooldownLedger(DefaultCooldownLedgerPath());
     const auto nowUnix = static_cast<std::int64_t>(std::time(nullptr));
+    const bool cooldownGateOpen =
+        cooldownLedger &&
+        optimizer::policy::EvaluateCooldownGate(
+            cooldownLedger.Value(), "memory.clean", nowUnix,
+            std::chrono::duration_cast<std::chrono::seconds>(
+                optimizer::policy::kDefaultCooldown));
     const Capability capabilities[] = {
         {L"power.switch_power_scheme",
          hasConfig && snapshot->power.switchPowerScheme},
@@ -538,6 +545,47 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
          hasConfig &&
              snapshot->memory.maxCleanLevel != optimizer::config::CleanLevel::None},
     };
+    // --json：机器可读输出（只读）。放在事实采集之后、人读表头之前，避免先输出横幅污染 JSON。
+    if (jsonOut) {
+        optimizer::policy::GatesReport report;
+        report.acknowledged = acknowledged;
+        report.factsKnown = environment.factsKnown;
+        report.osSupported = environment.osSupported;
+        report.onBattery = environment.onBattery;
+        report.remoteSession = environment.remoteSession;
+        report.sessionLocked = environment.sessionLocked;
+        report.auditWritable = auditGateOpen;
+        for (const auto& capability : capabilities) {
+            optimizer::policy::GateInputs inputs;
+            inputs.compileTime = compiledIn;
+            inputs.config = capability.configured;
+            inputs.commandLine = acknowledged;
+            inputs.permissionAndEnvironment = environmentGateOpen;
+            inputs.audit = auditGateOpen;
+            inputs.cooldown = cooldownGateOpen;
+            const auto evaluation = optimizer::policy::EvaluateGates(inputs);
+            optimizer::policy::GatesReportEntry entry;
+            std::string name;
+            for (const wchar_t ch : std::wstring(capability.name)) {
+                name.push_back(ch >= 0 && ch <= 0x7F ? static_cast<char>(ch)
+                                                    : 0x3F);
+            }
+            entry.name = name;
+            entry.allowed = evaluation.allowed;
+            if (evaluation.firstBlocking.has_value()) {
+                entry.firstBlocking =
+                    optimizer::policy::GateIdToString(*evaluation.firstBlocking);
+            }
+            report.capabilities.push_back(std::move(entry));
+        }
+        const std::string json = optimizer::policy::FormatGatesJson(report);
+        optimizer::common::WriteConsoleLine(std::wstring(json.begin(), json.end()));
+        return 0;
+    }
+    optimizer::common::WriteConsoleLine(
+        L"Safety gates (read-only; no action is performed)");
+    optimizer::common::WriteConsoleLine(
+        L"  capability                   compile config cmdline perm_env audit cooldown  verdict");
     for (const auto& capability : capabilities) {
         optimizer::policy::GateInputs inputs;
         inputs.compileTime = compiledIn;     // 编译期开关（默认关）
@@ -545,12 +593,7 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
         inputs.commandLine = acknowledged;   // 动作特定确认（命令行显式动作）
         inputs.permissionAndEnvironment = environmentGateOpen; // 真实只读探测（电池/远程/锁屏…）
         inputs.audit = auditGateOpen;                        // 真实可写探测（只打开不写入）
-        inputs.cooldown =
-            cooldownLedger &&
-            optimizer::policy::EvaluateCooldownGate(
-                cooldownLedger.Value(), "memory.clean", nowUnix,
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    optimizer::policy::kDefaultCooldown));                             // 未实现冷却门
+        inputs.cooldown = cooldownGateOpen;                             // 未实现冷却门
         const auto evaluation = optimizer::policy::EvaluateGates(inputs);
         std::wostringstream line;
         line << L"  " << capability.name;
