@@ -33,8 +33,15 @@ std::string FormatGuid(const GUID& guid) {
 }
 
 // 归一化文本 -> GUID（要求已是 8-4-4-4-12 形式）。
+// 注意：CLSIDFromString 只接受**带大括号**的字符串（或 "CLSID\\..." 形式）；
+// 本项目的归一化口径是“去大括号”，所以这里必须把大括号补回去，否则恒失败。
+// （2026-10-22 隔离环境实测发现：缺大括号时 S1 真实切换总报“GUID 形式非法”。）
 bool ParseGuid(std::string_view text, GUID& out) noexcept {
-    std::wstring wide(text.begin(), text.end());
+    std::wstring wide;
+    wide.reserve(text.size() + 2);
+    wide.push_back(L'{');
+    wide.append(text.begin(), text.end());
+    wide.push_back(L'}');
     return ::CLSIDFromString(wide.c_str(), &out) == S_OK;
 }
 
