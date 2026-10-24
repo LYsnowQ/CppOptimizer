@@ -1123,6 +1123,10 @@ int RunGatesCommand(int argc, wchar_t* argv[]) {
              snapshot->memory.maxCleanLevel != optimizer::config::CleanLevel::None,
          optimizer::policy::MemoryCleanCompiledIn(),
          optimizer::policy::kMemoryCleanCapabilityId, false},
+        // R1：调度优先级提升。config 门 = [scheduler].enabled（默认 false）。
+        {L"scheduler.tuner", r1Overlay && snapshot->scheduler.enabled,
+         optimizer::policy::SchedulerTunerCompiledIn(),
+         optimizer::policy::kSchedulerTunerCapabilityId, false},
     };
     // --json：机器可读输出（只读）。放在事实采集之后、人读表头之前，避免先输出横幅污染 JSON。
     if (jsonOut) {
@@ -1792,12 +1796,15 @@ int RunSchedulerCommand(int argc, wchar_t* argv[]) {
     }
     bool execute = false;
     bool acknowledged = false;
+    std::optional<std::filesystem::path> configPath;
     for (int i = 3; i < argc; ++i) {
         const std::wstring_view arg = argv[i];
         if (arg == L"--execute") {
             execute = true;
         } else if (arg == L"--acknowledge-system-wide-side-effects") {
             acknowledged = true;
+        } else if (arg.size() > 5 && arg.substr(arg.size() - 5) == L".toml") {
+            configPath = std::filesystem::path(arg); // [scheduler].enabled 的来源
         } else {
             std::wcerr << L"  unknown --scheduler option: " << arg << L"\n";
             return 40;
@@ -1822,14 +1829,38 @@ int RunSchedulerCommand(int argc, wchar_t* argv[]) {
     if (!execute) {
         return 0;
     }
-#if !defined(OPTIMIZER_ENABLE_SCHEDULER_TUNER)
-    std::wcerr << L"  --scheduler --execute refused [capability: scheduler.tuner] "
-                  L"(not compiled; build with OPTIMIZER_ENABLE_SCHEDULER_TUNER=ON)\n";
-    return 2;
-#else
-    if (!acknowledged) {
-        std::wcerr << L"  --scheduler --execute refused (missing "
-                      L"--acknowledge-system-wide-side-effects)\n";
+    bool configAllows = false;
+    if (configPath.has_value()) {
+        const auto loaded = optimizer::config::LoadConfig(configPath->wstring());
+        if (!loaded) {
+            ErrorLine{} << L"  config load failed [" << loaded.ErrorValue().operation.c_str() << L"]";
+            return 41;
+        }
+        configAllows = loaded.Value().scheduler.enabled;
+    }
+    const bool auditWritable =
+        static_cast<bool>(optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath()));
+    const auto ledger = optimizer::policy::ReadCooldownLedger(DefaultCooldownLedgerPath());
+    const bool cooldownClear =
+        ledger && optimizer::policy::EvaluateCooldownGate(
+                      ledger.Value(), optimizer::policy::kSchedulerTunerCapabilityId,
+                      static_cast<std::int64_t>(std::time(nullptr)),
+                      optimizer::policy::kDefaultCooldown);
+    optimizer::policy::GateInputs gates;
+    gates.compileTime = optimizer::policy::SchedulerTunerCompiledIn();
+    gates.config = configAllows;
+    gates.commandLine = acknowledged;
+    gates.permissionAndEnvironment = true;
+    gates.audit = auditWritable;
+    gates.cooldown = cooldownClear;
+    const auto evaluation = optimizer::policy::EvaluateGates(gates);
+    if (!evaluation.allowed) {
+        std::string gate = "unknown";
+        if (evaluation.firstBlocking.has_value()) {
+            gate = optimizer::policy::GateIdToString(*evaluation.firstBlocking);
+        }
+        std::wcerr << L"  --scheduler --execute refused [capability: scheduler.tuner, first blocked gate: "
+                   << std::wstring(gate.begin(), gate.end()) << L"] (no system call was made)\n";
         return 2;
     }
     const int target = THREAD_PRIORITY_ABOVE_NORMAL;
@@ -1838,8 +1869,6 @@ int RunSchedulerCommand(int argc, wchar_t* argv[]) {
         ErrorLine{} << L"  scheduler boost failed [" << report.ErrorValue().operation.c_str() << L"]";
         return 41;
     }
-    const std::string record =
-        optimizer::scheduler::FormatAdjustmentRecord(pid, report.Value().adjusted);
     std::wcout << L"  adjusted : " << report.Value().adjusted.size()
                << L" skipped: " << report.Value().skipped << L"\n";
     JournalAction("scheduler.boost_priority", std::to_string(pid), true,
@@ -1847,13 +1876,15 @@ int RunSchedulerCommand(int argc, wchar_t* argv[]) {
                   "raise below-AboveNormal threads to AboveNormal");
     AuditAction("scheduler.boost_priority", optimizer::audit::RiskLevel::R1,
                 std::to_string(pid), true,
-                "adjusted " + std::to_string(report.Value().adjusted.size()) +
-                    " thread(s)",
+                "adjusted " + std::to_string(report.Value().adjusted.size()) + " thread(s)",
                 "target=" + std::to_string(target));
-    (void)record;
-    return 0;
-#endif
-}
+    const auto recorded = optimizer::policy::RecordCooldownRun(
+        DefaultCooldownLedgerPath(), optimizer::policy::kSchedulerTunerCapabilityId,
+        static_cast<std::int64_t>(std::time(nullptr)));
+    if (!recorded) {
+        std::wcerr << L"  cooldown : not recorded (action already applied)\n";
+    }
+    return 0;}
 int RunJournalCommand(int argc, wchar_t* argv[]) {
     constexpr std::size_t kDefaultLines = 20;
     constexpr std::uint32_t kMaxLines = 200;
