@@ -25,6 +25,9 @@ public:
 // `SystemMemoryListInformation`，按页数 × 页大小换算）。
 // 这是 S3 清理**效果**的权威读数：清理成功的判据是该值在执行后显著下降。
 // 查询失败或返回结构尺寸不符时返回 nullopt——**不把“没读到”写成 0**。
+// 只读：当前系统文件缓存占用的字节数（`GetPerformanceInfo` 的 SystemCache × PageSize）。
+// S4 清理效果以此为准；查询失败返回 nullopt（不伪造 0）。
+[[nodiscard]] std::optional<std::uint64_t> QuerySystemCacheBytes() noexcept;
 [[nodiscard]] std::optional<std::uint64_t> QueryStandbyBytes() noexcept;
 
 } // namespace optimizer::memory

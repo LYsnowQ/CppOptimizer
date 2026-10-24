@@ -322,17 +322,21 @@ bool TestCleanStepMetadataAndReadiness() {
             "memory.purge_standby" &&
         std::string(CleanKindCapabilityId(CleanKind::SystemFileCacheTrim)) ==
             "memory.file_cache_trim";
-    // 已实现性：工作集修剪恒有后端；S3 的真实后端**仅在编译期开关打开时**才算就绪；
-    // S4 仍未实现（哪怕开关打开也如实返回 Unsupported）。
+    // 已实现性：工作集修剪恒有后端；S3/S4 的真实后端**仅在各自编译期开关打开时**才算就绪。
 #if defined(OPTIMIZER_ENABLE_STANDBY_PURGE)
     const bool standbyImplemented = true;
 #else
     const bool standbyImplemented = false;
 #endif
-    const bool implemented = CleanStepImplemented(CleanKind::WorkingSetTrim) &&
-                             CleanStepImplemented(CleanKind::StandbyListPurge) ==
-                                 standbyImplemented &&
-                             !CleanStepImplemented(CleanKind::SystemFileCacheTrim);
+#if defined(OPTIMIZER_ENABLE_FILE_CACHE_TRIM)
+    const bool fileCacheImplemented = true;
+#else
+    const bool fileCacheImplemented = false;
+#endif
+    const bool implemented =
+        CleanStepImplemented(CleanKind::WorkingSetTrim) &&
+        CleanStepImplemented(CleanKind::StandbyListPurge) == standbyImplemented &&
+        CleanStepImplemented(CleanKind::SystemFileCacheTrim) == fileCacheImplemented;
     // 就绪度预检：light 全就绪；medium/deep 在 S3 未编入时指出第一个未实现步骤；
     // 空计划 -> hasStep=false 但不算“不就绪”。
     const auto light = EvaluateCleanPlanReadiness(
@@ -348,12 +352,15 @@ bool TestCleanStepMetadataAndReadiness() {
             ? (medium.allImplemented && !medium.firstUnimplemented.has_value())
             : (!medium.allImplemented && medium.firstUnimplemented.has_value() &&
                *medium.firstUnimplemented == CleanKind::StandbyListPurge);
-    // deep 的第一个未实现步骤取决于 S3 是否编入：S3 就绪时是 S4，否则仍是 S3。
+    // deep 就绪度取决于 S3/S4 是否编入：两者都就绪 -> 全就绪；否则点名第一个未实现的步骤。
     const bool deepReadiness =
-        deep.hasStep && !deep.allImplemented && deep.firstUnimplemented.has_value() &&
-        *deep.firstUnimplemented ==
-            (standbyImplemented ? CleanKind::SystemFileCacheTrim
-                                : CleanKind::StandbyListPurge);
+        deep.hasStep &&
+        (standbyImplemented && fileCacheImplemented
+             ? (deep.allImplemented && !deep.firstUnimplemented.has_value())
+             : (!deep.allImplemented && deep.firstUnimplemented.has_value() &&
+                *deep.firstUnimplemented ==
+                    (standbyImplemented ? CleanKind::SystemFileCacheTrim
+                                        : CleanKind::StandbyListPurge)));
     const bool readiness =
         light.hasStep && light.allImplemented && !light.firstUnimplemented.has_value() &&
         medium.hasStep && standbyReadiness && deepReadiness &&

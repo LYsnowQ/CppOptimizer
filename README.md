@@ -30,7 +30,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
   **六道门全通才执行**（否则只输出首个阻塞门并拒绝、exit 2）、**审计不可用一律拒绝**、单步单次、不提权、
   作用目标固定为本进程；成功才写冷却台账（原子替换，防时钟回拨），三段日记的 `state` 段记录修剪前后工作集字节。
   工作集修剪的编译期开关为 `OPTIMIZER_ENABLE_MEMORY_CLEAN`（默认 OFF，与其余三个一样需显式构建开启）；
-  更重的步骤（Standby 列表清理 / 系统文件缓存修剪，R3 不可逆）：**Standby 清理已有真实后端**，文件缓存修剪仍无真实后端，但**门禁与就绪预检已接线**：
+  更重的步骤（Standby 列表清理 / 系统文件缓存修剪，R3 不可逆）：**Standby 清理与文件缓存修剪均已有真实后端**（R3，仅在隔离环境执行），但**门禁与就绪预检已接线**：
   `--memory-clean <config> --execute [--acknowledge-system-wide-side-effects]
   [--acknowledge-isolated-environment]` 先**逐步骤**评估六道门（R3 步骤用自己的编译期开关
   `OPTIMIZER_ENABLE_STANDBY_PURGE` / `OPTIMIZER_ENABLE_FILE_CACHE_TRIM`、自己的冷却键，
