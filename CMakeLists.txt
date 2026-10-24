@@ -47,6 +47,7 @@ add_executable(CppOptimizer
     source/memory/system_clean_backend.cpp
     source/memory/working_set.cpp
     source/scheduler/thread_tuner.cpp
+    source/gpu/gpu_heartbeat.cpp
     source/metrics/memory_metrics.cpp
     source/metrics/pdh_metrics.cpp
     source/platform/native_api.cpp
@@ -89,6 +90,8 @@ target_link_libraries(CppOptimizer PRIVATE
     powrprof
     $<$<CONFIG:Debug>:${SPDLOG_LIB_DEBUG}>
     $<$<NOT:$<CONFIG:Debug>>:${SPDLOG_LIB_RELEASE}>
+
+    dxgi
 )
 if(OPTIMIZER_ENABLE_MEMORY_CLEAN)
     target_compile_definitions(CppOptimizer PRIVATE OPTIMIZER_ENABLE_MEMORY_CLEAN=1)
@@ -201,6 +204,22 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
     )
     add_test(NAME SchedulerTests COMMAND CppOptimizerSchedulerTests)
+
+    add_executable(CppOptimizerGpuTests
+        tests/gpu_tests.cpp
+        source/common/error.cpp
+        source/gpu/gpu_heartbeat.cpp
+    )
+    target_include_directories(CppOptimizerGpuTests PRIVATE include)
+    target_compile_features(CppOptimizerGpuTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerGpuTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerGpuTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    target_link_libraries(CppOptimizerGpuTests PRIVATE dxgi)
+    add_test(NAME GpuTests COMMAND CppOptimizerGpuTests)
 
     add_executable(CppOptimizerMetricsTests
         tests/memory_metrics_tests.cpp
