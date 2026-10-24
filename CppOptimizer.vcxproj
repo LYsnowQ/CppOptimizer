@@ -61,7 +61,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;wtsapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;taskschd.lib;powrprof.lib;spdlogd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;wtsapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;taskschd.lib;powrprof.lib;spdlogd.lib;%(AdditionalDependencies)dxgi.lib;</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -87,7 +87,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)thirdParty\spdlog\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;wtsapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;taskschd.lib;powrprof.lib;spdlog.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pdh.lib;user32.lib;psapi.lib;advapi32.lib;wtsapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;taskschd.lib;powrprof.lib;spdlog.lib;%(AdditionalDependencies)dxgi.lib;</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -106,6 +106,7 @@
     <ClInclude Include="include\memory\memory_tuner.hpp" />
     <ClInclude Include="include\memory\memory_cleaner.hpp" />
     <ClInclude Include="include\scheduler\thread_tuner.hpp" />
+    <ClInclude Include="include\gpu\gpu_heartbeat.hpp" />
     <ClInclude Include="include\memory\system_clean_backend.hpp" />
     <ClInclude Include="include\memory\working_set.hpp" />
     <ClInclude Include="include\metrics\memory_metrics.hpp" />
@@ -144,6 +145,7 @@
     <ClCompile Include="source\memory\memory_tuner.cpp" />
     <ClCompile Include="source\memory\memory_cleaner.cpp" />
     <ClCompile Include="source\scheduler\thread_tuner.cpp" />
+    <ClCompile Include="source\gpu\gpu_heartbeat.cpp" />
     <ClCompile Include="source\memory\system_clean_backend.cpp" />
     <ClCompile Include="source\memory\working_set.cpp" />
     <ClCompile Include="source\metrics\memory_metrics.cpp" />

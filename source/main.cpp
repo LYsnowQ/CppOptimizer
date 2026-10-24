@@ -14,6 +14,7 @@
 #include "memory/memory_cleaner.hpp"
 #include "memory/system_clean_backend.hpp"
 #include "scheduler/thread_tuner.hpp"
+#include "gpu/gpu_heartbeat.hpp"
 #include "memory/working_set.hpp"
 #include "metrics/memory_metrics.hpp"
 #include "metrics/pdh_metrics.hpp"
@@ -1731,6 +1732,26 @@ int RunAuditCompactCommand(int argc, wchar_t* argv[]) {
 
 // --journal [path] [lines]：只读回看**动作日记**（默认每用户 action-journal.log，最近 20 行，上限 200）。
 // 与 --audit-log 同口径：纯数字首参按行数解读；不写、不截断、不删；"尚无记录"与"读取失败"分开报。
+// --gpu：只读枚举 DXGI 适配器与显存预算/用量（R0）。
+int RunGpuCommand() {
+    auto& backend = optimizer::gpu::RealGpuBackend();
+    const auto adapters = backend.EnumerateAdapters();
+    if (!adapters) {
+        ErrorLine{} << L"  gpu enumerate failed [" << adapters.ErrorValue().operation.c_str() << L"]";
+        return 41;
+    }
+    std::wcout << L"GPU adapters (read-only, DXGI)\n";
+    if (adapters.Value().empty()) {
+        std::wcout << L"  adapters : 0 (no DXGI adapter available in this environment)\n";
+        return 0;
+    }
+    std::wcout << L"  adapters : " << adapters.Value().size() << L"\n";
+    for (const auto& adapter : adapters.Value()) {
+        std::wcout << L"    " << optimizer::gpu::DescribeAdapter(adapter) << L"\n";
+    }
+    return 0;
+}
+
 // --scheduler <pid> [--execute --acknowledge-system-wide-side-effects]
 // R0：列出目标进程的线程与优先级/亲和性；R1（需编译期开关）：把低于 AboveNormal 的线程
 // 提升到 AboveNormal，保存原值以便 --scheduler-restore 条件恢复。
@@ -6115,8 +6136,14 @@ void PrintUsage() {
         << L"  CppOptimizer.exe --audit-summary [path] [lines]  Read back compacted summary\n"
         << L"                             totals (read-only; default: per-user summary file,\n"
         << L"                             last 20 lines, max 200)\n"
-        << L"  CppOptimizer.exe --memory-clean [config.toml] [--dry-run]  Plan a memory clean and\n"
-        << L"                             show the gates (no system call is made)\n"
+        << L"  CppOptimizer.exe --gpu          Enumerate DXGI adapters and video memory\n"
+        << L"                             budget/usage (read-only; degrades cleanly without a GPU)\n"
+        << L"  CppOptimizer.exe --scheduler <pid> [--execute]\n"
+        << L"                             List process threads and priorities (R0); --execute\n"
+        << L"                             raises below-AboveNormal threads (R1; needs the\n"
+        << L"                             OPTIMIZER_ENABLE_SCHEDULER_TUNER build option and\n"
+        << L"                             --acknowledge-system-wide-side-effects)\n"
+        << L"  CppOptimizer.exe --memory-clean [config.toml] [--dry-run]  Plan a memory clean and\n"        << L"                             show the gates (no system call is made)\n"
         << L"  CppOptimizer.exe --memory-clean <config.toml> --execute\n"
         << L"                             [--acknowledge-system-wide-side-effects]\n"
         << L"                             [--acknowledge-isolated-environment]  Execute the\n"
@@ -6260,6 +6287,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--log") {
             return RunLogCommand(argc, argv);
+        }
+        if (argc == 2 && std::wstring_view(argv[1]) == L"--gpu") {
+            return RunGpuCommand();
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--scheduler") {
             return RunSchedulerCommand(argc, argv);
