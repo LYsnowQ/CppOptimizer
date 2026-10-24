@@ -81,7 +81,7 @@ std::filesystem::path DefaultPowerSchemeSavePath() noexcept;
 
 // 门禁/日记输出的通用小工具（定义见本文件后部）：首个阻塞门的名字、宽字符 -> ASCII 令牌。
 std::string FirstBlockingGateName(const optimizer::policy::GateEvaluation& gates);
-std::string ToAsciiToken(const std::wstring& text);
+std::string ToUtf8(const std::wstring& text);
 
 // 作用域错误行（替代宽字符标准错误流）：链式拼接后在临时对象析构时按 stderr 双路径一次性写出。
 // 存在的理由：宽字符标准错误流在默认 C locale 下遇非 ASCII（本地化 Win32 错误消息）会进入 failbit
@@ -700,7 +700,7 @@ int RunMemoryCleanExecuteCommand(
     AuditAction("memory.clean_execute",
                 hasR3Step ? optimizer::audit::RiskLevel::R3
                           : optimizer::audit::RiskLevel::R1,
-                target, ok, ToAsciiToken(detail), deltaText);
+                target, ok, ToUtf8(detail), deltaText);
     if (!ok) {
         return 2;
     }
@@ -2672,12 +2672,12 @@ std::string FirstBlockingGateName(
                : std::string("unknown");
 }
 
-std::string ToAsciiToken(const std::wstring& text) {
-    std::string token;
-    for (const wchar_t ch : text) {
-        token.push_back(ch >= 0 && ch <= 0x7F ? static_cast<char>(ch) : '?');
-    }
-    return token;
+// 宽字符 -> UTF-8。审计的 detail 字段允许中文（文件按 UTF-8 落盘），
+// 旧实现把非 ASCII 一律换成 '?'，导致中文错误信息在审计里不可读（REM-011）。
+// 复用 common::WideToUtf8 作为唯一转换实现；失败返回空串（不写半截文本）。
+std::string ToUtf8(const std::wstring& text) {
+    const auto converted = optimizer::common::WideToUtf8(text);
+    return converted ? converted.Value() : std::string();
 }
 
 // --power-scheme status | saved | recover | restore | <balanced|high-performance|power-saver|GUID>
@@ -2916,7 +2916,7 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
             ErrorLine{} << L"  detail   : " << detail << L"\n";
         }
         AuditAction("power.scheme_recover", optimizer::audit::RiskLevel::R2, target,
-                    ok, ToAsciiToken(detail), state);
+                    ok, ToUtf8(detail), state);
         return ok ? 0 : 2;
     }
 
@@ -2956,7 +2956,7 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
             ErrorLine{} << L"  detail   : " << detail << L"\n";
         }
         AuditAction("power.scheme_restore", optimizer::audit::RiskLevel::R2, target,
-                    ok, ToAsciiToken(detail), state);
+                    ok, ToUtf8(detail), state);
         return ok ? 0 : 2;
     }
 
@@ -3028,7 +3028,7 @@ int RunPowerSchemeCommand(int argc, wchar_t* argv[]) {
         L"  note     : roll back with --power-scheme restore; if this process dies"
         L" mid-switch, --power-scheme status shows state=pending and recover rolls back");
     AuditAction("power.scheme_apply", optimizer::audit::RiskLevel::R2, target, ok,
-                ToAsciiToken(detail), state);
+                ToUtf8(detail), state);
     if (!ok) {
         return 2;
     }

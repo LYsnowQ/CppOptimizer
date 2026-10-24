@@ -106,8 +106,7 @@ bool TestAppendAuditLineRejectsEmptyPath() {
            result.ErrorValue().domain == optimizer::common::ErrorDomain::Validation;
 }
 
-bool TestAppendAuditLineAppendsReadableLines() {
-    using optimizer::audit::AppendAuditLine;
+bool TestAppendAuditLineAppendsReadableLines() {    using optimizer::audit::AppendAuditLine;
     const auto path = TempAuditPath(L"append");
     if (path.empty()) {
         return false;
@@ -140,6 +139,33 @@ bool TestAppendAuditLineAppendsReadableLines() {
                          line1[13] == ':' && line1[16] == ':';
     std::filesystem::remove(path, ec);
     return firstOk && secondOk && stampOk;
+}
+
+// REM-011 回归：审计 detail 允许 UTF-8 中文，不得被替换成 '?'。
+bool TestAuditDetailKeepsUtf8() {
+    using optimizer::audit::AppendAuditLine;
+    const auto path = TempAuditPath(L"utf8");
+    if (path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    auto record = MakeRecord("power.scheme_apply", false);
+    // "电源计划" 的 UTF-8 字节序列（E7 94 B5 E6 BA 90 E8 AE A1 E5 88 92）。
+    const std::string chinese =
+        "\xE7\x94\xB5\xE6\xBA\x90\xE8\xAE\xA1\xE5\x88\x92";
+    record.detail = chinese + " GUID invalid";
+    if (!AppendAuditLine(path, record)) {
+        return false;
+    }
+    std::ifstream in(path, std::ios::binary);
+    std::string line;
+    std::getline(in, line);
+    in.close();
+    std::filesystem::remove(path, ec);
+    const bool kept = line.find(chinese) != std::string::npos;
+    const bool notMasked = line.find("????") == std::string::npos;
+    return kept && notMasked;
 }
 
 bool TestAppendAuditLineCreatesParentDirectories() {
@@ -1076,6 +1102,7 @@ int wmain() {
     run(L"audit line rejects empty path", &TestAppendAuditLineRejectsEmptyPath);
     run(L"audit line appends readable lines",
         &TestAppendAuditLineAppendsReadableLines);
+    run(L"audit detail keeps utf8", &TestAuditDetailKeepsUtf8);
     run(L"audit line creates parent dirs",
         &TestAppendAuditLineCreatesParentDirectories);
     run(L"audit line keeps one line per record",
