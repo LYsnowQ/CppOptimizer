@@ -78,7 +78,7 @@ hotfix/<slug>
 
 - 首行 ≤ 72 字符，半角冒号，不加句号与 emoji；代码标识符与路径保持英文。
 - `type`：`feat` `fix` `refactor` `perf` `docs` `test` `build` `ci` `chore` `style`。
-- `scope`：`power` `memory` `policy` `priority` `ipc` `service` `activity` `metrics` `process` `config` `logger` `platform` `audit` `build` `docs` `tooling` `repo`。
+- `scope`：`power` `memory` `scheduler` `gpu` `disk` `policy` `priority` `ipc` `service` `activity` `metrics` `process` `config` `logger` `platform` `audit` `build` `docs` `tooling` `repo`。
 - 一次提交一个**可独立回滚**的逻辑目的；代码与其契约、测试、文档属于同一改动。
 - 机械搬迁与行为改变尽量分开，但不得制造无法构建的中间状态。
 - 破坏性变更用 `!` 或 `BREAKING CHANGE:` 正文说明影响与迁移。

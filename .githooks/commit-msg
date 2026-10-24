@@ -12,7 +12,7 @@ case "$subject" in
 esac
 
 types='feat|fix|refactor|perf|docs|test|build|ci|chore|style'
-scopes='power|memory|policy|priority|ipc|service|activity|metrics|process|config|logger|platform|audit|build|docs|tooling|repo'
+scopes='power|memory|scheduler|gpu|disk|policy|priority|ipc|service|activity|metrics|process|config|logger|platform|audit|build|docs|tooling|repo'
 
 if ! printf '%s' "$subject" | grep -Eq "^($types)(\(($scopes)\))?!?: .+$"; then
   echo "" >&2

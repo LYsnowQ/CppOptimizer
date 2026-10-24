@@ -13,6 +13,7 @@
 #include "memory/memory_tuner.hpp"
 #include "memory/memory_cleaner.hpp"
 #include "memory/system_clean_backend.hpp"
+#include "scheduler/thread_tuner.hpp"
 #include "memory/working_set.hpp"
 #include "metrics/memory_metrics.hpp"
 #include "metrics/pdh_metrics.hpp"
@@ -1730,6 +1731,79 @@ int RunAuditCompactCommand(int argc, wchar_t* argv[]) {
 
 // --journal [path] [lines]：只读回看**动作日记**（默认每用户 action-journal.log，最近 20 行，上限 200）。
 // 与 --audit-log 同口径：纯数字首参按行数解读；不写、不截断、不删；"尚无记录"与"读取失败"分开报。
+// --scheduler <pid> [--execute --acknowledge-system-wide-side-effects]
+// R0：列出目标进程的线程与优先级/亲和性；R1（需编译期开关）：把低于 AboveNormal 的线程
+// 提升到 AboveNormal，保存原值以便 --scheduler-restore 条件恢复。
+int RunSchedulerCommand(int argc, wchar_t* argv[]) {
+    std::uint32_t pid = 0;
+    if (!ParseUint32(argv[2], pid) || pid == 0) {
+        std::wcerr << L"  invalid --scheduler target: " << argv[2] << L"\n";
+        return 40;
+    }
+    bool execute = false;
+    bool acknowledged = false;
+    for (int i = 3; i < argc; ++i) {
+        const std::wstring_view arg = argv[i];
+        if (arg == L"--execute") {
+            execute = true;
+        } else if (arg == L"--acknowledge-system-wide-side-effects") {
+            acknowledged = true;
+        } else {
+            std::wcerr << L"  unknown --scheduler option: " << arg << L"\n";
+            return 40;
+        }
+    }
+
+    auto& backend = optimizer::scheduler::RealSchedulerBackend();
+    const auto snapshot = backend.ListThreads(pid);
+    if (!snapshot) {
+        ErrorLine{} << L"  scheduler snapshot failed [" << snapshot.ErrorValue().operation.c_str() << L"]";
+        return 41;
+    }
+    std::wcout << L"Scheduler snapshot (read-only)\n";
+    std::wcout << L"  pid      : " << pid << L"\n";
+    std::wcout << L"  threads  : " << snapshot.Value().size() << L"\n";
+    for (const auto& thread : snapshot.Value()) {
+        std::wcout << L"    tid=" << thread.threadId
+                   << L" priority=" << thread.priority
+                   << L" affinity=0x" << std::hex << thread.affinityMask
+                   << std::dec << L"\n";
+    }
+    if (!execute) {
+        return 0;
+    }
+#if !defined(OPTIMIZER_ENABLE_SCHEDULER_TUNER)
+    std::wcerr << L"  --scheduler --execute refused [capability: scheduler.tuner] "
+                  L"(not compiled; build with OPTIMIZER_ENABLE_SCHEDULER_TUNER=ON)\n";
+    return 2;
+#else
+    if (!acknowledged) {
+        std::wcerr << L"  --scheduler --execute refused (missing "
+                      L"--acknowledge-system-wide-side-effects)\n";
+        return 2;
+    }
+    const int target = THREAD_PRIORITY_ABOVE_NORMAL;
+    const auto report = optimizer::scheduler::BoostProcessThreads(backend, pid, target);
+    if (!report) {
+        ErrorLine{} << L"  scheduler boost failed [" << report.ErrorValue().operation.c_str() << L"]";
+        return 41;
+    }
+    const std::string record =
+        optimizer::scheduler::FormatAdjustmentRecord(pid, report.Value().adjusted);
+    std::wcout << L"  adjusted : " << report.Value().adjusted.size()
+               << L" skipped: " << report.Value().skipped << L"\n";
+    JournalAction("scheduler.boost_priority", std::to_string(pid), true,
+                  optimizer::audit::JournalPhase::After,
+                  "raise below-AboveNormal threads to AboveNormal");
+    AuditAction("scheduler.boost_priority", optimizer::audit::RiskLevel::R1,
+                std::to_string(pid), true,
+                "adjusted " + std::to_string(report.Value().adjusted.size()) +
+                    " thread(s)",
+                "target=" + std::to_string(target));
+    (void)record;
+    return 0;
+#endif
+}
 int RunJournalCommand(int argc, wchar_t* argv[]) {
     constexpr std::size_t kDefaultLines = 20;
     constexpr std::uint32_t kMaxLines = 200;
@@ -6186,6 +6260,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--log") {
             return RunLogCommand(argc, argv);
+        }
+        if (argc >= 3 && std::wstring_view(argv[1]) == L"--scheduler") {
+            return RunSchedulerCommand(argc, argv);
         }
         if (argc >= 2 && argc <= 4 &&
             std::wstring_view(argv[1]) == L"--journal") {

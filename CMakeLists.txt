@@ -33,6 +33,7 @@ set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/thirdParty)
 option(OPTIMIZER_ENABLE_MEMORY_CLEAN "Build in the default-off memory clean capability" OFF)
 option(OPTIMIZER_ENABLE_POWER_SCHEME_SWITCH "Build in the default-off power scheme switch capability" OFF)
 option(OPTIMIZER_ENABLE_STANDBY_PURGE "Build in the default-off standby list purge capability (R3; isolated environment only)" OFF)
+option(OPTIMIZER_ENABLE_SCHEDULER_TUNER "Enable R1 scheduler thread priority tuning" OFF)
 option(OPTIMIZER_ENABLE_FILE_CACHE_TRIM "Build in the default-off system file cache trim capability (R3; isolated environment only)" OFF)
 
 add_executable(CppOptimizer
@@ -45,6 +46,7 @@ add_executable(CppOptimizer
     source/memory/memory_cleaner.cpp
     source/memory/system_clean_backend.cpp
     source/memory/working_set.cpp
+    source/scheduler/thread_tuner.cpp
     source/metrics/memory_metrics.cpp
     source/metrics/pdh_metrics.cpp
     source/platform/native_api.cpp
@@ -99,6 +101,9 @@ if(OPTIMIZER_ENABLE_STANDBY_PURGE)
 endif()
 if(OPTIMIZER_ENABLE_FILE_CACHE_TRIM)
     target_compile_definitions(CppOptimizer PRIVATE OPTIMIZER_ENABLE_FILE_CACHE_TRIM=1)
+endif()
+if(OPTIMIZER_ENABLE_SCHEDULER_TUNER)
+    target_compile_definitions(CppOptimizer PRIVATE OPTIMIZER_ENABLE_SCHEDULER_TUNER=1)
 endif()
 
 target_compile_features(CppOptimizer PRIVATE cxx_std_20)
@@ -181,6 +186,21 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         target_link_options(CppOptimizerMemoryTests PRIVATE -municode)
     endif()
     add_test(NAME MemoryTests COMMAND CppOptimizerMemoryTests)
+
+    add_executable(CppOptimizerSchedulerTests
+        tests/scheduler_tests.cpp
+        source/common/error.cpp
+        source/scheduler/thread_tuner.cpp
+    )
+    target_include_directories(CppOptimizerSchedulerTests PRIVATE include)
+    target_compile_features(CppOptimizerSchedulerTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerSchedulerTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerSchedulerTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    add_test(NAME SchedulerTests COMMAND CppOptimizerSchedulerTests)
 
     add_executable(CppOptimizerMetricsTests
         tests/memory_metrics_tests.cpp

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="源文件">
@@ -31,6 +31,9 @@
       <Filter>include\memory</Filter>
     </ClInclude>
     <ClInclude Include="include\memory\memory_cleaner.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="include\scheduler\thread_tuner.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="include\memory\system_clean_backend.hpp">
@@ -130,6 +133,9 @@
       <Filter>source\memory</Filter>
     </ClCompile>
     <ClCompile Include="source\memory\memory_cleaner.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\scheduler\thread_tuner.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\memory\system_clean_backend.cpp">
