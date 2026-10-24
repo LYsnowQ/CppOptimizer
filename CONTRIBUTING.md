@@ -11,13 +11,14 @@
 
 ## 1. 分支模型
 
-长期分支只有 `master`（正式稳定）。开发一律走短生命周期分支：
+**长期分支只有 `master`**（正式稳定）。当前为**单人维护**模式：
 
 | 分支 | 来源 → 去向 | 规则 |
 |---|---|---|
-| `task/<issue>/<slug>` | 从最新 `master` 拉出 → PR 回 `master` | 一次任务一条；合并后立即删除 |
-| `dev/<username>` | 个人自由区 | 可以随意提交；**不能**作为进入 `master` 的凭据，也不参与发布 |
-| `hotfix/<slug>` | 线上急修 | 仅在所有者的明确授权下使用，事后补 issue |
+| `master` | — | 默认可直接提交，但**必须先通过 `scripts/verify.ps1`**；提交信息必须合规 |
+| `task/<issue>/<slug>` | 从最新 `master` 拉出 → 合并回 `master` | **推荐**用于较大改动/需要隔离的实验；一次任务一条，合并后删除 |
+| `dev/<username>` | 个人自由区 | 可以随意提交；不作为进入 `master` 的凭据，也不参与发布 |
+| `hotfix/<slug>` | 线上急修 | 紧急情况下使用，事后补 issue |
 
 命名规则：**只用 `/` 分层，段内不用 `-`**。
 
@@ -27,10 +28,23 @@ dev/<username>           username 里 `-` 写成 `_`            例 dev/ly_snowq
 hotfix/<slug>
 ```
 
-- `<issue>` 是纯数字 issue 编号；不带 issue 不开 task 分支。
-- 禁止直接向 `master` 提交（含网页编辑、脚本、CI 机器人）。所有者的 hotfix 例外必须在 PR 里写明授权来源。
-- 合并只用 **merge commit**（`gh pr merge <PR> --merge`），不用 squash / rebase：审查与归档引用的提交 SHA 必须留在历史里。
+- 用 `task/*` 时，`<issue>` 是纯数字 issue 编号；不开 issue 就不用 task 分支（直接改 `master` 也可以，但门禁不打折）。
+- 合并 `task/*` 用 **merge commit**，不用 squash / rebase：归档引用的提交 SHA 必须留在历史里。
 - 禁止 force-push `master`；禁止残留已合并的 task 分支。
+
+### 1.1 多人协作模式（**当前不启用**）
+
+以下规则已经写进仓库，但**只在进入多人协作时生效**。届时由所有者一次性开启：
+
+| 规则 | 启用条件 | 现状 |
+|---|---|---|
+| 禁止直接 push `master`，必须走 PR | 出现第二位长期贡献者 | 未启用（单人可直接提交） |
+| PR 需至少一次代码审查 + `static` 检查通过 | 同上 | 未启用 |
+| GitHub 分支保护（required checks / 禁止 force-push） | 同上 | 未配置 |
+| 引入 `stage` 预发布分支（`master` ← `stage` ← `task/*`） | 需要灰度/预发布环境时 | 未创建 |
+| 发布走 `vX.Y.Z-rc.N` → 验收 → `vX.Y.Z` 双 tag | 有外部分发需求时 | 未启用（只有 `vX.Y.Z`） |
+
+启用方式与理由见 `docs/design/guides/33-git-workflow-adaptation.md`；在此之前，单人模式的门禁（构建、回归、静态检查、来宾验收）**一条都不减**。
 
 ## 2. 提交规范（Conventional Commits）
 
@@ -81,9 +95,10 @@ pwsh -File scripts/verify.ps1 -Fast      # 快速：提交信息 + 仓库卫生�
 **R2/R3 功能额外要求**：除构建与单测外，必须在**隔离来宾**中真实跑通并留证（门禁 → 执行 → 读数 → 审计/日记/冷却），
 证据落到本人实验室目录；**来宾未通过不算完成**。
 
-## 4. PR 必填项
+## 4. PR 说明（使用 PR 时）
 
-按 [.github/pull_request_template.md](.github/pull_request_template.md) 逐段填写：
+单人维护时可直推 `master`；一旦使用 PR（较大改动、或多人协作模式），按
+[.github/pull_request_template.md](.github/pull_request_template.md) 逐段填写：
 
 - **目的**与**非目标**；关联 issue（`Closes #n`）；
 - **风险等级** R0～R4 与权限/支持矩阵；
@@ -91,8 +106,9 @@ pwsh -File scripts/verify.ps1 -Fast      # 快速：提交信息 + 仓库卫生�
 - **失败/取消/停止/恢复路径**；
 - **变更范围**（`power`、`memory`、`ipc`… 各自改了什么、**不做什么**）；
 - **验证命令与真实结果**（含来宾证据编号）；
-- **审查结论**（逐项 + 通过 / 有条件通过 / 阻塞）；
 - **风险与回滚**（revert 合并提交 / 恢复快照）。
+
+**审查结论**：单人维护时写「自审」即可（自审也要逐项过门禁）；**要求他人审查属于多人协作模式**（见 §1.1），当前不启用。
 
 ## 5. 代码与安全边界
 
@@ -124,11 +140,20 @@ git config core.hooksPath .githooks
 ```
 
 - `commit-msg`：校验 Conventional Commits 格式与 scope；
-- `pre-commit`：拒绝把构建产物、私有目录、非 ASCII `.cmd/.bat` 带进暂存区；
+- `pre-commit`：拒绝把构建产物、私有目录、二进制带进暂存区；
 - `pre-push`：跑 `scripts/verify.ps1 -Fast`（提交信息 + 卫生），失败即拒绝推送。
 
 临时跳过单次检查用 `git commit --no-verify` / `git push --no-verify`；**CI 与人工门禁不会因此豁免**。
 
-## 9. 发布
+## 9. CI 与 Runner
+
+- **静态门禁**：GitHub 托管 runner（`ubuntu-latest`，自带 `pwsh`）执行 `scripts/verify.ps1 -Fast -Ci`。
+- **构建门禁**：自托管 Windows runner（label `cppoptimizer`），手动触发 `workflow_dispatch`；
+  因为 `thirdParty/` 不入库，托管 runner 拉不到预编译依赖。
+- 注册自托管 runner 的步骤与脚本见 `.github/workflows/ci.yml` 顶部注释与 `scripts/setup-runner.ps1`。
+- 单人维护时**不启用**分支保护与必需检查；进入多人协作模式后再开启（见 §1.1）。
+
+## 10. 发布
 
 发布只靠打 tag（`vX.Y.Z`），由所有者授权后执行；合并进 `master` 本身不产生发布。
+双 tag（`-rc.N` → 验收 → 正式）属于多人协作/外部分发阶段，当前不启用。

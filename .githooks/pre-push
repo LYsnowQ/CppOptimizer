@@ -6,21 +6,13 @@ set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
 
-# 分支保护：禁止直接向 master 推送非合并提交之外的内容（单人维护仍保留提示）。
+# 单人维护：允许直接推 master；多人协作模式才需要分支保护（见 CONTRIBUTING §1.1）。
+# 这里只提示，不拦截。
 branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
 if [ "$branch" = "master" ]; then
-  remote_branch=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
-  if [ -n "$remote_branch" ]; then
-    ahead=$(git rev-list --count "$remote_branch..HEAD" 2>/dev/null || echo 0)
-    merge_count=$(git rev-list --merges --count "$remote_branch..HEAD" 2>/dev/null || echo 0)
-    if [ "$ahead" -gt 0 ] && [ "$merge_count" -eq 0 ]; then
-      echo "" >&2
-      echo "pre-push: 你在 master 上有 $ahead 个非合并提交。" >&2
-      echo "  规范要求：代码改动走 task/<issue>/<slug> 分支 + PR 合并（merge commit）。" >&2
-      echo "  仅 hotfix（所有者授权）可直接推；确认无误可用 git push --no-verify 跳过本次提示。" >&2
-      echo "  说明：CONTRIBUTING.md 第 1 节" >&2
-      exit 1
-    fi
+  ahead=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)
+  if [ "$ahead" -gt 0 ]; then
+    echo "pre-push: 即将向 master 推送 $ahead 个提交（单人模式允许；门禁在本钩子下方执行）。" >&2
   fi
 fi
 

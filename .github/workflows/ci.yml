@@ -2,6 +2,14 @@ name: ci
 
 # 静态门禁在 GitHub 托管 runner 上跑；构建门禁需要 thirdParty（未入库），
 # 因此走自托管 Windows runner，且只在手动触发时执行。
+#
+# 自托管 runner 注册（一次性，需管理员）：
+#   1. https://github.com/LYsnowQ/CppOptimizer/settings/actions/runners/new?arch=x64&os=win 取 token；
+#   2. pwsh -File scripts/setup-runner.ps1 -Token <token>
+#   3. runner 标签需包含 cppoptimizer（脚本默认已带）。
+#
+# 分支保护 / 必需检查（required checks）属于「多人协作模式」，
+# 当前单人维护**不启用**；启用条件见 CONTRIBUTING.md §1.1。
 
 on:
   push:
