@@ -63,6 +63,10 @@ struct GateEvaluation {
 #ifndef OPTIMIZER_ENABLE_STANDBY_PURGE
 #define OPTIMIZER_ENABLE_STANDBY_PURGE 0
 #endif
+#ifndef OPTIMIZER_ENABLE_SCHEDULER_TUNER
+#define OPTIMIZER_ENABLE_SCHEDULER_TUNER 0
+#endif
+
 #ifndef OPTIMIZER_ENABLE_FILE_CACHE_TRIM
 #define OPTIMIZER_ENABLE_FILE_CACHE_TRIM 0
 #endif
@@ -78,6 +82,10 @@ struct GateEvaluation {
 
 [[nodiscard]] constexpr bool StandbyPurgeCompiledIn() noexcept {
     return OPTIMIZER_ENABLE_STANDBY_PURGE != 0;
+}
+
+[[nodiscard]] constexpr bool SchedulerTunerCompiledIn() noexcept {
+    return OPTIMIZER_ENABLE_SCHEDULER_TUNER != 0;
 }
 
 [[nodiscard]] constexpr bool FileCacheTrimCompiledIn() noexcept {
@@ -101,6 +109,7 @@ inline constexpr std::string_view kPowerSchemeCapabilityId =
     "power.switch_power_scheme";
 inline constexpr std::string_view kStandbyPurgeCapabilityId =
     "memory.purge_standby";
+inline constexpr std::string_view kSchedulerTunerCapabilityId = "scheduler.tuner";
 inline constexpr std::string_view kFileCacheTrimCapabilityId =
     "memory.file_cache_trim";
 

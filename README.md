@@ -39,6 +39,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
 - **GPU 心跳（R0，只读）**：`--gpu` 枚举 DXGI 适配器并读显存预算/用量，按用量百分比分级（Low/Medium/High）；
   无独立显卡或 DXGI 不可用时干净降级，不伪造读数。
 - **磁盘观测（R0，只读）**：`--disk` 列出卷容量/使用率分级与进程 I/O 前十；不执行任何清理动作。
+- **调度优先级（R1，可逆）**：`--scheduler <pid>` 只读列出线程与优先级；`--scheduler <pid> --execute [config.toml] --acknowledge-system-wide-side-effects` 仅提升低于 AboveNormal 的线程。需编译期开关 `OPTIMIZER_ENABLE_SCHEDULER_TUNER` + 配置 `[scheduler].enabled=true` + 确认参数 + 审计可写 + 冷却（15 分钟）；被拒时打印 `first blocked gate` 且零系统调用。
 - **电源计划切换（R2，可逆）**：`--power-scheme status|saved` 只读读回当前活动计划 GUID 与保存的恢复依据；
   `--power-scheme <balanced|high-performance|power-saver|GUID> [config.toml] [--acknowledge-system-wide-side-effects]`
   为**切换路径**：**先读回并保存原 GUID（读不到则拒绝切换——没有回滚信息不得改全局状态）→ 切换 → 只读读回校验**；
