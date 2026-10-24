@@ -1,0 +1,43 @@
+#!/bin/sh
+# Conventional Commits 校验（与 scripts/check-commits.ps1 同口径）。
+# 启用：git config core.hooksPath .githooks
+set -eu
+
+msg_file="$1"
+subject=$(head -n 1 "$msg_file")
+
+# 合并与回滚提交由 Git 生成，不校验。
+case "$subject" in
+  "Merge "*|"Revert "*) exit 0 ;;
+esac
+
+types='feat|fix|refactor|perf|docs|test|build|ci|chore|style'
+scopes='power|memory|policy|priority|ipc|service|activity|metrics|process|config|logger|platform|audit|build|docs|tooling|repo'
+
+if ! printf '%s' "$subject" | grep -Eq "^($types)(\(($scopes)\))?!?: .+$"; then
+  echo "" >&2
+  echo "commit-msg: 提交首行不符合约定。" >&2
+  echo "  格式：<type>(<scope>): <中文简述>" >&2
+  echo "  type ：feat fix refactor perf docs test build ci chore style" >&2
+  echo "  scope：power memory policy priority ipc service activity metrics process config logger platform audit build docs tooling repo" >&2
+  echo "  实际：$subject" >&2
+  echo "  说明：CONTRIBUTING.md 第 2 节" >&2
+  exit 1
+fi
+
+length=$(printf '%s' "$subject" | wc -m | tr -d ' ')
+if [ "$length" -gt 72 ]; then
+  echo "" >&2
+  echo "commit-msg: 首行 $length 字符，超过 72。" >&2
+  echo "  实际：$subject" >&2
+  exit 1
+fi
+
+case "$subject" in
+  WIP*|wip*|fixup!*|squash!*|tmp*|temp*)
+    echo "commit-msg: 禁止 WIP / fixup / squash 提交（请先合并成完整提交）。" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

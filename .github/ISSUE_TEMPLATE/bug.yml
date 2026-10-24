@@ -1,0 +1,57 @@
+name: Bug 报告
+description: 可复现的缺陷（含回归测试要求的入口）
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前先读 `CONTRIBUTING.md`。能复现的最小步骤越短，定位越快。
+        安全相关缺陷请不要开公开 issue，按 `SECURITY.md` 的渠道处理。
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / 提交
+      description: 出问题的提交 SHA 或版本号
+      placeholder: 例：25569cc
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: 风险等级
+      options:
+        - R0 只读
+        - R1 局部可逆
+        - R2 系统级可逆
+        - R3 系统级实验
+        - 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 命令、配置、环境（OS/build、是否管理员、是否隔离来宾）
+      placeholder: |
+        1. 执行 ...
+        2. 看到 ...
+        3. 期望 ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为与实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据
+      description: 退出码、错误消息、审计/日记片段、读数
+  - type: textarea
+    id: regression
+    attributes:
+      label: 建议的回归测试
+      description: 怎样写一个能区分修复前后的测试（纯函数 / fake 后端 / 隔离来宾）

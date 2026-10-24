@@ -1,0 +1,36 @@
+#!/bin/sh
+# 暂存区卫生检查：禁止把私有目录、构建产物、超大文件带进提交。
+# 启用：git config core.hooksPath .githooks
+set -eu
+
+forbidden='^(docs/|works/|AI_test/|thirdParty/|logs/|out/|ISOLATION-VM-SETUP\.md|work\.md|\.orca/)'
+bad=''
+
+for f in $(git diff --cached --name-only --diff-filter=ACM); do
+  if printf '%s' "$f" | grep -Eq "$forbidden"; then
+    bad="$bad\n  $f（私有目录/产物，见 .gitignore）"
+    continue
+  fi
+  case "$f" in
+    *.exe|*.dll|*.lib|*.pdb|*.ilk|*.obj|*.zip|*.7z|*.iso)
+      bad="$bad\n  $f（二进制产物不入库）"
+      continue
+      ;;
+  esac
+  if [ -f "$f" ]; then
+    size=$(wc -c < "$f" | tr -d ' ')
+    if [ "$size" -gt 5242880 ]; then
+      bad="$bad\n  $f（$size 字节，超过 5 MiB）"
+    fi
+  fi
+done
+
+if [ -n "$bad" ]; then
+  echo "" >&2
+  echo "pre-commit: 暂存区有不应入库的文件：" >&2
+  printf "%b\n" "$bad" >&2
+  echo "  说明：CONTRIBUTING.md 第 5/6 节" >&2
+  exit 1
+fi
+
+exit 0

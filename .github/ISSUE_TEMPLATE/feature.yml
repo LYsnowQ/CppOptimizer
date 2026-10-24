@@ -1,0 +1,54 @@
+name: 功能 / 任务
+description: 新增能力或工程增量（一件事一个 issue）
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        一件事 = 一个 issue = 一个 `task/<issue>/<slug>` 分支 = 一个 PR。
+        请先写清楚契约与验收，再动代码。
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目的与非目标
+      description: 解决什么问题；明确不做什么（防止范围蔓延）
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: 风险等级
+      options:
+        - R0 只读
+        - R1 局部可逆
+        - R2 系统级可逆
+        - R3 系统级实验
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: 契约与不变量
+      description: 头文件契约、错误域、资源所有权、失败/取消/恢复路径
+    validations:
+      required: true
+  - type: textarea
+    id: gates
+    attributes:
+      label: 门禁与默认状态
+      description: 编译期开关、配置门、命令行确认、环境门、审计、冷却；默认是否 OFF
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: |
+        至少包含：构建与回归通过；R2/R3 还需在隔离来宾真实跑通并留证
+        （门禁 → 执行 → 前后读数 → 审计/日记/冷却）
+    validations:
+      required: true
+  - type: textarea
+    id: docs
+    attributes:
+      label: 需要同步的文档
+      description: README / CONTRIBUTING / 头文件注释 / 私有设计文档

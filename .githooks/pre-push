@@ -1,0 +1,44 @@
+#!/bin/sh
+# 推送前门禁：提交信息 + 仓库卫生（编码、禁止路径、公开面、diff --check）。
+# 全量构建请手动跑：pwsh -File scripts/verify.ps1
+# 启用：git config core.hooksPath .githooks
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+
+# 分支保护：禁止直接向 master 推送非合并提交之外的内容（单人维护仍保留提示）。
+branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+if [ "$branch" = "master" ]; then
+  remote_branch=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
+  if [ -n "$remote_branch" ]; then
+    ahead=$(git rev-list --count "$remote_branch..HEAD" 2>/dev/null || echo 0)
+    merge_count=$(git rev-list --merges --count "$remote_branch..HEAD" 2>/dev/null || echo 0)
+    if [ "$ahead" -gt 0 ] && [ "$merge_count" -eq 0 ]; then
+      echo "" >&2
+      echo "pre-push: 你在 master 上有 $ahead 个非合并提交。" >&2
+      echo "  规范要求：代码改动走 task/<issue>/<slug> 分支 + PR 合并（merge commit）。" >&2
+      echo "  仅 hotfix（所有者授权）可直接推；确认无误可用 git push --no-verify 跳过本次提示。" >&2
+      echo "  说明：CONTRIBUTING.md 第 1 节" >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [ -f "$repo_root/scripts/verify.ps1" ]; then
+  if command -v pwsh >/dev/null 2>&1; then
+    ps=pwsh
+  elif command -v powershell >/dev/null 2>&1; then
+    ps=powershell
+  else
+    echo "pre-push: 找不到 PowerShell，跳过静态门禁（CI 仍会判定）。" >&2
+    exit 0
+  fi
+  if ! "$ps" -NoProfile -ExecutionPolicy Bypass -File "$repo_root/scripts/verify.ps1" -Fast; then
+    echo "" >&2
+    echo "pre-push: 静态门禁未通过，推送已被拒绝。" >&2
+    echo "  规则见 CONTRIBUTING.md 第 3 节；临时跳过：git push --no-verify" >&2
+    exit 1
+  fi
+fi
+
+exit 0

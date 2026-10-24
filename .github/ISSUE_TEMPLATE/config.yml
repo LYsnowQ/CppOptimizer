@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全报告
+    url: https://github.com/LYsnowQ/CppOptimizer/security/policy
+    about: 请勿用公开 issue 报告安全问题，按 SECURITY.md 的渠道处理。

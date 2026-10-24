@@ -1,0 +1,61 @@
+name: ci
+
+# 静态门禁在 GitHub 托管 runner 上跑；构建门禁需要 thirdParty（未入库），
+# 因此走自托管 Windows runner，且只在手动触发时执行。
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: 静态门禁（提交信息 / 编码 / 公开面）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 分支命名
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $head = $env:GITHUB_HEAD_REF
+          $pattern = '^(task/[0-9]+/[a-z0-9]+(_[a-z0-9]+)*|dev/[a-z0-9]+(_[a-z0-9]+)*|hotfix/[a-z0-9]+(_[a-z0-9]+)*)$'
+          if ($head -notmatch $pattern) {
+            Write-Error "分支名 '$head' 不合规：task/<issue>/<slug> | dev/<username> | hotfix/<slug>（段内用 _，不用 -）"
+            exit 1
+          }
+          Write-Output "分支名合规：$head"
+
+      - name: 静态门禁脚本
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify.ps1 -Fast -Ci
+
+  build-windows:
+    name: Windows 构建与回归（自托管）
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, windows, cppoptimizer]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 依赖前置检查
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'thirdParty/spdlog/lib/spdlog.lib')) {
+            Write-Error 'thirdParty/ 未就绪：本仓库不提交预编译依赖，请在 runner 上预先准备 thirdParty（见 README 目录结构）。'
+            exit 1
+          }
+          Write-Output 'thirdParty 就绪'
+
+      - name: 全量门禁（三构建 + 全量回归 + 静态检查）
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify.ps1
