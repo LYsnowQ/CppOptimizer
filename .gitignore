@@ -61,3 +61,10 @@ thirdParty/
 /ISOLATION-VM-SETUP.md
 /works/
 
+
+# Actions runner（自托管 runner 的凭据与工作目录，绝不入库）
+actions-runner/
+_work/
+.runner
+.credentials
+.credentials_rsaparams
