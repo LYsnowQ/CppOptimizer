@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     CppOptimizer 提交前门禁（本地钩子、CI 与人工共用一套实现）。
@@ -105,7 +105,7 @@ try {
 
     # ------------------------------------------------------------ 公开面自检
     $publicFiles = @(Get-TrackedFiles @('*.hpp', '*.cpp', '*.h', '*.md', '*.toml', '*.json', '*.txt'))
-    $pattern = 'docs/[0-9A-Za-z]|\[OPT-|\[MOD-|学习|教学|复盘|学习者|任务卡|自由区|批次|learning'
+    $pattern = 'docs/[0-9A-Za-z]|ISOLATION-VM-SETUP|work\.md|works/|AI_test/|\[OPT-|\[MOD-|学习|教学|复盘|学习者|任务卡|自由区|批次|learning'
     $hits = New-Object System.Collections.Generic.List[string]
     foreach ($f in $publicFiles) {
         if ($f -eq 'CONTRIBUTING.md') { continue }  # 规范文件本身描述规则，允许出现词表
