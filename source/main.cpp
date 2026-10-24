@@ -15,6 +15,7 @@
 #include "memory/system_clean_backend.hpp"
 #include "scheduler/thread_tuner.hpp"
 #include "gpu/gpu_heartbeat.hpp"
+#include "disk/disk_observer.hpp"
 #include "memory/working_set.hpp"
 #include "metrics/memory_metrics.hpp"
 #include "metrics/pdh_metrics.hpp"
@@ -1748,6 +1749,34 @@ int RunGpuCommand() {
     std::wcout << L"  adapters : " << adapters.Value().size() << L"\n";
     for (const auto& adapter : adapters.Value()) {
         std::wcout << L"    " << optimizer::gpu::DescribeAdapter(adapter) << L"\n";
+    }
+    return 0;
+}
+
+// --disk：只读卷容量与进程 I/O 摘要（R0）。
+int RunDiskCommand() {
+    auto& backend = optimizer::disk::RealDiskBackend();
+    const auto volumes = backend.ListVolumes();
+    if (!volumes) {
+        ErrorLine{} << L"  disk volumes failed [" << volumes.ErrorValue().operation.c_str() << L"]";
+        return 41;
+    }
+    std::wcout << L"Disk volumes (read-only)\n";
+    for (const auto& volume : volumes.Value()) {
+        std::wcout << L"  " << optimizer::disk::DescribeVolume(volume) << L"\n";
+    }
+    const auto processes = backend.ListProcessIo();
+    if (!processes) {
+        ErrorLine{} << L"  disk process io failed [" << processes.ErrorValue().operation.c_str() << L"]";
+        return 41;
+    }
+    const auto top = optimizer::disk::TopByIo(processes.Value(), 5);
+    std::wcout << L"Top processes by total I/O bytes (read+write)\n";
+    if (top.empty()) {
+        std::wcout << L"  (no readable process counters)\n";
+    }
+    for (const auto& process : top) {
+        std::wcout << optimizer::disk::DescribeProcessIo(process) << L"\n";
     }
     return 0;
 }
@@ -6138,6 +6167,8 @@ void PrintUsage() {
         << L"                             last 20 lines, max 200)\n"
         << L"  CppOptimizer.exe --gpu          Enumerate DXGI adapters and video memory\n"
         << L"                             budget/usage (read-only; degrades cleanly without a GPU)\n"
+        << L"  CppOptimizer.exe --disk         List volumes with capacity/pressure and top\n"
+        << L"                             processes by I/O bytes (read-only, R0)\n"
         << L"  CppOptimizer.exe --scheduler <pid> [--execute]\n"
         << L"                             List process threads and priorities (R0); --execute\n"
         << L"                             raises below-AboveNormal threads (R1; needs the\n"
@@ -6287,6 +6318,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (argc >= 3 && std::wstring_view(argv[1]) == L"--log") {
             return RunLogCommand(argc, argv);
+        }
+        if (argc == 2 && std::wstring_view(argv[1]) == L"--disk") {
+            return RunDiskCommand();
         }
         if (argc == 2 && std::wstring_view(argv[1]) == L"--gpu") {
             return RunGpuCommand();
