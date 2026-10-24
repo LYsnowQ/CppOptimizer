@@ -2656,6 +2656,11 @@ int RunScheduledTaskCommand(int argc, wchar_t* argv[]) {
         return 0;
     }
     if (action == L"install") {
+    // 审计可写前置：注册类动作必须先能留痕，否则拒绝（与 --startup 同口径）。
+    if (!optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath())) {
+        ErrorLine{} << L"  refused: audit trail is not writable (no registration attempted)\n";
+        return 2;
+    }
         std::wstring exePath;
         if (!ResolveExecutablePath(exePath)) {
             ErrorLine{} << L"  cannot resolve current executable path\n";
@@ -2688,6 +2693,11 @@ int RunScheduledTaskCommand(int argc, wchar_t* argv[]) {
         return 0;
     }
     if (action == L"remove") {
+    // 审计可写前置：注册类动作必须先能留痕，否则拒绝（与 --startup 同口径）。
+    if (!optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath())) {
+        ErrorLine{} << L"  refused: audit trail is not writable (no registration attempted)\n";
+        return 2;
+    }
         JournalAction("agent.form_remove", "task", true,
                       optimizer::audit::JournalPhase::Before,
                       "intent: remove scheduled task");
@@ -2734,6 +2744,11 @@ int RunStartupCommand(int argc, wchar_t* argv[]) {
         return 0;
     }
     if (action == L"install") {
+    // 审计可写前置：注册类动作必须先能留痕，否则拒绝（与 --startup 同口径）。
+    if (!optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath())) {
+        ErrorLine{} << L"  refused: audit trail is not writable (no registration attempted)\n";
+        return 2;
+    }
         std::wstring exePath;
         if (!ResolveExecutablePath(exePath)) {
             ErrorLine{} << L"  cannot resolve current executable path\n";
@@ -4772,6 +4787,11 @@ int RunServiceInstallCommand(int argc, wchar_t* argv[]) {
     if (argc >= 4) {
         identity.executablePath = argv[3];
     }
+    // 审计可写前置：注册类动作必须先能留痕，否则拒绝（与 --startup 同口径）。
+    if (!optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath())) {
+        ErrorLine{} << L"  refused: audit trail is not writable (no registration attempted)\n";
+        return 2;
+    }
     JournalAction("agent.form_install", "service", true,
                   optimizer::audit::JournalPhase::Before,
                   "intent: install SCM service (needs admin)");
@@ -4805,6 +4825,11 @@ int RunServiceInstallCommand(int argc, wchar_t* argv[]) {
 
 int RunServiceUninstallCommand() {
     // --service uninstall：移除服务（需要管理员）。
+    // 审计可写前置：注册类动作必须先能留痕，否则拒绝（与 --startup 同口径）。
+    if (!optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath())) {
+        ErrorLine{} << L"  refused: audit trail is not writable (no registration attempted)\n";
+        return 2;
+    }
     JournalAction("agent.form_remove", "service", true,
                   optimizer::audit::JournalPhase::Before,
                   "intent: uninstall SCM service (needs admin)");
