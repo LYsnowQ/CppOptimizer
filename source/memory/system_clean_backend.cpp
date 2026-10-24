@@ -3,6 +3,7 @@
 #include "memory/working_set.hpp"
 
 #include <windows.h>
+#include <psapi.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,7 @@ struct SystemMemoryListInformation {
 // 特权名（winnt.h 的 SE_*_NAME 宏在部分 SDK/精简头配置下不可见，这里用字面量，
 // 与 LookupPrivilegeValueW 的文档口径一致）。
 constexpr wchar_t kSeProfileSingleProcess[] = L"SeProfileSingleProcessPrivilege";
+constexpr wchar_t kSeIncreaseQuota[] = L"SeIncreaseQuotaPrivilege";
 
 // SystemInformationClass = SystemMemoryListInformation（winternl/ntifs 口径；
 // Win10/11 保持一致）。
@@ -133,8 +135,32 @@ constexpr unsigned long kMemoryPurgeStandbyList = 4;
     return common::Result<void>::Success();
 }
 
-} // namespace
+// S4：系统文件缓存修剪。需要 SeIncreaseQuotaPrivilege。
+// 语义：把文件缓存的上下限都置为 -1 会触发系统回收缓存页（页面只能按需重新读入，
+// 不可逆，因此只在隔离环境执行）。单次调用，不做重试。
+[[nodiscard]] common::Result<void> TrimSystemFileCache() noexcept {
+    if (!EnablePrivilege(kSeIncreaseQuota)) {
+        return common::Result<void>::Failure(common::Error::Unsupported(
+            "TrimSystemFileCache",
+            L"未取得 SeIncreaseQuotaPrivilege（文件缓存修剪需要管理员权限）"));
+    }
+    const SIZE_T noLimit = static_cast<SIZE_T>(-1);
+    if (::SetSystemFileCacheSize(noLimit, noLimit, 0) == FALSE) {
+        return common::Result<void>::Failure(common::Error::FromWin32(
+            static_cast<std::uint32_t>(::GetLastError()), "SetSystemFileCacheSize"));
+    }
+    return common::Result<void>::Success();
+}
 
+} // namespace
+std::optional<std::uint64_t> QuerySystemCacheBytes() noexcept {
+    PERFORMANCE_INFORMATION info{};
+    if (::GetPerformanceInfo(&info, sizeof(info)) == FALSE) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(info.SystemCache) *
+           static_cast<std::uint64_t>(info.PageSize);
+}
 std::optional<std::uint64_t> QueryStandbyBytes() noexcept {
     const HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
     if (ntdll == nullptr) {
@@ -171,7 +197,7 @@ bool HasRequiredPrivilege(CleanKind kind) noexcept {
         case CleanKind::StandbyListPurge:
             return TokenHasPrivilege(kSeProfileSingleProcess);
         case CleanKind::SystemFileCacheTrim:
-            return false; // S4 尚未实现
+            return TokenHasPrivilege(kSeIncreaseQuota);
     }
     return false;
 }
@@ -183,9 +209,7 @@ common::Result<void> SystemMemoryCleanBackend::Execute(CleanKind kind) {
         case CleanKind::StandbyListPurge:
             return PurgeStandbyList();
         case CleanKind::SystemFileCacheTrim:
-            return common::Result<void>::Failure(common::Error::Unsupported(
-                "SystemMemoryCleanBackend::Execute",
-                L"系统文件缓存修剪（S4）尚未实现（R3；仅在隔离环境显式开启时执行）"));
+            return TrimSystemFileCache();
     }
     return common::Result<void>::Failure(common::Error::Unsupported(
         "SystemMemoryCleanBackend::Execute", L"未知的清理步骤"));

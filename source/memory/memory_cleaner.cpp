@@ -55,8 +55,12 @@ bool CleanStepImplemented(CleanKind kind) noexcept {
             return false;
 #endif
         case CleanKind::SystemFileCacheTrim:
-            // S4 真实后端尚未实现（即使编译期开关打开，后端仍如实返回 Unsupported）。
+            // S4 真实后端已实现；同样只在编译期显式打开时才算就绪。
+#if defined(OPTIMIZER_ENABLE_FILE_CACHE_TRIM)
+            return true;
+#else
             return false;
+#endif
     }
     return false;
 }

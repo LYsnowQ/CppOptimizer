@@ -638,6 +638,7 @@ int RunMemoryCleanExecuteCommand(
                : std::nullopt;
     const auto availBefore = QueryAvailablePhysicalBytes();
     const auto standbyBefore = optimizer::memory::QueryStandbyBytes();
+    const auto cacheBefore = optimizer::memory::QuerySystemCacheBytes();
     JournalAction("memory.clean_execute", target, true,
                   optimizer::audit::JournalPhase::Before,
                   "intent: execute the planned clean steps (gates passed, readiness checked)");
@@ -649,10 +650,13 @@ int RunMemoryCleanExecuteCommand(
               : std::nullopt;
     const auto availAfter = QueryAvailablePhysicalBytes();
     const auto standbyAfter = optimizer::memory::QueryStandbyBytes();
+    const auto cacheAfter = optimizer::memory::QuerySystemCacheBytes();
     const auto delta = optimizer::memory::MakeWorkingSetDelta(beforeReading, afterReading);
     std::string deltaText = optimizer::memory::DescribeWorkingSetDelta(delta);
     deltaText += ' ';
     deltaText += DescribeByteDelta("standby", standbyBefore, standbyAfter);
+    deltaText += ' ';
+    deltaText += DescribeByteDelta("cache", cacheBefore, cacheAfter);
     deltaText += ' ';
     deltaText += DescribeByteDelta("avail", availBefore, availAfter);
     bool ok = false;
