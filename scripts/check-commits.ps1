@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Conventional Commits 校验（本地钩子与 CI 共用）。
@@ -29,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 
 $types = @('feat', 'fix', 'refactor', 'perf', 'docs', 'test', 'build', 'ci', 'chore', 'style')
 $scopes = @(
-    'power', 'memory', 'policy', 'priority',
+    'power', 'memory', 'scheduler', 'gpu', 'disk', 'policy', 'priority',
     'ipc', 'service', 'activity', 'metrics', 'process', 'config', 'logger', 'platform', 'audit',
     'build', 'docs', 'tooling', 'repo'
 )
