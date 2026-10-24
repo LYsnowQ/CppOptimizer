@@ -148,9 +148,10 @@ git config core.hooksPath .githooks
 ## 9. CI 与 Runner
 
 - **静态门禁**：GitHub 托管 runner（`ubuntu-latest`，自带 `pwsh`）执行 `scripts/verify.ps1 -Fast -Ci`。
-- **构建门禁**：自托管 Windows runner（label `cppoptimizer`），手动触发 `workflow_dispatch`；
-  因为 `thirdParty/` 不入库，托管 runner 拉不到预编译依赖。
-- 注册自托管 runner 的步骤与脚本见 `.github/workflows/ci.yml` 顶部注释与 `scripts/setup-runner.ps1`。
+- **构建门禁**：**当前在本机执行**（`pwsh -File scripts/verify.ps1`），不注册自托管 runner。
+  需要 GitHub 侧构建时再启用：`scripts/setup-runner.ps1`（token 只在页面取用，不入库），
+  标签须含 `cppoptimizer`，`workflow_dispatch` 手动触发。
+- 不启用 runner 不影响任何门禁：本地脚本就是同一套实现。
 - 单人维护时**不启用**分支保护与必需检查；进入多人协作模式后再开启（见 §1.1）。
 
 ## 10. 发布
