@@ -12,6 +12,7 @@
 #include "logger/logger.hpp"
 #include "memory/memory_tuner.hpp"
 #include "memory/memory_cleaner.hpp"
+#include "memory/system_clean_backend.hpp"
 #include "memory/working_set.hpp"
 #include "metrics/memory_metrics.hpp"
 #include "metrics/pdh_metrics.hpp"
@@ -492,6 +493,40 @@ std::wstring WidenAscii(std::string_view text) {
     return std::wstring(text.begin(), text.end());
 }
 
+// 只读：当前可用物理内存（字节）。失败返回 nullopt——不把“没读到”写成 0。
+std::optional<std::uint64_t> QueryAvailablePhysicalBytes() noexcept {
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (::GlobalMemoryStatusEx(&status) == FALSE) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(status.ullAvailPhys);
+}
+
+// S3 的证据口径：Standby 列表清理的直接判据是“Standby 页字节数显著下降”。
+// 通用字节前后读数（缺一侧显示 unknown，不伪造 0）。
+std::string DescribeByteDelta(std::string_view prefix,
+                              const std::optional<std::uint64_t>& before,
+                              const std::optional<std::uint64_t>& after) {
+    std::string text(prefix);
+    text += "_before=";
+    text += before.has_value() ? std::to_string(*before) : std::string("unknown");
+    text += ' ';
+    text += std::string(prefix);
+    text += "_after=";
+    text += after.has_value() ? std::to_string(*after) : std::string("unknown");
+    text += ' ';
+    text += std::string(prefix);
+    text += "_delta=";
+    if (before.has_value() && after.has_value()) {
+        text += std::to_string(static_cast<std::int64_t>(*after) -
+                               static_cast<std::int64_t>(*before));
+    } else {
+        text += "unknown";
+    }
+    return text;
+}
+
 // `--memory-clean <config> --execute-self-trim`：**本进程**工作集修剪的真实执行路径（R1）。
 // 契约（与 guides/31 §3/§5 一致）：
 // - **六道门全通才执行**，否则只打印**首个阻塞门**并拒绝（exit 2、零系统调用）；
@@ -601,17 +636,25 @@ int RunMemoryCleanExecuteCommand(
     const std::optional<optimizer::memory::WorkingSetReading> beforeReading =
         before ? std::optional<optimizer::memory::WorkingSetReading>(before.Value())
                : std::nullopt;
+    const auto availBefore = QueryAvailablePhysicalBytes();
+    const auto standbyBefore = optimizer::memory::QueryStandbyBytes();
     JournalAction("memory.clean_execute", target, true,
                   optimizer::audit::JournalPhase::Before,
                   "intent: execute the planned clean steps (gates passed, readiness checked)");
-    optimizer::memory::SelfWorkingSetTrimBackend backend;
+    optimizer::memory::SystemMemoryCleanBackend backend;
     const auto executed = optimizer::memory::ExecuteMemoryCleanPlan(plan, backend);
     const auto after = optimizer::memory::QueryOwnWorkingSet();
     const std::optional<optimizer::memory::WorkingSetReading> afterReading =
         after ? std::optional<optimizer::memory::WorkingSetReading>(after.Value())
               : std::nullopt;
+    const auto availAfter = QueryAvailablePhysicalBytes();
+    const auto standbyAfter = optimizer::memory::QueryStandbyBytes();
     const auto delta = optimizer::memory::MakeWorkingSetDelta(beforeReading, afterReading);
-    const std::string deltaText = optimizer::memory::DescribeWorkingSetDelta(delta);
+    std::string deltaText = optimizer::memory::DescribeWorkingSetDelta(delta);
+    deltaText += ' ';
+    deltaText += DescribeByteDelta("standby", standbyBefore, standbyAfter);
+    deltaText += ' ';
+    deltaText += DescribeByteDelta("avail", availBefore, availAfter);
     bool ok = false;
     std::wstring detail;
     if (executed) {
@@ -646,8 +689,18 @@ int RunMemoryCleanExecuteCommand(
     if (!ok) {
         ErrorLine{} << L"  detail   : " << detail << L"\n";
     }
-    AuditAction("memory.clean_execute", optimizer::audit::RiskLevel::R1, target, ok,
-                ToAsciiToken(detail), deltaText);
+    // 审计等级按“本次真正包含的最重步骤”声明：含 R3 步骤就记 R3，否则 R1。
+    bool hasR3Step = false;
+    for (const auto step : plan.steps) {
+        if (step != optimizer::memory::CleanKind::WorkingSetTrim) {
+            hasR3Step = true;
+            break;
+        }
+    }
+    AuditAction("memory.clean_execute",
+                hasR3Step ? optimizer::audit::RiskLevel::R3
+                          : optimizer::audit::RiskLevel::R1,
+                target, ok, ToAsciiToken(detail), deltaText);
     if (!ok) {
         return 2;
     }

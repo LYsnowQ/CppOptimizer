@@ -43,6 +43,7 @@ add_executable(CppOptimizer
     source/logger/logger.cpp
     source/memory/memory_tuner.cpp
     source/memory/memory_cleaner.cpp
+    source/memory/system_clean_backend.cpp
     source/memory/working_set.cpp
     source/metrics/memory_metrics.cpp
     source/metrics/pdh_metrics.cpp

@@ -43,8 +43,22 @@ const char* CleanKindCapabilityId(CleanKind kind) noexcept {
 }
 
 bool CleanStepImplemented(CleanKind kind) noexcept {
-    // 只有本进程工作集修剪有真实后端；S3/S4 的占位后端一律 Unsupported。
-    return kind == CleanKind::WorkingSetTrim;
+    switch (kind) {
+        case CleanKind::WorkingSetTrim:
+            // 后端恒存在；是否允许执行由编译期门（OPTIMIZER_ENABLE_MEMORY_CLEAN）判定。
+            return true;
+        case CleanKind::StandbyListPurge:
+            // S3 真实后端已实现，但**默认不编进**：只有构建时显式打开该能力才算“就绪”。
+#if defined(OPTIMIZER_ENABLE_STANDBY_PURGE)
+            return true;
+#else
+            return false;
+#endif
+        case CleanKind::SystemFileCacheTrim:
+            // S4 真实后端尚未实现（即使编译期开关打开，后端仍如实返回 Unsupported）。
+            return false;
+    }
+    return false;
 }
 
 MemoryCleanPlan PlanMemoryClean(optimizer::config::CleanLevel requested,
