@@ -1,4 +1,4 @@
-# Contributing to CppOptimizer
+﻿# Contributing to CppOptimizer
 
 > 本文件是**唯一的公开协作规范**。私有设计/工程文档（本地 `docs/`，不随仓库分发）只做补充。
 >
@@ -178,6 +178,8 @@ PR 正文必填段落（模板逐字保留）：目的、关联、变更范围�
 - 任何真实凭据（token/密码/私钥）——发现即视为阻塞，需轮换。
 
 ## 12. 文档同步 `[通用]`
+
+**公开面红线**：README/CONTRIBUTING/SECURITY/源码注释只能引用**已入库**的内容；不得出现 `docs/`、`works/`、`AI_test/`、`ISOLATION-VM-SETUP.md`、`work.md` 等未上传路径。`scripts/verify.ps1` 会拦截。
 
 - 模块行为变化 → 同步 README 特性条目与相关头文件注释；
 - 命令/开关/字段变化 → 同步 README 与 `--help`；
