@@ -39,6 +39,9 @@
     <ClInclude Include="include\gpu\gpu_heartbeat.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\disk\disk_observer.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="include\memory\system_clean_backend.hpp">
       <Filter>include\memory</Filter>
     </ClInclude>
@@ -142,6 +145,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\gpu\gpu_heartbeat.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\disk\disk_observer.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="source\memory\system_clean_backend.cpp">

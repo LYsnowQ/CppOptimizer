@@ -38,6 +38,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
   并点名该步骤。真实的 R3 动作只在隔离环境执行（隔离环境由运行者自行准备并确认）
 - **GPU 心跳（R0，只读）**：`--gpu` 枚举 DXGI 适配器并读显存预算/用量，按用量百分比分级（Low/Medium/High）；
   无独立显卡或 DXGI 不可用时干净降级，不伪造读数。
+- **磁盘观测（R0，只读）**：`--disk` 列出卷容量/使用率分级与进程 I/O 前十；不执行任何清理动作。
 - **电源计划切换（R2，可逆）**：`--power-scheme status|saved` 只读读回当前活动计划 GUID 与保存的恢复依据；
   `--power-scheme <balanced|high-performance|power-saver|GUID> [config.toml] [--acknowledge-system-wide-side-effects]`
   为**切换路径**：**先读回并保存原 GUID（读不到则拒绝切换——没有回滚信息不得改全局状态）→ 切换 → 只读读回校验**；

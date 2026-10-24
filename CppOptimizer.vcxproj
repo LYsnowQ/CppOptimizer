@@ -107,6 +107,7 @@
     <ClInclude Include="include\memory\memory_cleaner.hpp" />
     <ClInclude Include="include\scheduler\thread_tuner.hpp" />
     <ClInclude Include="include\gpu\gpu_heartbeat.hpp" />
+    <ClInclude Include="include\disk\disk_observer.hpp" />
     <ClInclude Include="include\memory\system_clean_backend.hpp" />
     <ClInclude Include="include\memory\working_set.hpp" />
     <ClInclude Include="include\metrics\memory_metrics.hpp" />
@@ -146,6 +147,7 @@
     <ClCompile Include="source\memory\memory_cleaner.cpp" />
     <ClCompile Include="source\scheduler\thread_tuner.cpp" />
     <ClCompile Include="source\gpu\gpu_heartbeat.cpp" />
+    <ClCompile Include="source\disk\disk_observer.cpp" />
     <ClCompile Include="source\memory\system_clean_backend.cpp" />
     <ClCompile Include="source\memory\working_set.cpp" />
     <ClCompile Include="source\metrics\memory_metrics.cpp" />

@@ -48,6 +48,7 @@ add_executable(CppOptimizer
     source/memory/working_set.cpp
     source/scheduler/thread_tuner.cpp
     source/gpu/gpu_heartbeat.cpp
+    source/disk/disk_observer.cpp
     source/metrics/memory_metrics.cpp
     source/metrics/pdh_metrics.cpp
     source/platform/native_api.cpp
@@ -209,6 +210,7 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
         tests/gpu_tests.cpp
         source/common/error.cpp
         source/gpu/gpu_heartbeat.cpp
+    source/disk/disk_observer.cpp
     )
     target_include_directories(CppOptimizerGpuTests PRIVATE include)
     target_compile_features(CppOptimizerGpuTests PRIVATE cxx_std_20)
@@ -220,6 +222,22 @@ if(BUILD_TESTING AND OPTIMIZER_BUILD_TESTS)
     )
     target_link_libraries(CppOptimizerGpuTests PRIVATE dxgi)
     add_test(NAME GpuTests COMMAND CppOptimizerGpuTests)
+
+    add_executable(CppOptimizerDiskTests
+        tests/disk_tests.cpp
+        source/common/error.cpp
+        source/disk/disk_observer.cpp
+    )
+    target_include_directories(CppOptimizerDiskTests PRIVATE include)
+    target_compile_features(CppOptimizerDiskTests PRIVATE cxx_std_20)
+    target_compile_definitions(CppOptimizerDiskTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(CppOptimizerDiskTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /sdl /Zc:__cplusplus /utf-8>
+    )
+    target_link_libraries(CppOptimizerDiskTests PRIVATE psapi)
+    add_test(NAME DiskTests COMMAND CppOptimizerDiskTests)
 
     add_executable(CppOptimizerMetricsTests
         tests/memory_metrics_tests.cpp
