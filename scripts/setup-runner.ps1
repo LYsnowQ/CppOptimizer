@@ -30,7 +30,7 @@
     附加标签（逗号分隔），必须包含 cppoptimizer 以匹配 ci.yml。
 
 .PARAMETER Version
-    actions runner 版本（默认取最新发布）。
+    actions runner 版本；留空时自动查询最新 release。
 
 .PARAMETER Uninstall
     停止并移除本机 runner（证书与配置留在 RunnerRoot，可手工删除）。
@@ -40,7 +40,7 @@ param(
     [string] $RunnerRoot = 'C:\actions-runner-cppoptimizer',
     [string] $Name = "$env:COMPUTERNAME-cppoptimizer",
     [string] $Labels = 'cppoptimizer,windows',
-    [string] $Version = '2.328.0',
+    [string] $Version = '',
     [switch] $Uninstall
 )
 
@@ -83,6 +83,12 @@ New-Item -ItemType Directory -Path $RunnerRoot -Force | Out-Null
 $zip = Join-Path $RunnerRoot 'actions-runner.zip'
 
 if (-not (Test-Path -LiteralPath $configCmd)) {
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/actions/runner/releases/latest' -UseBasicParsing
+        $Version = $release.tag_name.TrimStart('v')
+        Write-Output "最新 runner 版本: $Version"
+    }
     $url = "https://github.com/actions/runner/releases/download/v$Version/actions-runner-win-x64-$Version.zip"
     Write-Output "下载 runner: $url"
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
