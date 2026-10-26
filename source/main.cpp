@@ -3269,6 +3269,12 @@ int RunPowerLockCommand(int argc, wchar_t* argv[]) {
         }
     }
 
+    // 审计可写前置：动作必须先能留痕，否则拒绝（与 --startup 同口径）。
+    if (!optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath())) {
+        ErrorLine{} << L"  refused: audit trail is not writable (no system call was made)\n";
+        return 2;
+    }
+
     auto backend = optimizer::power::CreateWin32Backend();
     optimizer::power::PowerLocker locker(backend);
 
@@ -3363,6 +3369,12 @@ int RunPriorityBoostCommand(int argc, wchar_t* argv[]) {
     const auto level = priorityConfig.maxLevel;
     if (level == optimizer::config::PriorityLevel::None) {
         ErrorLine{} << L"  [priority].max_level is \"none\"; nothing to boost\n";
+        return 2;
+    }
+
+    // 审计可写前置：动作必须先能留痕，否则拒绝（与 --startup 同口径）。
+    if (!optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath())) {
+        ErrorLine{} << L"  refused: audit trail is not writable (no system call was made)\n";
         return 2;
     }
 
@@ -4792,6 +4804,21 @@ int RunServiceInstallCommand(int argc, wchar_t* argv[]) {
         ErrorLine{} << L"  refused: audit trail is not writable (no registration attempted)\n";
         return 2;
     }
+    // 冷却门：服务注册是持久化系统变更；成功执行后写入冷却台账。
+    // uninstall 属回退动作不受冷却限制（回滚不得被限频卡住），键与动作路径同源。
+    {
+        const auto ledger =
+            optimizer::policy::ReadCooldownLedger(DefaultCooldownLedgerPath());
+        if (ledger && !optimizer::policy::EvaluateCooldownGate(
+                           ledger.Value(),
+                           optimizer::policy::kServiceRegistrationCapabilityId,
+                           static_cast<std::int64_t>(std::time(nullptr)),
+                           optimizer::policy::kDefaultCooldown)) {
+            ErrorLine{} << L"  --service install refused [capability: service.registration,"
+                           L" first blocked gate: cooldown] (no registration attempted)\n";
+            return 2;
+        }
+    }
     JournalAction("agent.form_install", "service", true,
                   optimizer::audit::JournalPhase::Before,
                   "intent: install SCM service (needs admin)");
@@ -4813,6 +4840,14 @@ int RunServiceInstallCommand(int argc, wchar_t* argv[]) {
         return 2;
     }
     AuditAgentFormAction(optimizer::service::AgentForm::Service, true, true);
+    const auto recorded = optimizer::policy::RecordCooldownRun(
+        DefaultCooldownLedgerPath(),
+        optimizer::policy::kServiceRegistrationCapabilityId,
+        static_cast<std::int64_t>(std::time(nullptr)));
+    if (!recorded) {
+        optimizer::common::WriteConsoleLine(
+            L"  cooldown : not recorded (action already applied)");
+    }
     std::wostringstream done;
     done << L"Service installed: " << kServiceName
          << L" (demand start, requires SCM start)";
@@ -4826,6 +4861,7 @@ int RunServiceInstallCommand(int argc, wchar_t* argv[]) {
 int RunServiceUninstallCommand() {
     // --service uninstall：移除服务（需要管理员）。
     // 审计可写前置：注册类动作必须先能留痕，否则拒绝（与 --startup 同口径）。
+    // 卸载是安装的回退动作，不受冷却门限制（回滚不得被限频卡住）。
     if (!optimizer::audit::ProbeAuditWritable(DefaultAuditLogPath())) {
         ErrorLine{} << L"  refused: audit trail is not writable (no registration attempted)\n";
         return 2;
