@@ -112,6 +112,9 @@ inline constexpr std::string_view kStandbyPurgeCapabilityId =
 inline constexpr std::string_view kSchedulerTunerCapabilityId = "scheduler.tuner";
 inline constexpr std::string_view kFileCacheTrimCapabilityId =
     "memory.file_cache_trim";
+// 服务注册（SCM install）：持久化系统变更；uninstall 属回退动作，不受冷却限制。
+inline constexpr std::string_view kServiceRegistrationCapabilityId =
+    "service.registration";
 
 // 读取台账：文件不存在 = 无可记录（Success + 空台账，不是错误）；内容信封不符亦按空台账处理；
 // 读取 IO 失败如实返回 Failure。

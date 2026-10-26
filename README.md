@@ -64,7 +64,7 @@ Windows x64 用户态系统性能观测与受控优化工具。
 - **动作日记（仅本地存储）**：每个危险/注册类动作按**操作前 → 操作后 → 操作后状态**三段**实时**追加到独立的
   本地文件 `%LOCALAPPDATA%\CppOptimizerction-journal.log`（逐次留痕、不聚合），与审计文件分工：审计按操作聚合计数、
   可压缩，日记回答“改之前是什么、改了什么、改之后是什么”
-- **动作审计覆盖面**：`--policy` 的 R1 动作、**直接 CLI 的 R1 动作**（`--power-lock` 的 hold/release、`--priority-boost` 的 boost/unboost）与**注册类动作**（自启动项/计划任务/SCM 服务的安装与卸载，含成功与失败）都会写入每用户审计文件（`operationId` 与策略执行器一致，便于按操作聚合）
+- **动作审计覆盖面**：`--policy` 的 R1 动作、**直接 CLI 的 R1 动作**（`--power-lock` 的 hold/release、`--priority-boost` 的 boost/unboost）与**注册类动作**（自启动项/计划任务/SCM 服务的安装与卸载，含成功与失败）都会写入每用户审计文件（`operationId` 与策略执行器一致，便于按操作聚合）；上述直接 CLI 动作与注册类动作均有**审计可写前置守卫**——审计文件不可写即在**任何系统调用之前**拒绝（exit 2），不出现"动作成功但留痕缺失"；`--service install` 另有**冷却门**（能力键 `service.registration`，默认 15 分钟，成功才写台账），`uninstall` 属回退动作不受冷却限制
 - **异常退出恢复门禁**：宿主在 `--ipc-facts` 受理前检查上次会话是否异常退出（恢复标记）；默认暂停 Agent 受理并要求 `--confirm-recovery` 确认；`[application].safe_mode_on_recovery_error = false` 时**不阻断**，但该事实仍会写入日志与横幅（**可见性不可关闭**）
 - **平台诊断**：`--diagnose` Native API 能力探测（只读）
 - **中文环境支持**：面向中文 Windows，内部宽字符（UTF-16）、日志/存储 UTF-8、控制台/日志/错误消息均可承载中文（直连控制台按宽字符直写，重定向到文件/管道按 UTF-8 字节输出）
